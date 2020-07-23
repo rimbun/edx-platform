@@ -14,6 +14,8 @@ from openedx.features.content_type_gating.models import ContentTypeGatingConfig
 from student.models import CourseEnrollment
 
 
+@COURSE_HOME_MICROFRONTEND.override(active=True)
+@COURSE_HOME_MICROFRONTEND_DATES_TAB.override(active=True)
 @ddt.ddt
 class DatesTabTestViews(BaseCourseHomeTests):
     """
@@ -24,8 +26,6 @@ class DatesTabTestViews(BaseCourseHomeTests):
         self.url = reverse('course-home-dates-tab', args=[self.course.id])
         ContentTypeGatingConfig.objects.create(enabled=True, enabled_as_of=datetime(2017, 1, 1))
 
-    @COURSE_HOME_MICROFRONTEND.override(active=True)
-    @COURSE_HOME_MICROFRONTEND_DATES_TAB.override(active=True)
     @ddt.data(CourseMode.AUDIT, CourseMode.VERIFIED)
     def test_get_authenticated_enrolled_user(self, enrollment_mode):
         CourseEnrollment.enroll(self.user, self.course.id, enrollment_mode)
@@ -37,8 +37,6 @@ class DatesTabTestViews(BaseCourseHomeTests):
         self.assertEqual(response.data.get('learner_is_full_access'), enrollment_mode == CourseMode.VERIFIED)
         self.assertTrue(all(block.get('learner_has_access') for block in date_blocks))
 
-    @COURSE_HOME_MICROFRONTEND.override(active=True)
-    @COURSE_HOME_MICROFRONTEND_DATES_TAB.override(active=True)
     def test_get_authenticated_user_not_enrolled(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
@@ -49,15 +47,11 @@ class DatesTabTestViews(BaseCourseHomeTests):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 401)
 
-    @COURSE_HOME_MICROFRONTEND.override(active=True)
-    @COURSE_HOME_MICROFRONTEND_DATES_TAB.override(active=True)
     def test_get_unknown_course(self):
         url = reverse('course-home-dates-tab', args=['course-v1:unknown+course+2T2020'])
         response = self.client.get(url)
         self.assertEqual(response.status_code, 404)
 
-    @COURSE_HOME_MICROFRONTEND.override(active=True)
-    @COURSE_HOME_MICROFRONTEND_DATES_TAB.override(active=True)
     def test_banner_data_is_returned(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
@@ -66,8 +60,6 @@ class DatesTabTestViews(BaseCourseHomeTests):
         self.assertContains(response, 'content_type_gating_enabled')
         self.assertContains(response, 'verified_upgrade_link')
 
-    @COURSE_HOME_MICROFRONTEND.override(active=True)
-    @COURSE_HOME_MICROFRONTEND_DATES_TAB.override(active=True)
     def test_masquerade(self):
         self.switch_to_staff()
         CourseEnrollment.enroll(self.user, self.course.id, 'audit')

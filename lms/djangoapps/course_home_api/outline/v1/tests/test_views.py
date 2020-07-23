@@ -7,6 +7,7 @@ from django.urls import reverse
 
 from course_modes.models import CourseMode
 from lms.djangoapps.course_home_api.tests.utils import BaseCourseHomeTests
+from lms.djangoapps.course_home_api.toggles import COURSE_HOME_MICROFRONTEND, COURSE_HOME_MICROFRONTEND_OUTLINE_TAB
 from openedx.core.djangoapps.user_api.preferences.api import set_user_preference
 from openedx.core.djangoapps.user_api.tests.factories import UserCourseTagFactory
 from openedx.features.course_experience import COURSE_ENABLE_UNENROLLED_ACCESS_FLAG
@@ -15,6 +16,8 @@ from student.tests.factories import UserFactory
 from xmodule.course_module import COURSE_VISIBILITY_PUBLIC
 
 
+@COURSE_HOME_MICROFRONTEND.override(active=True)
+@COURSE_HOME_MICROFRONTEND_OUTLINE_TAB.override(active=True)
 @ddt.ddt
 class OutlineTabTestViews(BaseCourseHomeTests):
     """
@@ -97,7 +100,18 @@ class OutlineTabTestViews(BaseCourseHomeTests):
         handouts_html = self.client.get(self.url).data['handouts_html']
         self.assertEqual(handouts_html, '<p>Hi</p>' if handouts_visible else '')
 
-    # TODO: write test_get_unknown_course when more data is pulled into the Outline Tab API
+    def test_get_unknown_course(self):
+        url = reverse('course-home-outline-tab', args=['course-v1:unknown+course+2T2020'])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 404)
+
+    @COURSE_HOME_MICROFRONTEND.override(active=True)
+    @COURSE_HOME_MICROFRONTEND_OUTLINE_TAB.override(active=False)
+    @ddt.data(CourseMode.AUDIT, CourseMode.VERIFIED)
+    def test_waffle_flag_disabled(self, enrollment_mode):
+        CourseEnrollment.enroll(self.user, self.course.id, enrollment_mode)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 404)
 
     @ddt.data(True, False)
     def test_welcome_message(self, welcome_message_is_dismissed):
