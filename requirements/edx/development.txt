@@ -48,7 +48,7 @@ colorama==0.4.1           # via -r requirements/edx/testing.txt, radon
 contextlib2==0.6.0.post1  # via -r requirements/edx/testing.txt
 coreapi==2.3.3            # via -r requirements/edx/testing.txt, drf-yasg
 coreschema==0.0.4         # via -r requirements/edx/testing.txt, coreapi, drf-yasg
-coverage==5.2             # via -r requirements/edx/testing.txt, pytest-cov
+coverage==5.2.1           # via -r requirements/edx/testing.txt, pytest-cov
 git+https://github.com/nedbat/coverage_pytest_plugin.git@29de030251471e200ff255eb9e549218cd60e872#egg=coverage_pytest_plugin==0.0  # via -r requirements/edx/testing.txt
 crowdsourcehinter-xblock==0.6  # via -r requirements/edx/testing.txt
 cryptography==3.0         # via -r requirements/edx/testing.txt, django-fernet-fields, edx-enterprise, pdfminer.six, pyjwt, social-auth-core
@@ -282,7 +282,7 @@ slumber==0.7.1            # via -r requirements/edx/testing.txt, edx-bulk-grades
 smmap==3.0.4              # via -r requirements/edx/testing.txt, gitdb
 snowballstemmer==2.0.0    # via sphinx
 social-auth-app-django==4.0.0  # via -r requirements/edx/testing.txt
-social-auth-core==3.3.3   # via -r requirements/edx/testing.txt, social-auth-app-django
+git+https://github.com/python-social-auth/social-core.git@9d93069564a60495e0ebd697b33e16fcff14195b#egg=social-auth-core==3.4.0  # via -r requirements/edx/testing.txt, social-auth-app-django
 sorl-thumbnail==12.6.3    # via -r requirements/edx/testing.txt, django-wiki
 sortedcontainers==2.2.2   # via -r requirements/edx/testing.txt, pdfminer.six
 soupsieve==2.0.1          # via -r requirements/edx/testing.txt, beautifulsoup4
@@ -314,7 +314,7 @@ unidiff==0.6.0            # via -r requirements/edx/testing.txt, coverage-pytest
 uritemplate==3.0.1        # via -r requirements/edx/testing.txt, coreapi, drf-yasg
 urllib3==1.25.10          # via -r requirements/edx/testing.txt, elasticsearch, geoip2, requests, selenium, transifex-client
 user-util==0.2            # via -r requirements/edx/testing.txt
-virtualenv==20.0.27       # via -r requirements/edx/testing.txt, tox
+virtualenv==20.0.28       # via -r requirements/edx/testing.txt, tox
 voluptuous==0.11.7        # via -r requirements/edx/testing.txt, ora2
 vulture==1.5              # via -r requirements/edx/development.in
 watchdog==0.10.3          # via -r requirements/edx/testing.txt

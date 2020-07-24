@@ -47,7 +47,7 @@ colorama==0.4.1           # via radon
 contextlib2==0.6.0.post1  # via -r requirements/edx/base.txt
 coreapi==2.3.3            # via -r requirements/edx/base.txt, drf-yasg
 coreschema==0.0.4         # via -r requirements/edx/base.txt, coreapi, drf-yasg
-coverage==5.2             # via -r requirements/edx/coverage.txt, pytest-cov
+coverage==5.2.1           # via -r requirements/edx/coverage.txt, pytest-cov
 git+https://github.com/nedbat/coverage_pytest_plugin.git@29de030251471e200ff255eb9e549218cd60e872#egg=coverage_pytest_plugin==0.0  # via -r requirements/edx/testing.in
 crowdsourcehinter-xblock==0.6  # via -r requirements/edx/base.txt
 cryptography==3.0         # via -r requirements/edx/base.txt, django-fernet-fields, edx-enterprise, pdfminer.six, pyjwt, social-auth-core
@@ -270,7 +270,7 @@ six==1.15.0               # via -r requirements/edx/base.txt, -r requirements/ed
 slumber==0.7.1            # via -r requirements/edx/base.txt, edx-bulk-grades, edx-enterprise, edx-rest-api-client
 smmap==3.0.4              # via gitdb
 social-auth-app-django==4.0.0  # via -r requirements/edx/base.txt
-social-auth-core==3.3.3   # via -r requirements/edx/base.txt, social-auth-app-django
+git+https://github.com/python-social-auth/social-core.git@9d93069564a60495e0ebd697b33e16fcff14195b#egg=social-auth-core==3.4.0  # via -r requirements/edx/base.txt, social-auth-app-django
 sorl-thumbnail==12.6.3    # via -r requirements/edx/base.txt, django-wiki
 sortedcontainers==2.2.2   # via -r requirements/edx/base.txt, pdfminer.six
 soupsieve==2.0.1          # via -r requirements/edx/base.txt, beautifulsoup4
@@ -293,7 +293,7 @@ unidiff==0.6.0            # via -r requirements/edx/testing.in, coverage-pytest-
 uritemplate==3.0.1        # via -r requirements/edx/base.txt, coreapi, drf-yasg
 urllib3==1.25.10          # via -r requirements/edx/base.txt, elasticsearch, geoip2, requests, selenium, transifex-client
 user-util==0.2            # via -r requirements/edx/base.txt
-virtualenv==20.0.27       # via tox
+virtualenv==20.0.28       # via tox
 voluptuous==0.11.7        # via -r requirements/edx/base.txt, ora2
 watchdog==0.10.3          # via -r requirements/edx/base.txt
 wcwidth==0.2.5            # via pytest
