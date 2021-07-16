@@ -1462,7 +1462,7 @@ XBLOCK_FS_STORAGE_PREFIX = None
 # .. setting_default: {}
 # .. setting_description: Dictionary containing server-wide configuration of XBlocks on a per-type basis.
 #     By default, keys should match the XBlock `block_settings_key` attribute/property. If the attribute/property
-#     is not defined, use the XBlock class name. Check `common.lib.xmodule.xmodule.services.SettingsService`
+#     is not defined, use the XBlock class name. Check `xmodule.services.SettingsService`
 #     for more reference.
 XBLOCK_SETTINGS = {}
 
@@ -1624,6 +1624,9 @@ SESSION_COOKIE_NAME = 'sessionid'
 # django-session-cookie middleware
 DCS_SESSION_COOKIE_SAMESITE = 'None'
 DCS_SESSION_COOKIE_SAMESITE_FORCE_ALL = True
+
+# This is the domain that is used to set shared cookies between various sub-domains.
+SHARED_COOKIE_DOMAIN = ""
 
 # CMS base
 CMS_BASE = 'localhost:18010'
@@ -2593,6 +2596,12 @@ DEBUG_TOOLBAR_PATCH_SETTINGS = False
 
 ################################# CELERY ######################################
 
+CELERY_IMPORTS = (
+    # Since xblock-poll is not a Django app, and XBlocks don't get auto-imported
+    # by celery workers, its tasks will not get auto-discovered:
+    'poll.tasks',
+)
+
 # Message configuration
 
 CELERY_TASK_SERIALIZER = 'json'
@@ -2617,24 +2626,42 @@ CELERY_SEND_TASK_SENT_EVENT = True
 CELERY_DEFAULT_EXCHANGE = 'edx.core'
 CELERY_DEFAULT_EXCHANGE_TYPE = 'direct'
 
+
+# SERVICE_VARIANT specifies name of the variant used, which decides what JSON
+# configuration files are read during startup.
+SERVICE_VARIANT = os.environ.get('SERVICE_VARIANT', "lms")
+
+# CONFIG_PREFIX specifies the prefix of the JSON configuration files,
+# based on the service variant. If no variant is use, don't use a
+# prefix.
+CONFIG_PREFIX = SERVICE_VARIANT + "." if SERVICE_VARIANT else ""
+
 # Queues configuration
 
-HIGH_PRIORITY_QUEUE = 'edx.core.high'
-DEFAULT_PRIORITY_QUEUE = 'edx.core.default'
-HIGH_MEM_QUEUE = 'edx.core.high_mem'
+# Name the exchange and queues w.r.t the SERVICE_VARIANT
+QUEUE_VARIANT = CONFIG_PREFIX.lower()
 
-CELERY_QUEUE_HA_POLICY = 'all'
+CELERY_DEFAULT_EXCHANGE = f'edx.{QUEUE_VARIANT}core'
 
-CELERY_CREATE_MISSING_QUEUES = True
+HIGH_PRIORITY_QUEUE = f'edx.{QUEUE_VARIANT}core.high'
+DEFAULT_PRIORITY_QUEUE = f'edx.{QUEUE_VARIANT}core.default'
+HIGH_MEM_QUEUE = f'edx.{QUEUE_VARIANT}core.high_mem'
 
 CELERY_DEFAULT_QUEUE = DEFAULT_PRIORITY_QUEUE
 CELERY_DEFAULT_ROUTING_KEY = DEFAULT_PRIORITY_QUEUE
 
-CELERY_QUEUES = [
-    'edx.lms.core.default',
-    'edx.lms.core.high',
-    'edx.lms.core.high_mem'
-]
+CELERY_QUEUES = {
+    HIGH_PRIORITY_QUEUE: {},
+    DEFAULT_PRIORITY_QUEUE: {},
+    HIGH_MEM_QUEUE: {},
+}
+
+CELERY_ROUTES = "openedx.core.lib.celery.routers.route_task"
+CELERYBEAT_SCHEDULE = {}  # For scheduling tasks, entries can be added to this dict
+
+CELERY_QUEUE_HA_POLICY = 'all'
+
+CELERY_CREATE_MISSING_QUEUES = True
 
 # let logging work as configured:
 CELERYD_HIJACK_ROOT_LOGGER = False
@@ -2790,9 +2817,14 @@ YOUTUBE_API_KEY = 'PUT_YOUR_API_KEY_HERE'
 
 ################################### APPS ######################################
 
-# The order of INSTALLED_APPS is important, when adding new apps here
-# remember to check that you are not creating new
+# The order of INSTALLED_APPS is important, when adding new apps here remember to check that you are not creating new
 # RemovedInDjango19Warnings in the test logs.
+#
+# If you want to add a new djangoapp that isn't suitable for everyone, you have some options:
+# - Add it to OPTIONAL_APPS below (registered if importable)
+# - Add it to the ADDL_INSTALLED_APPS configuration variable (acts like EXTRA_APPS in other IDAs)
+# - Make it a plugin (which are auto-registered) and add it to the EDXAPP_PRIVATE_REQUIREMENTS configuration variable
+#   (See https://github.com/edx/edx-django-utils/tree/master/edx_django_utils/plugins)
 INSTALLED_APPS = [
     # Standard ones that are always installed...
     'django.contrib.auth',
@@ -3891,8 +3923,6 @@ ACCOUNT_VISIBILITY_CONFIGURATION = {
         'account_privacy',
         'profile_image',
         'username',
-        "email",
-        "id",
     ],
 }
 
@@ -3923,6 +3953,8 @@ ACCOUNT_VISIBILITY_CONFIGURATION["custom_shareable_fields"] = (
 # The list of account fields that are visible only to staff and users viewing their own profiles
 ACCOUNT_VISIBILITY_CONFIGURATION["admin_fields"] = (
     ACCOUNT_VISIBILITY_CONFIGURATION["custom_shareable_fields"] + [
+        "email",
+        "id",
         "extended_profile",
         "gender",
         "state",
@@ -4653,6 +4685,8 @@ PROCTORING_BACKENDS = {
     'null': {}
 }
 
+PROCTORED_EXAM_VIEWABLE_PAST_DUE = False
+
 ############### The SAML private/public key values ################
 SOCIAL_AUTH_SAML_SP_PRIVATE_KEY = ""
 SOCIAL_AUTH_SAML_SP_PUBLIC_CERT = ""
@@ -4718,3 +4752,14 @@ DEFAULT_EMAIL_LOGO_URL = 'https://edx-cdn.org/v3/default/logo.png'
 ################# Settings for olx validation. #################
 COURSE_OLX_VALIDATION_STAGE = 1
 COURSE_OLX_VALIDATION_IGNORE_LIST = None
+
+################# show account activate cta after register ########################
+SHOW_ACTIVATE_CTA_POPUP_COOKIE_NAME = 'show-account-activation-popup'
+# .. toggle_name: SOME_FEATURE_NAME
+# .. toggle_implementation: DjangoSetting
+# .. toggle_default: False
+# .. toggle_description: Flag would be used to show account activation popup after the registration
+# .. toggle_use_cases: open_edx
+# .. toggle_tickets: https://github.com/edx/edx-platform/pull/27661
+# .. toggle_creation_date: 2021-06-10
+SHOW_ACCOUNT_ACTIVATION_CTA = False

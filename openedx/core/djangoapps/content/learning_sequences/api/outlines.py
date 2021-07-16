@@ -39,7 +39,7 @@ from ..models import (
     PublishReport,
     UserPartitionGroup
 )
-from .permissions import can_see_all_content
+from .permissions import can_call_public_api, can_see_all_content
 from .processors.content_gating import ContentGatingOutlineProcessor
 from .processors.enrollment import EnrollmentOutlineProcessor
 from .processors.enrollment_track_partition_groups import EnrollmentTrackPartitionGroupsOutlineProcessor
@@ -58,6 +58,7 @@ __all__ = [
     'get_user_course_outline',
     'get_user_course_outline_details',
     'key_supports_outlines',
+    'public_api_available',
     'replace_course_outline',
 ]
 
@@ -82,6 +83,21 @@ def key_supports_outlines(opaque_key: OpaqueKey) -> bool:
         return not opaque_key.deprecated
 
     return False
+
+
+def public_api_available(course_key: CourseKey, user: types.User) -> bool:
+    """
+    Is the Public API available for this Course to this User?
+
+    This only really exists while we do the waffle-flag rollout of this feature,
+    so that in-process callers from other apps can determine whether they should
+    trust Learning Sequences API data for a particular user/course.
+    """
+    return (
+        key_supports_outlines(course_key) and
+        LearningContext.objects.filter(context_key=course_key).exists() and
+        can_call_public_api(user, course_key)
+    )
 
 
 @function_trace('learning_sequences.api.get_course_keys_with_outlines')
@@ -123,11 +139,11 @@ def get_course_outline(course_key: CourseKey) -> CourseOutlineData:
     # represented (so query CourseSection explicitly instead of relying only on
     # select_related from CourseSectionSequence).
     section_models = CourseSection.objects \
-        .prefetch_related('user_partition_groups') \
+        .prefetch_related('new_user_partition_groups') \
         .filter(course_context=course_context) \
         .order_by('ordering')
     section_sequence_models = CourseSectionSequence.objects \
-        .prefetch_related('user_partition_groups') \
+        .prefetch_related('new_user_partition_groups') \
         .filter(course_context=course_context) \
         .order_by('ordering') \
         .select_related('sequence', 'exam')
@@ -157,7 +173,7 @@ def get_course_outline(course_key: CourseKey) -> CourseOutlineData:
             ),
             exam=exam_data,
             user_partition_groups=_get_user_partition_groups_from_qset(
-                sec_seq_model.user_partition_groups.all()
+                sec_seq_model.new_user_partition_groups.all()
             ),
         )
         sec_ids_to_sequence_list[sec_seq_model.section_id].append(sequence_data)
@@ -172,7 +188,7 @@ def get_course_outline(course_key: CourseKey) -> CourseOutlineData:
                 visible_to_staff_only=section_model.visible_to_staff_only,
             ),
             user_partition_groups=_get_user_partition_groups_from_qset(
-                section_model.user_partition_groups.all()
+                section_model.new_user_partition_groups.all()
             ),
         )
         for section_model in section_models
@@ -536,14 +552,14 @@ def _update_user_partition_groups(upg_data: Dict[int, FrozenSet[int]],
     """
     Replace UserPartitionGroups associated with this content with `upg_data`.
     """
-    model_obj.user_partition_groups.all().delete()
+    model_obj.new_user_partition_groups.all().delete()
     if upg_data:
         for partition_id, group_ids in upg_data.items():
             for group_id in group_ids:
                 upg, _ = UserPartitionGroup.objects.get_or_create(
                     partition_id=partition_id, group_id=group_id
                 )
-                model_obj.user_partition_groups.add(upg)
+                model_obj.new_user_partition_groups.add(upg)
 
 
 def _update_publish_report(course_outline: CourseOutlineData,

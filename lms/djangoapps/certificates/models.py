@@ -28,76 +28,14 @@ from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.util.milestones_helpers import fulfill_course_milestone, is_prerequisite_courses_enabled
 from lms.djangoapps.badges.events.course_complete import course_badge_check
 from lms.djangoapps.badges.events.course_meta import completion_check, course_group_check
+from lms.djangoapps.certificates.data import CertificateStatuses
 from lms.djangoapps.instructor_task.models import InstructorTask
-from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
+from openedx.core.djangoapps.content.course_overviews.api import get_course_overview_or_none
 from openedx.core.djangoapps.signals.signals import COURSE_CERT_AWARDED, COURSE_CERT_CHANGED, COURSE_CERT_REVOKED
 from openedx.core.djangoapps.xmodule_django.models import NoneToEmptyManager
 
 log = logging.getLogger(__name__)
 User = get_user_model()
-
-
-class CertificateStatuses:
-    """
-    Enum for certificate statuses.
-
-    Not all of these statuses are currently used. Some are kept for historical reasons and because existing course
-    certificates may have been granted that status.
-
-    audit_notpassing    - User is in the audit track and has not achieved a passing grade.
-    audit_passing       - User is in the audit track and has achieved a passing grade.
-    deleted             - The PDF certificate has been deleted.
-    deleting            - A request has been made to delete the PDF certificate.
-    downloadable        - The user has been granted this certificate and the certificate is ready and available.
-    error               - An error occurred during PDF certificate generation.
-    generating          - A request has been made to generate a PDF certificate, but it has not been generated yet.
-    honor_passing       - User is in the honor track and has achieved a passing grade.
-    invalidated         - Certificate is not valid.
-    notpassing          - The user has not achieved a passing grade.
-    requesting          - A request has been made to generate the PDF certificate.
-    restricted          - The user is restricted from receiving a certificate.
-    unavailable         - Certificate has been invalidated.
-    unverified          - The user does not have an approved, unexpired identity verification.
-
-    The following statuses are set by V2 of course certificates:
-      downloadable - See generation.py
-      notpassing - See GeneratedCertificate.mark_notpassing()
-      unavailable - See GeneratedCertificate.invalidate()
-      unverified - See GeneratedCertificate.mark_unverified()
-    """
-    deleted = 'deleted'
-    deleting = 'deleting'
-    downloadable = 'downloadable'
-    error = 'error'
-    generating = 'generating'
-    notpassing = 'notpassing'
-    restricted = 'restricted'
-    unavailable = 'unavailable'
-    auditing = 'auditing'
-    audit_passing = 'audit_passing'
-    audit_notpassing = 'audit_notpassing'
-    honor_passing = 'honor_passing'
-    unverified = 'unverified'
-    invalidated = 'invalidated'
-    requesting = 'requesting'
-
-    readable_statuses = {
-        downloadable: "already received",
-        notpassing: "didn't receive",
-        error: "error states",
-        audit_passing: "audit passing states",
-        audit_notpassing: "audit not passing states",
-    }
-
-    PASSED_STATUSES = (downloadable, generating)
-
-    @classmethod
-    def is_passing_status(cls, status):
-        """
-        Given the status of a certificate, return a boolean indicating whether
-        the student passed the course.
-        """
-        return status in cls.PASSED_STATUSES
 
 
 class CertificateSocialNetworks:
@@ -131,51 +69,6 @@ class CertificateWhitelist(models.Model):
     created = AutoCreatedField(_('created'))
     notes = models.TextField(default=None, null=True)
 
-    @classmethod
-    def get_certificate_white_list(cls, course_id, student=None):
-        """
-        Return certificate white list for the given course as dict object,
-        returned dictionary will have the following key-value pairs
-
-        [{
-            id:         'id (pk) of CertificateWhitelist item'
-            user_id:    'User Id of the student'
-            user_name:  'name of the student'
-            user_email: 'email of the student'
-            course_id:  'Course key of the course to whom certificate exception belongs'
-            created:    'Creation date of the certificate exception'
-            notes:      'Additional notes for the certificate exception'
-        }, {...}, ...]
-
-        """
-        white_list = cls.objects.filter(course_id=course_id, whitelist=True)
-        if student:
-            white_list = white_list.filter(user=student)
-        result = []
-        generated_certificates = GeneratedCertificate.eligible_certificates.filter(
-            course_id=course_id,
-            user__in=[exception.user for exception in white_list],
-            status=CertificateStatuses.downloadable
-        )
-        generated_certificates = {
-            certificate['user']: certificate['created_date']
-            for certificate in generated_certificates.values('user', 'created_date')
-        }
-
-        for item in white_list:
-            certificate_generated = generated_certificates.get(item.user.id, '')
-            result.append({
-                'id': item.id,
-                'user_id': item.user.id,
-                'user_name': str(item.user.username),
-                'user_email': str(item.user.email),
-                'course_id': str(item.course_id),
-                'created': item.created.strftime("%B %d, %Y"),
-                'certificate_generated': certificate_generated and certificate_generated.strftime("%B %d, %Y"),
-                'notes': str(item.notes or ''),
-            })
-        return result
-
 
 class CertificateAllowlist(TimeStampedModel):
     """
@@ -194,10 +87,16 @@ class CertificateAllowlist(TimeStampedModel):
     allowlist = models.BooleanField(default=0)
     notes = models.TextField(default=None, null=True)
 
+    # This is necessary because CMS does not install the certificates app, but it
+    # imports this model's code. Simple History will attempt to connect to the installed
+    # model in the certificates app, which will fail.
+    if 'certificates' in apps.app_configs:
+        history = HistoricalRecords()
+
     @classmethod
     def get_certificate_allowlist(cls, course_id, student=None):
         """
-        Return the certificate allowlist for the given course as dict object
+        Return the certificate allowlist for the given course as a list of dict objects
         with the following key-value pairs:
 
         [{
@@ -758,7 +657,12 @@ def certificate_info_for_user(user, course_id, grade, user_is_allowlisted, user_
     certificate_type = 'N/A'
     status = certificate_status(user_certificate)
     certificate_generated = status['status'] == CertificateStatuses.downloadable
-    can_have_certificate = CourseOverview.get_from_id(course_id).may_certify()
+
+    can_have_certificate = False
+    course_overview = get_course_overview_or_none(course_id)
+    if course_overview:
+        can_have_certificate = course_overview.may_certify()
+
     enrollment_mode, __ = CourseEnrollment.enrollment_mode_for_user(user, course_id)
     mode_is_verified = enrollment_mode in CourseMode.VERIFIED_MODES
     user_is_verified = grade is not None and mode_is_verified

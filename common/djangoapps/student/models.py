@@ -38,7 +38,7 @@ from django.db.models import Count, Index, Q
 from django.db.models.signals import post_save, pre_save
 from django.db.utils import ProgrammingError
 from django.dispatch import receiver
-from django.utils.encoding import python_2_unicode_compatible
+
 from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _
 from django.utils.translation import ugettext_noop
@@ -66,7 +66,7 @@ from common.djangoapps.student.signals import ENROLL_STATUS_CHANGE, ENROLLMENT_T
 from common.djangoapps.track import contexts, segment
 from common.djangoapps.util.model_utils import emit_field_changed_events, get_changed_fields_dict
 from common.djangoapps.util.query import use_read_replica_if_available
-from lms.djangoapps.certificates.models import GeneratedCertificate
+from lms.djangoapps.certificates.data import CertificateStatuses
 from lms.djangoapps.courseware.models import (
     CourseDynamicUpgradeDeadlineConfiguration,
     DynamicUpgradeDeadlineConfiguration,
@@ -974,7 +974,6 @@ EVENT_NAME_ENROLLMENT_DEACTIVATED = 'edx.course.enrollment.deactivated'
 EVENT_NAME_ENROLLMENT_MODE_CHANGED = 'edx.course.enrollment.mode_changed'
 
 
-@python_2_unicode_compatible
 class LoginFailures(models.Model):
     """
     This model will keep track of failed login attempts.
@@ -1203,7 +1202,6 @@ class CourseEnrollmentManager(models.Manager):
 CourseEnrollmentState = namedtuple('CourseEnrollmentState', 'mode, is_active')
 
 
-@python_2_unicode_compatible
 class CourseEnrollment(models.Model):
     """
     Represents a Student's Enrollment record for a single Course. You should
@@ -1835,7 +1833,7 @@ class CourseEnrollment(models.Model):
         """Changes this `CourseEnrollment` record's mode to `mode`.  Saves immediately."""
         self.update_enrollment(mode=mode)
 
-    def refundable(self, user_already_has_certs_for=None):
+    def refundable(self):
         """
         For paid/verified certificates, students may always receive a refund if
         this CourseEnrollment's `can_refund` attribute is not `None` (that
@@ -1847,11 +1845,6 @@ class CourseEnrollment(models.Model):
             * The user does not have a certificate issued for this course.
             * We are not past the refund cutoff date
             * There exists a 'verified' CourseMode for this course.
-
-        Arguments:
-            `user_already_has_certs_for` (set of `CourseKey`):
-                 An optional param that is a set of `CourseKeys` that the user
-                 has already been issued certificates in.
 
         Returns:
             bool: Whether is CourseEnrollment can be refunded.
@@ -1865,13 +1858,16 @@ class CourseEnrollment(models.Model):
         if getattr(self, 'can_refund', None) is not None:
             return True
 
-        # If the student has already been given a certificate they should not be refunded
-        if user_already_has_certs_for is not None:
-            if self.course_id in user_already_has_certs_for:
-                return False
-        else:
-            if GeneratedCertificate.certificate_for_student(self.user, self.course_id) is not None:
-                return False
+        # Due to circular import issues this import was placed close to usage. To move this to the
+        # top of the file would require a large scale refactor of the refund code.
+        import lms.djangoapps.certificates.api
+        # If the student has already been given a certificate in a non refundable status they should not be refunded
+        certificate = lms.djangoapps.certificates.api.get_certificate_for_user_id(
+            self.user,
+            self.course_id
+        )
+        if certificate and not CertificateStatuses.is_refundable_status(certificate.status):
+            return False
 
         # If it is after the refundable cutoff date they should not be refunded.
         refund_cutoff_date = self.refund_cutoff_date()
@@ -2254,7 +2250,6 @@ class CourseEnrollment(models.Model):
         )
 
 
-@python_2_unicode_compatible
 class FBEEnrollmentExclusion(models.Model):
     """
     Disable FBE for enrollments in this table.
@@ -2371,7 +2366,6 @@ class ManualEnrollmentAudit(models.Model):
         return True
 
 
-@python_2_unicode_compatible
 class CourseEnrollmentAllowed(DeletableByUserValue, models.Model):
     """
     Table of users (specified by email address strings) who are allowed to enroll in a specified course.
@@ -2432,7 +2426,6 @@ class CourseEnrollmentAllowed(DeletableByUserValue, models.Model):
 
 
 @total_ordering
-@python_2_unicode_compatible
 class CourseAccessRole(models.Model):
     """
     Maps users to org, courses, and roles. Used by student.roles.CourseRole and OrgRole.
@@ -2794,7 +2787,6 @@ class LinkedInAddToProfileConfiguration(ConfigurationModel):
         return {'organizationName': configuration_helpers.get_value('platform_name', settings.PLATFORM_NAME)}
 
 
-@python_2_unicode_compatible
 class EntranceExamConfiguration(models.Model):
     """
     Represents a Student's entrance exam specific data for a single Course
@@ -2902,7 +2894,6 @@ class SocialLink(models.Model):
     social_link = models.CharField(max_length=100, blank=True)
 
 
-@python_2_unicode_compatible
 class CourseEnrollmentAttribute(models.Model):
     """
     Provide additional information about the user's enrollment.
@@ -3010,7 +3001,6 @@ class EnrollmentRefundConfiguration(ConfigurationModel):
         self.refund_window_microseconds = int(refund_window.total_seconds() * 1000000)
 
 
-@python_2_unicode_compatible
 class RegistrationCookieConfiguration(ConfigurationModel):
     """
     Configuration for registration cookies.
@@ -3059,7 +3049,6 @@ class BulkChangeEnrollmentConfiguration(ConfigurationModel):
     )
 
 
-@python_2_unicode_compatible
 class UserAttribute(TimeStampedModel):
     """
     Record additional metadata about a user, stored as key/value pairs of text.

@@ -78,6 +78,12 @@ class SequenceFields:  # lint-amnesty, pylint: disable=missing-class-docstring
         help=_("Enter the date by which problems are due."),
         scope=Scope.settings,
     )
+    # This attribute is for custom pacing in self paced courses for Studio if CUSTOM_PLS flag is active
+    due_num_weeks = Integer(
+        display_name=_("Number of Weeks Due By"),
+        help=_("Enter the number of weeks the problems are due by relative to the learner's start date"),
+        scope=Scope.settings,
+    )
 
     hide_after_due = Boolean(
         display_name=_("Hide sequence content After Due Date"),
@@ -542,6 +548,7 @@ class SequenceBlock(
             'element_id': self.location.html_id(),
             'item_id': str(self.location),
             'is_time_limited': self.is_time_limited,
+            'is_proctored': self.is_proctored_enabled,
             'position': self.position,
             'tag': self.location.block_type,
             'next_url': context.get('next_url'),
@@ -894,7 +901,7 @@ class SequenceBlock(
                 'allow_proctoring_opt_out': self.allow_proctoring_opt_out,
                 'due_date': self.due,
                 'grace_period': self.graceperiod,  # lint-amnesty, pylint: disable=no-member
-                'is_integrity_signature_enabled': is_integrity_signature_enabled(),
+                'is_integrity_signature_enabled': is_integrity_signature_enabled(course_id),
             }
 
             # inject the user's credit requirements and fulfillments
