@@ -4,10 +4,11 @@ Test for user creation from sites with configuration overrides.
 
 
 import json
-
 from unittest import mock
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
 
 from common.djangoapps.student.models import UserSignupSource
@@ -50,6 +51,8 @@ def fake_get_value(name, default=None):
     return FAKE_SITE.get(name, default)
 
 
+# HIBP settings are only defined in lms envs but needed for common tests.
+@override_settings(ENABLE_AUTHN_REGISTER_HIBP_POLICY=False)
 class TestSite(TestCase):
     """Test for Account Creation from white labeled Sites"""
     def setUp(self):
@@ -68,7 +71,7 @@ class TestSite(TestCase):
             "address1": "foo",
             "city": "foo",
             "state": "foo",
-            "country": "foo",
+            "country": "US",
             "company": "foo",
             "title": "foo"
         }.items()))

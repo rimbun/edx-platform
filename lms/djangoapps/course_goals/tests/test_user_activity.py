@@ -3,40 +3,36 @@ Unit tests for user activity methods.
 """
 
 from datetime import datetime, timedelta
-
+from unittest.mock import Mock, patch
 
 import ddt
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from edx_django_utils.cache import TieredCache
 from edx_toggles.toggles.testutils import override_waffle_flag
 from freezegun import freeze_time
-from mock import patch
 
 from common.djangoapps.edxmako.shortcuts import render_to_response
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.util.testing import UrlResetMixin
 from lms.djangoapps.course_goals.models import UserActivity
-from lms.djangoapps.course_goals.toggles import COURSE_GOALS_NUMBER_OF_DAYS_GOALS
-from openedx.core.djangoapps.django_comment_common.models import ForumsConfig
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase, TEST_DATA_SPLIT_MODULESTORE
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from openedx.features.course_experience import ENABLE_COURSE_GOALS
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 User = get_user_model()
 
 
 @ddt.ddt
-@override_waffle_flag(COURSE_GOALS_NUMBER_OF_DAYS_GOALS, active=True)
+@override_waffle_flag(ENABLE_COURSE_GOALS, active=True)
+@override_settings(ENABLE_DISCUSSION_SERVICE=True)
 class UserActivityTests(UrlResetMixin, ModuleStoreTestCase):
     """
     Testing Course Goals User Activity
     """
-
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
-    @patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True})
     def setUp(self):
         super().setUp()
         self.course = CourseFactory.create(
@@ -48,18 +44,14 @@ class UserActivityTests(UrlResetMixin, ModuleStoreTestCase):
             modulestore=self.store,
             discussion_topics={"Test Topic": {"id": "test_topic"}},
         )
-        chapter = ItemFactory(parent=self.course, category='chapter')
-        ItemFactory(parent=chapter, category='sequential')
+        chapter = BlockFactory(parent=self.course, category='chapter')
+        BlockFactory(parent=chapter, category='sequential')
 
         self.client.login(username=self.user.username, password=self.user_password)
         CourseEnrollment.enroll(self.user, self.course.id)
 
         self.request = RequestFactory().get('foo')
         self.request.user = self.user
-
-        config = ForumsConfig.current()
-        config.enabled = True
-        config.save()
 
     def test_mfe_tabs_call_user_activity(self):
         '''
@@ -99,7 +91,7 @@ class UserActivityTests(UrlResetMixin, ModuleStoreTestCase):
             UserActivity.record_user_activity(None, self.course.id)
             activity_cache_set.assert_not_called()
 
-        cache_key = 'goals_user_activity_{}_{}_{}'.format(
+        cache_key = 'goals_user_activity_{}_{}_{}'.format(  # noqa: UP032
             str(self.user.id), str(self.course.id), str(datetime.now().date())
         )
         TieredCache.set_all_tiers(cache_key, 'test', 3600)
@@ -173,10 +165,11 @@ class UserActivityTests(UrlResetMixin, ModuleStoreTestCase):
         '/api/discussion/v1/courses/{COURSE_ID}/',
         '/api/discussion/v1/course_topics/{COURSE_ID}',
     )
+    @patch('lms.djangoapps.discussion.rest_api.api.get_course_commentable_counts', Mock(return_value={}))
     def test_mobile_app_user_activity_calls(self, url):
         url = url.replace('{COURSE_ID}', str(self.course.id))
         with patch.object(UserActivity, 'record_user_activity') as record_user_activity_mock:
-            with patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True}):
+            with override_settings(ENABLE_DISCUSSION_SERVICE=True):
                 self.client.get(url)
                 record_user_activity_mock.assert_called_once()
 

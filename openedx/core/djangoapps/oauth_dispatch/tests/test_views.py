@@ -4,22 +4,24 @@ Tests for Blocks Views
 
 
 import json
-import unittest
 from unittest.mock import call, patch
 
 import ddt
 import httpretty
-from Cryptodome.PublicKey import RSA
 from django.conf import settings
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
-from jwkest import jwk
+from edx_toggles.toggles.testutils import override_waffle_switch
 from oauth2_provider import models as dot_models
 
 from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.third_party_auth.tests.utils import ThirdPartyOAuthTestMixin, ThirdPartyOAuthTestMixinGoogle
+from openedx.core.djangoapps.oauth_dispatch.toggles import DISABLE_JWT_FOR_MOBILE
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
+from .. import adapters, models, views
 from . import mixins
+from .constants import DUMMY_REDIRECT_URL
 
 # NOTE (CCB): We use this feature flag in a roundabout way to determine if the oauth_dispatch app is installed
 # in the current service--LMS or Studio. Normally we would check if settings.ROOT_URLCONF == 'lms.urls'; however,
@@ -29,13 +31,7 @@ from . import mixins
 # NOTE (BJM): As of Django 1.9 we also can't import models for apps which aren't in INSTALLED_APPS, so making all of
 # these imports conditional except mixins, which doesn't currently import forbidden models, and is needed at test
 # discovery time.
-OAUTH_PROVIDER_ENABLED = settings.FEATURES.get('ENABLE_OAUTH2_PROVIDER')
 
-if OAUTH_PROVIDER_ENABLED:
-    from .constants import DUMMY_REDIRECT_URL
-    from .. import adapters
-    from .. import models
-    from .. import views
 
 
 class AccessTokenLoginMixin:
@@ -59,7 +55,7 @@ class AccessTokenLoginMixin:
 
         return self.client.post(
             self.login_with_access_token_url,
-            HTTP_AUTHORIZATION=f"Bearer {access_token if access_token else self.access_token}".encode('utf-8')
+            HTTP_AUTHORIZATION=f"Bearer {access_token if access_token else self.access_token}".encode('utf-8')  # noqa: UP012  # pylint: disable=line-too-long
         )
 
     def _assert_access_token_is_valid(self, access_token=None):
@@ -75,7 +71,7 @@ class AccessTokenLoginMixin:
         assert self.login_with_access_token(access_token=access_token).status_code == 401
 
 
-@unittest.skipUnless(OAUTH_PROVIDER_ENABLED, 'OAuth2 not enabled')
+@skip_unless_lms
 class _DispatchingViewTestCase(TestCase):
     """
     Base class for tests that exercise DispatchingViews.
@@ -84,8 +80,9 @@ class _DispatchingViewTestCase(TestCase):
     """
     def setUp(self):
         super().setUp()
+        self.TEST_PASSWORD = 'Password1234'
         self.dot_adapter = adapters.DOTAdapter()
-        self.user = UserFactory()
+        self.user = UserFactory(password=self.TEST_PASSWORD)
         self.dot_app = self.dot_adapter.create_public_client(
             name='test dot application',
             user=self.user,
@@ -108,14 +105,15 @@ class _DispatchingViewTestCase(TestCase):
         )
         models.RestrictedApplication.objects.create(application=self.restricted_dot_app)
 
-    def _post_request(self, user, client, token_type=None, scope=None, headers=None):
+    def _post_request(self, user, client, token_type=None, scope=None, headers=None, asymmetric_jwt=False):
         """
         Call the view with a POST request object with the appropriate format,
         returning the response object.
         """
-        return self.client.post(self.url, self._post_body(user, client, token_type, scope), **(headers or {}))  # pylint: disable=no-member
+        post_body = self._post_body(user, client, token_type, scope, asymmetric_jwt=asymmetric_jwt)
+        return self.client.post(self.url, post_body, **(headers or {}))  # pylint: disable=no-member
 
-    def _post_body(self, user, client, token_type=None, scope=None):
+    def _post_body(self, user, client, token_type=None, scope=None, asymmetric_jwt=False):
         """
         Return a dictionary to be used as the body of the POST request
         """
@@ -133,7 +131,7 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
         self.url = reverse('access_token')
         self.view_class = views.AccessTokenView
 
-    def _post_body(self, user, client, token_type=None, scope=None):
+    def _post_body(self, user, client, token_type=None, scope=None, asymmetric_jwt=None):
         """
         Return a dictionary to be used as the body of the POST request
         """
@@ -145,7 +143,7 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
 
         if grant_type == dot_models.Application.GRANT_PASSWORD:
             body['username'] = user.username
-            body['password'] = 'test'
+            body['password'] = self.TEST_PASSWORD
         elif grant_type == dot_models.Application.GRANT_CLIENT_CREDENTIALS:
             body['client_secret'] = client.client_secret
 
@@ -155,37 +153,31 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
         if scope:
             body['scope'] = scope
 
+        if asymmetric_jwt:
+            body['asymmetric_jwt'] = asymmetric_jwt
+
         return body
 
-    def _generate_key_pair(self):
-        """ Generates an asymmetric key pair and returns the JWK of its public keys and keypair. """
-        rsa_key = RSA.generate(2048)
-        rsa_jwk = jwk.RSAKey(kid="key_id", key=rsa_key)
-
-        public_keys = jwk.KEYS()
-        public_keys.append(rsa_jwk)
-        serialized_public_keys_json = public_keys.dump_jwks()
-
-        serialized_keypair = rsa_jwk.serialize(private=True)
-        serialized_keypair_json = json.dumps(serialized_keypair)
-
-        return serialized_public_keys_json, serialized_keypair_json
-
-    def _test_jwt_access_token(self, client_attr, token_type=None, headers=None):
+    def _test_jwt_access_token(self, client_attr, token_type=None, headers=None, grant_type=None, asymmetric_jwt=False):
         """
         Test response for JWT token.
         """
         client = getattr(self, client_attr)
-        response = self._post_request(self.user, client, token_type=token_type, headers=headers or {})
+        response = self._post_request(self.user, client, token_type=token_type,
+                                      headers=headers or {}, asymmetric_jwt=asymmetric_jwt)
         assert response.status_code == 200
         data = json.loads(response.content.decode('utf-8'))
-        assert 'expires_in' in data
+        expected_default_expires_in = 60 * 60
+        assert data['expires_in'] == expected_default_expires_in
         assert data['token_type'] == 'JWT'
         self.assert_valid_jwt_access_token(
             data['access_token'],
             self.user,
             data['scope'].split(' '),
+            grant_type=grant_type,
             should_be_restricted=False,
+            expires_in=expected_default_expires_in,
+            should_be_asymmetric_key=asymmetric_jwt
         )
 
     @ddt.data('dot_app')
@@ -215,15 +207,16 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
 
     @ddt.data('dot_app')
     def test_jwt_access_token_from_parameter(self, client_attr):
-        self._test_jwt_access_token(client_attr, token_type='jwt')
+        self._test_jwt_access_token(client_attr, token_type='jwt', grant_type='password')
 
     @ddt.data('dot_app')
     def test_jwt_access_token_from_header(self, client_attr):
-        self._test_jwt_access_token(client_attr, headers={'HTTP_X_TOKEN_TYPE': 'jwt'})
+        self._test_jwt_access_token(client_attr, headers={'HTTP_X_TOKEN_TYPE': 'jwt'}, grant_type='password')
 
     @ddt.data('dot_app')
     def test_jwt_access_token_from_parameter_not_header(self, client_attr):
-        self._test_jwt_access_token(client_attr, token_type='jwt', headers={'HTTP_X_TOKEN_TYPE': 'invalid'})
+        self._test_jwt_access_token(client_attr, token_type='jwt', grant_type='password',
+                                    headers={'HTTP_X_TOKEN_TYPE': 'invalid'})
 
     @ddt.data(
         ('jwt', 'jwt'),
@@ -247,7 +240,25 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
             'grant_type': grant_type.replace('-', '_'),
         }
         bad_response = self.client.post(self.url, invalid_body)
+        assert bad_response.status_code == 400
+        assert bad_response.json()['error'] == 'invalid_request'
+        expected_calls = [
+            call('oauth_token_type', 'no_token_type_supplied'),
+            call('oauth_grant_type', 'password'),
+        ]
+        mock_set_custom_attribute.assert_has_calls(expected_calls, any_order=True)
+
+    @patch('edx_django_utils.monitoring.set_custom_attribute')
+    def test_access_token_attributes_for_unauthenticated_client(self, mock_set_custom_attribute):
+        grant_type = dot_models.Application.GRANT_PASSWORD
+        invalid_body = {
+            'grant_type': grant_type.replace('-', '_'),
+            'username': self.user.username,
+            'password': self.TEST_PASSWORD,
+        }
+        bad_response = self.client.post(self.url, invalid_body)
         assert bad_response.status_code == 401
+        assert bad_response.json()['error'] == 'invalid_client'
         expected_calls = [
             call('oauth_token_type', 'no_token_type_supplied'),
             call('oauth_grant_type', 'password'),
@@ -272,6 +283,7 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
             should_be_expired=False,
             should_be_asymmetric_key=True,
             should_be_restricted=True,
+            grant_type='password'
         )
 
     def test_restricted_access_token(self):
@@ -317,24 +329,85 @@ class TestAccessTokenView(AccessTokenLoginMixin, mixins.AccessTokenMixin, _Dispa
             scopes=['grades:read'],
             filters=['test:filter'],
         )
-        scopes = dot_app_access.scopes
+        requested_scopes = dot_app_access.scopes
         filters = self.dot_adapter.get_authorization_filters(dot_app)
         assert 'test:filter' in filters
 
-        response = self._post_request(self.user, dot_app, token_type='jwt', scope=scopes)
+        response = self._post_request(self.user, dot_app, token_type='jwt', scope=requested_scopes)
         assert response.status_code == 200
         data = json.loads(response.content.decode('utf-8'))
+        scopes_in_response = data['scope'].split(' ')
+        for requested_scope in requested_scopes:
+            assert requested_scope in scopes_in_response
+
         self.assert_valid_jwt_access_token(
             data['access_token'],
             self.user,
-            scopes,
+            scopes_in_response,
             filters=filters,
+            grant_type=grant_type,
         )
+
+    def test_asymmetric_jwt_access_token(self):
+        """
+        Verify the JWT is asymmetric when requested.
+        """
+        self._test_jwt_access_token('dot_app', token_type='jwt', grant_type='password', asymmetric_jwt=True)
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, False)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    def test_disable_jwt_waffle_switch_disabled_non_mobile(self, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE disabled
+        Non-mobile request
+        Test JWT token is returned
+        """
+        mock_is_request_from_mobile_app.return_value = False
+        self._test_jwt_access_token('dot_app', token_type='jwt', grant_type='password')
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, True)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    def test_disable_jwt_waffle_switch_enabled_non_mobile(self, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE enabled
+        Non-mobile request
+        Test JWT token is returned
+        """
+        mock_is_request_from_mobile_app.return_value = False
+        self._test_jwt_access_token('dot_app', token_type='jwt', grant_type='password')
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, True)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    def test_disable_jwt_waffle_switch_enabled_mobile(self, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE enabled
+        Mobile request
+        Test JWT token is not returned, and that Bearer token is returned instead
+        """
+        mock_is_request_from_mobile_app.return_value = True
+        response = self._post_request(self.user, self.dot_app, token_type='jwt', asymmetric_jwt=True)
+        data = json.loads(response.content.decode('utf-8'))
+        access_token = data['access_token']
+        assert response.status_code == 200
+        assert data['token_type'] == "Bearer"
+        assert dot_models.AccessToken.objects.filter(token=access_token).exists() is True
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, False)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    def test_disable_jwt_waffle_switch_disabled_mobile(self, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE disabled
+        Mobile request
+        Test JWT token is returned
+        """
+        mock_is_request_from_mobile_app.return_value = True
+        self._test_jwt_access_token('dot_app', token_type='jwt', grant_type='password', asymmetric_jwt=True)
 
 
 @ddt.ddt
 @httpretty.activate
-class TestAccessTokenExchangeView(ThirdPartyOAuthTestMixinGoogle, ThirdPartyOAuthTestMixin, _DispatchingViewTestCase):
+class TestAccessTokenExchangeView(ThirdPartyOAuthTestMixinGoogle, ThirdPartyOAuthTestMixin,
+                                  _DispatchingViewTestCase, mixins.AccessTokenMixin):
     """
     Test class for AccessTokenExchangeView
     """
@@ -344,11 +417,42 @@ class TestAccessTokenExchangeView(ThirdPartyOAuthTestMixinGoogle, ThirdPartyOAut
         self.view_class = views.AccessTokenExchangeView
         super().setUp()
 
-    def _post_body(self, user, client, token_type=None, scope=None):
-        return {
+    def _post_body(self, user, client, token_type=None, scope=None, asymmetric_jwt=None):
+        body = {
             'client_id': client.client_id,
             'access_token': self.access_token,
         }
+        if token_type:
+            body['token_type'] = token_type
+
+        if asymmetric_jwt:
+            body['asymmetric_jwt'] = asymmetric_jwt
+
+        return body
+
+    def _test_jwt_access_token(self, client_attr, token_type=None, headers=None, grant_type=None, asymmetric_jwt=False):
+        """
+        Test response for JWT token.
+        """
+        client = getattr(self, client_attr)
+        self.oauth_client = client
+        profile_data = {'given_name': self.user.first_name, 'family_name': self.user.last_name}
+        self._setup_provider_response(success=True, profile_data=profile_data)
+        response = self._post_request(self.user, client, token_type=token_type,
+                                      headers=headers or {}, asymmetric_jwt=asymmetric_jwt)
+        assert response.status_code == 200
+        data = json.loads(response.content.decode('utf-8'))
+        assert 'expires_in' in data
+        assert data['expires_in'] > 0
+        assert data['token_type'] == 'JWT'
+
+        self.assert_valid_jwt_access_token(
+            data['access_token'],
+            self.user,
+            data['scope'].split(' '),
+            grant_type=grant_type,
+            should_be_asymmetric_key=asymmetric_jwt
+        )
 
     @ddt.data('dot_app')
     def test_access_token_exchange_calls_dispatched_view(self, client_attr):
@@ -357,6 +461,115 @@ class TestAccessTokenExchangeView(ThirdPartyOAuthTestMixinGoogle, ThirdPartyOAut
         self._setup_provider_response(success=True)
         response = self._post_request(self.user, client)
         assert response.status_code == 200
+
+    @ddt.data('dot_app')
+    def test_jwt_access_token_exchange_calls_dispatched_view(self, client_attr):
+        client = getattr(self, client_attr)
+        self.oauth_client = client
+        profile_data = {'given_name': self.user.first_name, 'family_name': self.user.last_name}
+        self._setup_provider_response(success=True, profile_data=profile_data)
+        response = self._post_request(self.user, client, token_type='jwt')
+        assert response.status_code == 200
+        data = json.loads(response.content.decode('utf-8'))
+        self.assert_valid_jwt_access_token(
+            data['access_token'],
+            self.user,
+            data['scope'].split(' '),
+            grant_type='password'
+        )
+
+        assert 'expires_in' in data
+        assert data['expires_in'] > 0
+        assert data['token_type'] == 'JWT'
+
+    @ddt.data('dot_app')
+    def test_asymmetric_jwt_access_token_exchange_calls_dispatched_view(self, client_attr):
+        client = getattr(self, client_attr)
+        self.oauth_client = client
+        profile_data = {'given_name': self.user.first_name, 'family_name': self.user.last_name}
+        self._setup_provider_response(success=True, profile_data=profile_data)
+        response = self._post_request(self.user, client, token_type='jwt', asymmetric_jwt=True)
+        assert response.status_code == 200
+        data = json.loads(response.content.decode('utf-8'))
+        self.assert_valid_jwt_access_token(
+            data['access_token'],
+            self.user,
+            data['scope'].split(' '),
+            grant_type='password',
+            should_be_asymmetric_key=True
+        )
+
+        assert 'expires_in' in data
+        assert data['expires_in'] > 0
+        assert data['token_type'] == 'JWT'
+
+    @ddt.data('dot_app')
+    def test_jwt_access_token_exchange_calls_dispatched_view_with_disabled_user(self, client_attr):
+        self.user.set_unusable_password()
+        self.user.save()
+        client = getattr(self, client_attr)
+        self.oauth_client = client
+        self._setup_provider_response(success=True)
+        response = self._post_request(self.user, client, token_type='jwt')
+        assert response.status_code == 403
+        data = json.loads(response.content.decode('utf-8'))
+        assert data['error'] == 'account_disabled'
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, False)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    @ddt.data('dot_app')
+    def test_disable_jwt_waffle_switch_disabled_non_mobile(self, client_attr, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE disabled
+        Non-mobile request
+        Test JWT token is returned
+        """
+        mock_is_request_from_mobile_app.return_value = False
+        self._test_jwt_access_token(client_attr, token_type='jwt', grant_type='password')
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, True)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    @ddt.data('dot_app')
+    def test_disable_jwt_waffle_switch_enabled_non_mobile(self, client_attr, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE enabled
+        Non-mobile request
+        Test JWT token is returned
+        """
+        mock_is_request_from_mobile_app.return_value = False
+        self._test_jwt_access_token(client_attr, token_type='jwt', grant_type='password')
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, True)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    @ddt.data('dot_app')
+    def test_disable_jwt_waffle_switch_enabled_mobile(self, client_attr, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE enabled
+        Mobile request
+        Test JWT token is not returned, and that Bearer token is returned instead
+        """
+        mock_is_request_from_mobile_app.return_value = True
+        client = getattr(self, client_attr)
+        self.oauth_client = client
+        self._setup_provider_response(success=True)
+        response = self._post_request(self.user, client, token_type='jwt', asymmetric_jwt=True)
+        data = json.loads(response.content.decode('utf-8'))
+        access_token = data['access_token']
+        assert response.status_code == 200
+        assert data['token_type'] == "Bearer"
+        assert dot_models.AccessToken.objects.filter(token=access_token).exists() is True
+
+    @override_waffle_switch(DISABLE_JWT_FOR_MOBILE, False)
+    @patch('openedx.core.djangoapps.oauth_dispatch.views.is_request_from_mobile_app')
+    @ddt.data('dot_app')
+    def test_disable_jwt_waffle_switch_disabled_mobile(self, client_attr, mock_is_request_from_mobile_app):
+        """
+        DISABLE_JWT_FOR_MOBILE disabled
+        Mobile request
+        Test JWT token is returned
+        """
+        mock_is_request_from_mobile_app.return_value = True
+        self._test_jwt_access_token(client_attr, token_type='jwt', grant_type='password', asymmetric_jwt=True)
 
 
 # pylint: disable=abstract-method
@@ -391,7 +604,7 @@ class TestAuthorizationView(_DispatchingViewTestCase):
     @ddt.unpack
     def test_post_authorization_view(self, client_type, allow_field):
         oauth_application = getattr(self, f'{client_type}_app')
-        self.client.login(username=self.user.username, password='test')
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
         response = self.client.post(
             '/oauth2/authorize/',
             {
@@ -413,7 +626,7 @@ class TestAuthorizationView(_DispatchingViewTestCase):
         Make sure we get the overridden Authorization page - not
         the default django-oauth-toolkit when we perform a page load
         """
-        self.client.login(username=self.user.username, password='test')
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
         response = self.client.get(
             '/oauth2/authorize/',
             {
@@ -486,7 +699,7 @@ class TestAuthorizationView(_DispatchingViewTestCase):
         return response.redirect_chain[-1][0]
 
 
-@unittest.skipUnless(OAUTH_PROVIDER_ENABLED, 'OAuth2 not enabled')
+@skip_unless_lms
 class TestViewDispatch(TestCase):
     """
     Test that the DispatchingView dispatches the right way.
@@ -514,7 +727,7 @@ class TestViewDispatch(TestCase):
         _msg_base = '{view} is not a view: {reason}'
         msg_not_callable = _msg_base.format(view=view_candidate, reason='it is not callable')
         msg_no_request = _msg_base.format(view=view_candidate, reason='it has no request argument')
-        assert hasattr(view_candidate, '__call__'), msg_not_callable
+        assert hasattr(view_candidate, '__call__'), msg_not_callable  # noqa: B004
         args = view_candidate.__code__.co_varnames
         assert args, msg_no_request
         assert args[0] == 'request'
@@ -553,7 +766,7 @@ class TestViewDispatch(TestCase):
 
     def test_get_view_for_no_backend(self):
         view_object = views.AccessTokenView()
-        self.assertRaises(KeyError, view_object.get_view_for_backend, None)
+        self.assertRaises(KeyError, view_object.get_view_for_backend, None)  # noqa: PT027
 
 
 class TestRevokeTokenView(AccessTokenLoginMixin, _DispatchingViewTestCase):  # pylint: disable=abstract-method
@@ -580,7 +793,7 @@ class TestRevokeTokenView(AccessTokenLoginMixin, _DispatchingViewTestCase):  # p
             'client_id': self.dot_app.client_id,
             'grant_type': 'password',
             'username': self.user.username,
-            'password': 'test',
+            'password': self.TEST_PASSWORD,
         }
 
     def access_token_post_body_with_refresh_token(self, refresh_token):

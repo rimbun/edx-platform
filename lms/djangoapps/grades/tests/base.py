@@ -4,14 +4,14 @@ Base file for Grades tests
 
 
 from crum import set_current_request
+from xblock_problem.capa.testing.response_xml_factory import MultipleChoiceResponseXMLFactory
 
-from capa.tests.response_xml_factory import MultipleChoiceResponseXMLFactory
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.course_blocks.api import get_course_blocks
 from openedx.core.djangolib.testing.utils import get_mock_request
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 from ..course_data import CourseData
 from ..subsection_grade_factory import SubsectionGradeFactory
@@ -26,19 +26,19 @@ class GradeTestBase(SharedModuleStoreTestCase):
         super().setUpClass()
         cls.course = CourseFactory.create()
         with cls.store.bulk_operations(cls.course.id):
-            cls.chapter = ItemFactory.create(
+            cls.chapter = BlockFactory.create(
                 parent=cls.course,
                 category="chapter",
                 display_name="Test Chapter"
             )
-            cls.sequence = ItemFactory.create(
+            cls.sequence = BlockFactory.create(
                 parent=cls.chapter,
                 category='sequential',
                 display_name="Test Sequential X with an & Ampersand",
                 graded=True,
                 format="Homework"
             )
-            cls.vertical = ItemFactory.create(
+            cls.vertical = BlockFactory.create(
                 parent=cls.sequence,
                 category='vertical',
                 display_name='Test Vertical 1'
@@ -48,28 +48,28 @@ class GradeTestBase(SharedModuleStoreTestCase):
                 choices=[False, False, True, False],
                 choice_names=['choice_0', 'choice_1', 'choice_2', 'choice_3']
             )
-            cls.problem = ItemFactory.create(
+            cls.problem = BlockFactory.create(
                 parent=cls.vertical,
                 category="problem",
                 display_name="Test Problem",
                 data=problem_xml
             )
-            cls.sequence2 = ItemFactory.create(
+            cls.sequence2 = BlockFactory.create(
                 parent=cls.chapter,
                 category='sequential',
                 display_name="Test Sequential A",
                 graded=True,
                 format="Homework"
             )
-            cls.problem2 = ItemFactory.create(
+            cls.problem2 = BlockFactory.create(
                 parent=cls.sequence2,
                 category="problem",
-                display_name="Test Problem",
+                display_name="Test Problem 2",
                 data=problem_xml
             )
             # AED 2017-06-19: make cls.sequence belong to multiple parents,
             # so we can test that DAGs with this shape are handled correctly.
-            cls.chapter_2 = ItemFactory.create(
+            cls.chapter_2 = BlockFactory.create(
                 parent=cls.course,
                 category='chapter',
                 display_name='Test Chapter 2'

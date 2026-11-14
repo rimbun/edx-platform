@@ -5,10 +5,10 @@ Common utility functions related to courses.
 from django import forms
 from django.conf import settings
 from django.http import Http404
-
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.locator import CourseKey
-from xmodule.assetstore.assetmgr import AssetManager
+from organizations.models import Organization
+
 from xmodule.contentstore.content import StaticContent
 from xmodule.contentstore.django import contentstore
 from xmodule.modulestore.django import modulestore
@@ -38,13 +38,19 @@ def course_image_url(course, image_key='course_image'):
     return url
 
 
+def course_organization_image_url(course):
+    """Return the course organization image URL or the default image URL."""
+    org = Organization.objects.filter(short_name=course.id.org).first()
+    return org.logo.url if org and org.logo else settings.DEFAULT_ORG_LOGO_URL
+
+
 def create_course_image_thumbnail(course, dimensions):
     """Create a course image thumbnail and return the URL.
 
     - dimensions is a tuple of (width, height)
     """
     course_image_asset_key = StaticContent.compute_location(course.id, course.course_image)
-    course_image = AssetManager.find(course_image_asset_key)  # a StaticContent obj
+    course_image = contentstore().find(course_image_asset_key)  # a StaticContent obj
 
     _content, thumb_loc = contentstore().generate_thumbnail(course_image, dimensions=dimensions)
 
@@ -76,7 +82,7 @@ def clean_course_id(model_form, is_required=True):
         course_key = CourseKey.from_string(cleaned_id)
     except InvalidKeyError:
         msg = f'Course id invalid. Entered course id was: "{cleaned_id}".'
-        raise forms.ValidationError(msg)  # lint-amnesty, pylint: disable=raise-missing-from
+        raise forms.ValidationError(msg)  # pylint: disable=raise-missing-from  # noqa: B904
 
     if not modulestore().has_course(course_key):
         msg = f'Course not found. Entered course id was: "{str(course_key)}".'
@@ -87,7 +93,7 @@ def clean_course_id(model_form, is_required=True):
 
 def get_course_by_id(course_key, depth=0):
     """
-    Given a course id, return the corresponding course descriptor.
+    Given a course id, return the corresponding course block.
 
     If such a course does not exist, raises a 404.
 

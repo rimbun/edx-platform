@@ -6,7 +6,7 @@ __init__.py imports from here, and is a more stable place to import from.
 import logging
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, FrozenSet, List, Optional, Union
+from typing import Dict, FrozenSet, List, Optional, Union  # noqa: UP035
 
 from django.db import transaction
 from django.db.models.query import QuerySet
@@ -15,7 +15,11 @@ from edx_django_utils.monitoring import function_trace, set_custom_attribute
 from opaque_keys import OpaqueKey
 from opaque_keys.edx.keys import CourseKey
 from opaque_keys.edx.locator import LibraryLocator
+
 from openedx.core import types
+from openedx.core.djangoapps.content.learning_sequences.api.processors.team_partition_groups import (
+    TeamPartitionGroupsOutlineProcessor,
+)
 
 from ..data import (
     ContentErrorData,
@@ -26,7 +30,7 @@ from ..data import (
     ExamData,
     UserCourseOutlineData,
     UserCourseOutlineDetailsData,
-    VisibilityData
+    VisibilityData,
 )
 from ..models import (
     ContentError,
@@ -37,9 +41,10 @@ from ..models import (
     LearningContext,
     LearningSequence,
     PublishReport,
-    UserPartitionGroup
+    UserPartitionGroup,
 )
-from .permissions import can_call_public_api, can_see_all_content
+from .permissions import can_see_all_content
+from .processors.cohort_partition_groups import CohortPartitionGroupsOutlineProcessor
 from .processors.content_gating import ContentGatingOutlineProcessor
 from .processors.enrollment import EnrollmentOutlineProcessor
 from .processors.enrollment_track_partition_groups import EnrollmentTrackPartitionGroupsOutlineProcessor
@@ -58,7 +63,6 @@ __all__ = [
     'get_user_course_outline',
     'get_user_course_outline_details',
     'key_supports_outlines',
-    'public_api_available',
     'replace_course_outline',
 ]
 
@@ -83,21 +87,6 @@ def key_supports_outlines(opaque_key: OpaqueKey) -> bool:
         return not opaque_key.deprecated
 
     return False
-
-
-def public_api_available(course_key: CourseKey) -> bool:
-    """
-    Is the Public API available for this Course to this User?
-
-    This only really exists while we do the waffle-flag rollout of this feature,
-    so that in-process callers from other apps can determine whether they should
-    trust Learning Sequences API data for a particular user/course.
-    """
-    return (
-        key_supports_outlines(course_key) and
-        LearningContext.objects.filter(context_key=course_key).exists() and
-        can_call_public_api(course_key)
-    )
 
 
 @function_trace('learning_sequences.api.get_course_keys_with_outlines')
@@ -128,7 +117,7 @@ def get_course_outline(course_key: CourseKey) -> CourseOutlineData:
     course_context = _get_course_context_for_outline(course_key)
 
     # Check to see if it's in the cache.
-    cache_key = "learning_sequences.api.get_course_outline.v2.{}.{}".format(
+    cache_key = "learning_sequences.api.get_course_outline.v2.{}.{}".format(  # noqa: UP032
         course_context.learning_context.context_key, course_context.learning_context.published_version
     )
     outline_cache_result = TieredCache.get_cached_response(cache_key)
@@ -210,7 +199,7 @@ def get_course_outline(course_key: CourseKey) -> CourseOutlineData:
     return outline_data
 
 
-def _get_user_partition_groups_from_qset(upg_qset) -> Dict[int, FrozenSet[int]]:
+def _get_user_partition_groups_from_qset(upg_qset) -> Dict[int, FrozenSet[int]]:  # noqa: UP006
     """
     Given a QuerySet of UserPartitionGroup, return a mapping of UserPartition
     IDs to the set of Group IDs for each UserPartition.
@@ -231,7 +220,7 @@ def _get_course_context_for_outline(course_key: CourseKey) -> CourseContext:
     """
     if course_key.deprecated:
         raise ValueError(
-            "Learning Sequence API does not support Old Mongo courses: {}"
+            "Learning Sequence API does not support Old Mongo courses: {}"  # noqa: UP032
             .format(course_key),
         )
     try:
@@ -243,13 +232,13 @@ def _get_course_context_for_outline(course_key: CourseKey) -> CourseContext:
         )
     except LearningContext.DoesNotExist:
         # Could happen if it hasn't been published.
-        raise CourseOutlineData.DoesNotExist(  # lint-amnesty, pylint: disable=raise-missing-from
+        raise CourseOutlineData.DoesNotExist(  # pylint: disable=raise-missing-from  # noqa: B904
             f"No CourseOutlineData for {course_key}"
         )
     return course_context
 
 
-def get_content_errors(course_key: CourseKey) -> List[ContentErrorData]:
+def get_content_errors(course_key: CourseKey) -> List[ContentErrorData]:  # noqa: UP006
     """
     Get ContentErrors created in the most recent publish of this Course run.
     """
@@ -313,7 +302,7 @@ def get_user_course_outline_details(course_key: CourseKey,
     )
 
 
-def _get_user_course_outline_and_processors(course_key: CourseKey,  # lint-amnesty, pylint: disable=missing-function-docstring
+def _get_user_course_outline_and_processors(course_key: CourseKey,  # pylint: disable=missing-function-docstring
                                             user: types.User,
                                             at_time: datetime):
     """
@@ -344,6 +333,8 @@ def _get_user_course_outline_and_processors(course_key: CourseKey,  # lint-amnes
         ('visibility', VisibilityOutlineProcessor),
         ('enrollment', EnrollmentOutlineProcessor),
         ('enrollment_track_partitions', EnrollmentTrackPartitionGroupsOutlineProcessor),
+        ('cohorts_partitions', CohortPartitionGroupsOutlineProcessor),
+        ('teams_partitions', TeamPartitionGroupsOutlineProcessor),
     ]
 
     # Run each OutlineProcessor in order to figure out what items we have to
@@ -395,7 +386,7 @@ def _get_user_course_outline_and_processors(course_key: CourseKey,  # lint-amnes
 
 @function_trace('learning_sequences.api.replace_course_outline')
 def replace_course_outline(course_outline: CourseOutlineData,
-                           content_errors: Optional[List[ContentErrorData]] = None):
+                           content_errors: Optional[List[ContentErrorData]] = None):  # noqa: UP006, UP045
     """
     Replace the model data stored for the Course Outline with the contents of
     course_outline (a CourseOutlineData). Record any content errors.
@@ -547,8 +538,8 @@ def _update_course_section_sequences(course_outline: CourseOutlineData, course_c
             _update_user_partition_groups(sequence_data.user_partition_groups, course_section_sequence)
 
 
-def _update_user_partition_groups(upg_data: Dict[int, FrozenSet[int]],
-                                  model_obj: Union[CourseSection, CourseSectionSequence]):
+def _update_user_partition_groups(upg_data: Dict[int, FrozenSet[int]],  # noqa: UP006
+                                  model_obj: Union[CourseSection, CourseSectionSequence]):  # noqa: UP007
     """
     Replace UserPartitionGroups associated with this content with `upg_data`.
     """
@@ -563,7 +554,7 @@ def _update_user_partition_groups(upg_data: Dict[int, FrozenSet[int]],
 
 
 def _update_publish_report(course_outline: CourseOutlineData,
-                           content_errors: List[ContentErrorData],
+                           content_errors: List[ContentErrorData],  # noqa: UP006
                            course_context: CourseContext):
     """
     Record ContentErrors for this course publish. Deletes previous errors.

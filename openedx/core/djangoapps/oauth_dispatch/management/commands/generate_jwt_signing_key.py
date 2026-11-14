@@ -14,7 +14,7 @@ import yaml
 from Cryptodome.PublicKey import RSA
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from jwkest import jwk
+from jwt.algorithms import get_default_algorithms
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class Command(BaseCommand):
     length 'key-id-size' (unless you explicitly provide a "kid" of your own via
     the 'key-id' option).
 
-    See https://github.com/edx/edx-platform/blob/master/openedx/core/djangoapps/oauth_dispatch/docs/decisions/0008-use-asymmetric-jwts.rst
+    See https://github.com/openedx/edx-platform/blob/master/openedx/core/djangoapps/oauth_dispatch/docs/decisions/0008-use-asymmetric-jwts.rst
     '''
 
     def create_parser(self, *args, **kwargs):  # pylint: disable=arguments-differ
@@ -114,7 +114,7 @@ class Command(BaseCommand):
                 'JWT_AUTH': public_keys,
             }
             jwt_auth_data['JWT_AUTH'].update(private_keys)
-            with open(options['output_file'], 'w') as f_out:  # lint-amnesty, pylint: disable=bad-option-value, open-builtin
+            with open(options['output_file'], 'w') as f_out:  # pylint: disable=bad-option-value, open-builtin
                 yaml.safe_dump(jwt_auth_data, stream=f_out)
 
     def _generate_key_id(self, size, chars=string.ascii_uppercase + string.digits):
@@ -123,15 +123,23 @@ class Command(BaseCommand):
     def _generate_key_pair(self, key_size, key_id):
         log.info('Generating new JWT signing keypair for key id %s.', key_id)
         rsa_key = RSA.generate(key_size)
-        rsa_jwk = jwk.RSAKey(kid=key_id, key=rsa_key)
-        return rsa_jwk
+        algo = get_default_algorithms()['RS512']
+        key_data = algo.prepare_key(rsa_key.export_key('PEM').decode())
+        rsa_jwk = json.loads(algo.to_jwk(key_data))
+        public_rsa_jwk = json.loads(algo.to_jwk(key_data.public_key()))
+
+        rsa_jwk['kid'] = key_id
+        public_rsa_jwk['kid'] = key_id
+        return {'private': rsa_jwk, 'public': public_rsa_jwk}
 
     def _output_public_keys(self, jwk_key, add_previous, strip_prefix):
-        public_keys = jwk.KEYS()
+        public_keys = {'keys': []}
+
         if add_previous:
             self._add_previous_public_keys(public_keys)
-        public_keys.append(jwk_key)
-        serialized_public_keys = public_keys.dump_jwks()
+
+        public_keys['keys'].append(jwk_key['public'])
+        serialized_public_keys = json.dumps(public_keys)
 
         prefix = '' if strip_prefix else 'COMMON_'
         public_signing_key = f'{prefix}JWT_PUBLIC_SIGNING_JWK_SET'
@@ -144,7 +152,7 @@ class Command(BaseCommand):
         print("  # The following is the string representation of a JSON Web Key Set (JWK set)")
         print("  # containing all active public keys for verifying JWT signatures.")
         print(
-            "  # See https://github.com/edx/edx-platform/blob/master/openedx/core/djangoapps/oauth_dispatch/"
+            "  # See https://github.com/openedx/edx-platform/blob/master/openedx/core/djangoapps/oauth_dispatch/"
             "docs/decisions/0008-use-asymmetric-jwts.rst"
         )
         print("  ")
@@ -155,11 +163,10 @@ class Command(BaseCommand):
         previous_signing_keys = settings.JWT_AUTH.get('JWT_PUBLIC_SIGNING_JWK_SET')
         if previous_signing_keys:
             log.info('Old JWT_PUBLIC_SIGNING_JWK_SET: %s.', previous_signing_keys)
-            public_keys.load_jwks(previous_signing_keys)
+            public_keys['keys'].extend(json.loads(previous_signing_keys)['keys'])
 
     def _output_private_keys(self, jwk_key, strip_prefix):
-        serialized_keypair = jwk_key.serialize(private=True)
-        serialized_keypair_json = json.dumps(serialized_keypair)
+        serialized_keypair_json = json.dumps(jwk_key['private'])
 
         prefix = '' if strip_prefix else 'EDXAPP_'
         private_signing_key = f'{prefix}JWT_PRIVATE_SIGNING_JWK'
@@ -172,7 +179,7 @@ class Command(BaseCommand):
         print("  # The following is the string representation of a JSON Web Key (JWK)")
         print("  # containing the single active private key for signing JSON Web Tokens (JWTs).")
         print(
-            "  # See https://github.com/edx/edx-platform/blob/master/openedx/core/djangoapps/oauth_dispatch/"
+            "  # See https://github.com/openedx/edx-platform/blob/master/openedx/core/djangoapps/oauth_dispatch/"
             "docs/decisions/0008-use-asymmetric-jwts.rst"
         )
         print("  ")

@@ -12,13 +12,14 @@ import logging
 
 from celery.result import AsyncResult
 from celery.states import FAILURE, READY_STATES, REVOKED, SUCCESS
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from opaque_keys.edx.keys import UsageKey
 
 from common.djangoapps.util.db import outer_atomic
 from lms.djangoapps.courseware.courses import get_problems_in_section
-from lms.djangoapps.courseware.module_render import get_xqueue_callback_url_prefix
-from lms.djangoapps.instructor_task.models import PROGRESS, InstructorTask
+from lms.djangoapps.instructor_task.data import InstructorTaskTypes
+from lms.djangoapps.instructor_task.models import PROGRESS, SCHEDULED, InstructorTask, InstructorTaskSchedule
+from lms.djangoapps.instructor_task.tasks import send_bulk_course_email
 from xmodule.modulestore.django import modulestore
 
 log = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class AlreadyRunningError(Exception):
     def __init__(self, message=None):
 
         if not message:
-            message = self.message  # pylint: disable=exception-message-attribute
+            message = self.message
         super().__init__(message)
 
 
@@ -44,7 +45,7 @@ class QueueConnectionError(Exception):
 
     def __init__(self, message=None):
         if not message:
-            message = self.message  # pylint: disable=exception-message-attribute
+            message = self.message
         super().__init__(message)
 
 
@@ -89,7 +90,7 @@ def _reserve_task(course_id, task_type, task_key, task_input, requester):
             "No duplicate tasks found: task_type %s, task_key %s, and most recent task_id = %s",
             task_type,
             task_key,
-            most_recent_id
+            most_recent_id  # pylint: disable=used-before-assignment
         )
 
     # Create log entry now, so that future requests will know it's running.
@@ -112,7 +113,8 @@ def generate_already_running_error_message(task_type):
         'proctored_exam_results_report': _('proctored exam results'),
         'export_ora2_data': _('ORA data'),
         'grade_course': _('grade'),
-
+        'inactive_enrolled_students_info_csv': _('inactive enrollment'),
+        'student_enrollment_batch': _('student enrollment batch'),
     }
 
     if report_types.get(task_type):
@@ -126,13 +128,12 @@ def generate_already_running_error_message(task_type):
     return message
 
 
-def _get_xmodule_instance_args(request, task_id):
+def _get_xblock_instance_args(request, task_id):
     """
-    Calculate parameters needed for instantiating xmodule instances.
+    Calculate parameters needed for instantiating xblock instances.
 
     The `request_info` will be passed to a tracking log function, to provide information
-    about the source of the task request.   The `xqueue_callback_url_prefix` is used to
-    permit old-style xqueue callbacks directly to the appropriate module in the LMS.
+    about the source of the task request.
     The `task_id` is also passed to the tracking log function.
     """
     request_info = {'username': request.user.username,
@@ -142,21 +143,20 @@ def _get_xmodule_instance_args(request, task_id):
                     'host': request.META['SERVER_NAME'],
                     }
 
-    xmodule_instance_args = {'xqueue_callback_url_prefix': get_xqueue_callback_url_prefix(request),
-                             'request_info': request_info,
-                             'task_id': task_id,
-                             }
-    return xmodule_instance_args
+    xblock_instance_args = {'request_info': request_info,
+                            'task_id': task_id,
+                            }
+    return xblock_instance_args
 
 
-def _supports_rescore(descriptor):
+def _supports_rescore(block):
     """
     Helper method to determine whether a given item supports rescoring.
     In order to accommodate both XModules and XBlocks, we have to check
-    the descriptor itself then fall back on its module class.
+    the block itself then fall back on its module class.
     """
-    return hasattr(descriptor, 'rescore') or (
-        hasattr(descriptor, 'module_class') and hasattr(descriptor.module_class, 'rescore')
+    return hasattr(block, 'rescore') or (
+        hasattr(block, 'module_class') and hasattr(block.module_class, 'rescore')
     )
 
 
@@ -269,6 +269,23 @@ def _get_async_result(task_id):
     return AsyncResult(task_id)
 
 
+def _determine_task_class(task_type):
+    """
+    Utility function used when processing scheduled instructor tasks. This function uses the type of an instructor task
+    to determine the associated Celery task function that will be used when processing the task via Celery.
+
+    Args:
+        task_type (String): A string describing the type of task.
+
+    Returns:
+        A Python function associated with the scheduled instructor task used during task execution.
+    """
+    if task_type == InstructorTaskTypes.BULK_COURSE_EMAIL:
+        return send_bulk_course_email
+
+    return None
+
+
 def get_updated_instructor_task(task_id):
     """
     Returns InstructorTask object corresponding to a given `task_id`.
@@ -326,49 +343,49 @@ def get_status_from_instructor_task(instructor_task):
 
 def check_arguments_for_rescoring(usage_key):
     """
-    Do simple checks on the descriptor to confirm that it supports rescoring.
+    Do simple checks on the block to confirm that it supports rescoring.
 
     Confirms first that the usage_key is defined (since that's currently typed
     in).  An ItemNotFoundException is raised if the corresponding module
-    descriptor doesn't exist.  NotImplementedError is raised if the
+    block doesn't exist.  NotImplementedError is raised if the
     corresponding module doesn't support rescoring calls.
 
     Note: the string returned here is surfaced as the error
     message on the instructor dashboard when a rescore is
     submitted for a non-rescorable block.
     """
-    descriptor = modulestore().get_item(usage_key)
-    if not _supports_rescore(descriptor):
+    block = modulestore().get_item(usage_key)
+    if not _supports_rescore(block):
         msg = _("This component cannot be rescored.")
         raise NotImplementedError(msg)
 
 
 def check_arguments_for_overriding(usage_key, score):
     """
-    Do simple checks on the descriptor to confirm that it supports overriding
+    Do simple checks on the block to confirm that it supports overriding
     the problem score and the score passed in is not greater than the value of
     the problem or less than 0.
     """
-    descriptor = modulestore().get_item(usage_key)
+    block = modulestore().get_item(usage_key)
     score = float(score)
 
-    # some weirdness around initializing the descriptor requires this
-    if not hasattr(descriptor.__class__, 'set_score'):
+    # some weirdness around initializing the block requires this
+    if not hasattr(block.__class__, 'set_score'):
         msg = _("This component does not support score override.")
         raise NotImplementedError(msg)
 
-    if score < 0 or score > descriptor.max_score():
+    if score < 0 or score > block.max_score():
         msg = _("Scores must be between 0 and the value of the problem.")
         raise ValueError(msg)
 
 
 def check_entrance_exam_problems_for_rescoring(exam_key):  # pylint: disable=invalid-name
     """
-    Grabs all problem descriptors in exam and checks each descriptor to
+    Grabs all problem blocks in exam and checks each block to
     confirm that it supports re-scoring.
 
     An ItemNotFoundException is raised if the corresponding module
-    descriptor doesn't exist for exam_key. NotImplementedError is raised if
+    block doesn't exist for exam_key. NotImplementedError is raised if
     any of the problem in entrance exam doesn't support re-scoring calls.
     """
     problems = list(get_problems_in_section(exam_key).values())
@@ -443,11 +460,81 @@ def submit_task(request, task_type, task_class, course_key, task_input, task_key
     # make sure all data has been committed before handing off task to celery.
 
     task_id = instructor_task.task_id
-    task_args = [instructor_task.id, _get_xmodule_instance_args(request, task_id)]
+    task_args = [instructor_task.id, _get_xblock_instance_args(request, task_id)]
     try:
         task_class.apply_async(task_args, task_id=task_id)
 
-    except Exception as error:  # lint-amnesty, pylint: disable=broad-except
+    except Exception as error:  # pylint: disable=broad-except
         _handle_instructor_task_failure(instructor_task, error)
 
     return instructor_task
+
+
+def schedule_task(request, task_type, course_key, task_input, task_key, schedule):
+    """
+    Helper function to schedule a background task.
+
+    Reserves the requested task and stores it until the task is ready for execution. We also create an instance of a
+    InstructorTaskSchedule object responsible for maintaining the details of _when_ a task should be executed. Extracts
+    arguments important to the task from the originating server request and stores them as part of the schedule object.
+    Sets the `task_status` to SCHEDULED to indicate this task will be executed in the future.
+
+    Args:
+        request (WSGIRequest): The originating web request associated with this task request.
+        task_type (String): Text describing the type of task (e.g. 'bulk_course_email' or 'grade_course')
+        course_key (CourseKey): The CourseKey of the course-run the task belongs to.
+        task_input (dict): Task input arguments stores as JSON-serialized dictionary.
+        task_key (String): Encoded input arguments used during task execution.
+        schedule (DateTime): DateTime (in UTC) describing when the task should be executed.
+    """
+    instructor_task = None
+    try:
+        log.info(f"Creating a scheduled instructor task of type '{task_type}' for course '{course_key}' requested by "
+                 f"user with id '{request.user.id}'")
+        instructor_task = InstructorTask.create(course_key, task_type, task_key, task_input, request.user)
+
+        task_id = instructor_task.task_id
+        task_args = _get_xblock_instance_args(request, task_id)
+        log.info(f"Creating a task schedule associated with instructor task '{instructor_task.id}' and due after "
+                 f"'{schedule}'")
+        InstructorTaskSchedule.objects.create(
+            task=instructor_task,
+            task_args=json.dumps(task_args),
+            task_due=schedule,
+        )
+
+        log.info(f"Updating task state of instructor task '{instructor_task.id}' to '{SCHEDULED}'")
+        instructor_task.task_state = SCHEDULED
+        instructor_task.save()
+    except Exception as error:  # pylint: disable=broad-except
+        log.error(f"Error occurred during task or schedule creation: {error}")
+        # Set any orphaned instructor tasks to the FAILURE state.
+        if instructor_task:
+            _handle_instructor_task_failure(instructor_task, error)
+
+
+def submit_scheduled_task(schedule):
+    """
+    Helper function for submitting a scheduled task due for execution to Celery.
+    """
+    # determine the task_class needed based off the task_type
+    task_class = _determine_task_class(schedule.task.task_type)
+    if task_class:
+        try:
+            # convert the stored argument data back into a dict from text
+            task_arguments = json.loads(schedule.task_args)
+            # turn this into the format Celery expects
+            task_args = [schedule.task.id, task_arguments]
+            # submit the task
+            log.info(f"Submitting scheduled task '{schedule.task.id}' for processing")
+            task_class.apply_async(task_args, task_id=schedule.task.task_id)
+        except Exception as error:  # pylint: disable=broad-except
+            # broad except here to make sure we cast a wide net for tasks with issues that can't be processed
+            log.error(f"Error submitting scheduled task '{schedule.task.id}' to Celery: {error}")
+            # handle task failure
+            _handle_instructor_task_failure(schedule.task, error)
+    else:
+        log.warning(
+            f"Could not submit scheduled instructor task with id '{schedule.task.id}' and task type "
+            f"'{schedule.task.task_type}'. Could not determine the task class for the request."
+        )

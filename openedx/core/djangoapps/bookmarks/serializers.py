@@ -3,14 +3,23 @@ Serializers for Bookmarks.
 """
 
 
-from edx_api_doc_tools import is_schema_request
 from rest_framework import serializers
 
 from openedx.core.lib.api.serializers import CourseKeyField, UsageKeyField
 
-
 from . import DEFAULT_FIELDS, OPTIONAL_FIELDS
 from .models import Bookmark
+
+
+def is_schema_request(request):
+    """
+    Return whether this request is serving an OpenAPI schema.
+
+    drf-spectacular sets ``swagger_fake_view`` on the view before building the
+    mock request it introspects with, so that attribute is the signal here.
+    """
+    view = (getattr(request, 'parser_context', None) or {}).get('view')
+    return getattr(view, 'swagger_fake_view', False)
 
 
 class BookmarkSerializer(serializers.ModelSerializer):
@@ -51,7 +60,7 @@ class BookmarkSerializer(serializers.ModelSerializer):
         # Drop any fields that are not specified in the `fields` argument.
         required_fields = set(fields)
 
-        if 'request' in kwargs['context'] and is_schema_request(kwargs['context']['request']):
+        if 'context' in kwargs and 'request' in kwargs['context'] and is_schema_request(kwargs['context']['request']):
             # We are serving the schema: include everything
             required_fields.update(OPTIONAL_FIELDS)
 

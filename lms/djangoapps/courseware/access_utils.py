@@ -3,29 +3,28 @@ Simple utility functions for computing access.
 It allows us to share code between access.py and block transformers.
 """
 
-
 from datetime import datetime, timedelta
 from logging import getLogger
 
 from django.conf import settings
+from openedx_filters.learning.filters import CourseStartDateValidationFailed
 from pytz import UTC
-from lms.djangoapps.courseware.access_response import (
-    AccessResponse,
-    StartDateError,
-    EnrollmentRequiredAccessError,
-    AuthenticationRequiredAccessError,
-)
-from lms.djangoapps.courseware.masquerade import get_course_masquerade, is_masquerading_as_student
-from openedx.core.djangoapps.util.user_messages import PageLevelMessages  # lint-amnesty, pylint: disable=unused-import
-from openedx.core.djangolib.markup import HTML  # lint-amnesty, pylint: disable=unused-import
-from openedx.features.course_experience import (
-    COURSE_PRE_START_ACCESS_FLAG,
-    COURSE_ENABLE_UNENROLLED_ACCESS_FLAG,
-)
+
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.roles import CourseBetaTesterRole
-from xmodule.util.xmodule_django import get_current_request_hostname
-from xmodule.course_module import COURSE_VISIBILITY_PUBLIC
+from lms.djangoapps.courseware.access_response import (
+    AccessResponse,
+    AuthenticationRequiredAccessError,
+    EnrollmentRequiredAccessError,
+    StartDateError,
+)
+from lms.djangoapps.courseware.masquerade import get_course_masquerade, is_masquerading_as_student
+from openedx.features.course_experience import (
+    COURSE_ENABLE_UNENROLLED_ACCESS_FLAG,
+    COURSE_PRE_START_ACCESS_FLAG,
+    ENFORCE_MASQUERADE_START_DATES,
+)
+from xmodule.course_block import COURSE_VISIBILITY_PUBLIC  # pylint: disable=wrong-import-order
 
 DEBUG_ACCESS = False
 log = getLogger(__name__)
@@ -57,9 +56,12 @@ def adjust_start_date(user, days_early_for_beta, start, course_key):
 
     if CourseBetaTesterRole(course_key).has_user(user):
         debug("Adjust start time: user in beta role for %s", course_key)
-        delta = timedelta(days_early_for_beta)
-        effective = start - delta
-        return effective
+        # timedelta.max days from now is in the year 2739931, so that's probably pretty safe
+        delta = timedelta(min(days_early_for_beta, timedelta.max.days))
+        try:
+            return start - delta
+        except OverflowError:
+            return start
 
     return start
 
@@ -75,31 +77,42 @@ def check_start_date(user, days_early_for_beta, start, course_key, display_error
     Returns:
         AccessResponse: Either ACCESS_GRANTED or StartDateError.
     """
-    start_dates_disabled = settings.FEATURES['DISABLE_START_DATES']
+    start_dates_disabled = settings.DISABLE_START_DATES
     masquerading_as_student = is_masquerading_as_student(user, course_key)
 
     if start_dates_disabled and not masquerading_as_student:
         return ACCESS_GRANTED
     else:
-        if start is None or in_preview_mode() or get_course_masquerade(user, course_key):
+        if start is None:
+            return ACCESS_GRANTED
+
+        if not ENFORCE_MASQUERADE_START_DATES.is_enabled(course_key) and get_course_masquerade(user, course_key):
             return ACCESS_GRANTED
 
         if now is None:
             now = datetime.now(UTC)
         effective_start = adjust_start_date(user, days_early_for_beta, start, course_key)
-        if now > effective_start:
+
+        should_grant_access = now > effective_start
+        if should_grant_access:
             return ACCESS_GRANTED
 
+        # Before returning a StartDateError, give plugins a chance to substitute a more specific access-error payload.
+        try:
+            CourseStartDateValidationFailed.run_filter(
+                course_key=course_key,
+                start_date=start,
+            )
+        except CourseStartDateValidationFailed.OverrideStartDateError as exc:
+            return StartDateError(
+                start_date=start,
+                display_error_to_user=display_error_to_user,
+                error_code_override=exc.error_code,
+                developer_message_override=exc.developer_message,
+                user_message_override=exc.user_message,
+            )
+
         return StartDateError(start, display_error_to_user=display_error_to_user)
-
-
-def in_preview_mode():
-    """
-    Returns whether the user is in preview mode or not.
-    """
-    hostname = get_current_request_hostname()
-    preview_lms_base = settings.FEATURES.get('PREVIEW_LMS_BASE', None)
-    return bool(preview_lms_base and hostname and hostname.split(':')[0] == preview_lms_base.split(':')[0])
 
 
 def check_course_open_for_learner(user, course):
@@ -151,7 +164,7 @@ def check_public_access(course, visibilities):
     This checks if the unenrolled access waffle flag for the course is set
     and the course visibility matches any of the input visibilities.
 
-    The "visibilities" argument is one of these constants from xmodule.course_module:
+    The "visibilities" argument is one of these constants from xmodule.course_block:
     - COURSE_VISIBILITY_PRIVATE
     - COURSE_VISIBILITY_PUBLIC
     - COURSE_VISIBILITY_PUBLIC_OUTLINE

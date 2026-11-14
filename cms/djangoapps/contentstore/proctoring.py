@@ -1,5 +1,8 @@
 """
 Code related to the handling of Proctored Exams in Studio
+using the edx-proctoring plugin.
+
+Courses using the exam IDA are handled by ./exams.py
 """
 
 
@@ -13,14 +16,14 @@ from edx_proctoring.api import (
     get_exam_by_content_id,
     remove_review_policy,
     update_exam,
-    update_review_policy
+    update_review_policy,
 )
 from edx_proctoring.exceptions import ProctoredExamNotFoundException, ProctoredExamReviewPolicyNotFoundException
 
 from xmodule.modulestore.django import modulestore
 from xmodule.modulestore.exceptions import ItemNotFoundError
 
-from .views.helpers import is_item_in_course_tree
+from .helpers import is_item_in_course_tree
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +35,13 @@ def register_special_exams(course_key):
     subsystem. Likewise, if formerly registered exams are unmarked, then those
     registered exams are marked as inactive
     """
-    if not settings.FEATURES.get('ENABLE_SPECIAL_EXAMS'):
+    if not settings.ENABLE_SPECIAL_EXAMS:
         # if feature is not enabled then do a quick exit
         return
 
     course = modulestore().get_course(course_key)
     if course is None:
-        raise ItemNotFoundError("Course {} does not exist", str(course_key))  # lint-amnesty, pylint: disable=raising-format-tuple
+        raise ItemNotFoundError("Course {} does not exist", str(course_key))  # pylint: disable=raising-format-tuple
 
     if not course.enable_proctored_exams and not course.enable_timed_exams:
         # likewise if course does not have these features turned on
@@ -67,7 +70,7 @@ def register_special_exams(course_key):
     # add/update any exam entries in edx-proctoring
     for timed_exam in timed_exams:
         msg = (
-            'Found {location} as a timed-exam in course structure. Inspecting...'.format(
+            'Found {location} as a timed-exam in course structure. Inspecting...'.format(  # noqa: UP032
                 location=str(timed_exam.location)
             )
         )
@@ -97,7 +100,6 @@ def register_special_exams(course_key):
         except ProctoredExamNotFoundException:
             exam_metadata['course_id'] = str(course_key)
             exam_metadata['content_id'] = str(timed_exam.location)
-
             exam_id = create_exam(**exam_metadata)
             msg = f'Created new timed exam {exam_id}'
             log.info(msg)

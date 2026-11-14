@@ -9,19 +9,20 @@ Classes:
 """
 from unittest.mock import Mock
 
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.urls import reverse
 from openedx_events.learning.data import UserData, UserPersonalData
 from openedx_events.learning.signals import SESSION_LOGIN_COMPLETED, STUDENT_REGISTRATION_COMPLETED
-from openedx_events.tests.utils import OpenEdxEventsTestMixin
+from openedx_events.testing import OpenEdxEventsTestMixin
 
 from common.djangoapps.student.tests.factories import UserFactory, UserProfileFactory
+from common.test.utils import assert_dict_contains_subset
 from openedx.core.djangoapps.user_api.tests.test_views import UserAPITestCase
 from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 
 @skip_unless_lms
-class RegistrationEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
+class RegistrationEventTest(OpenEdxEventsTestMixin, UserAPITestCase):
     """
     Tests for the Open edX Events associated with the registration process through
     the registration view.
@@ -34,19 +35,6 @@ class RegistrationEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
     """
 
     ENABLED_OPENEDX_EVENTS = ["org.openedx.learning.student.registration.completed.v1"]
-
-    @classmethod
-    def setUpClass(cls):
-        """
-        Set up class method for the Test class.
-
-        So the Open edX Events Isolation starts, the setUpClass must be explicitly
-        called with the method that executes the isolation. We do this to avoid
-        MRO resolution conflicts with other sibling classes while ensuring the
-        isolation process begins.
-        """
-        super().setUpClass()
-        cls.start_events_isolation()
 
     def setUp(self):  # pylint: disable=arguments-differ
         super().setUp()
@@ -82,8 +70,9 @@ class RegistrationEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
         self.client.post(self.url, self.user_info)
 
         user = User.objects.get(username=self.user_info.get("username"))
-        self.assertTrue(self.receiver_called)
-        self.assertDictContainsSubset(
+        self.assertTrue(self.receiver_called)  # noqa: PT009
+        assert_dict_contains_subset(
+            self,
             {
                 "signal": STUDENT_REGISTRATION_COMPLETED,
                 "sender": None,
@@ -97,12 +86,12 @@ class RegistrationEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
                     is_active=user.is_active,
                 ),
             },
-            event_receiver.call_args.kwargs
+            event_receiver.call_args.kwargs,
         )
 
 
 @skip_unless_lms
-class LoginSessionEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
+class LoginSessionEventTest(OpenEdxEventsTestMixin, UserAPITestCase):
     """
     Tests for the Open edX Events associated with the login process through the
     login_user view.
@@ -115,17 +104,6 @@ class LoginSessionEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
     """
 
     ENABLED_OPENEDX_EVENTS = ["org.openedx.learning.auth.session.login.completed.v1"]
-
-    @classmethod
-    def setUpClass(cls):
-        """
-        Set up class method for the Test class.
-
-        This method starts manually events isolation. Explanation here:
-        openedx/core/djangoapps/user_authn/views/tests/test_events.py#L44
-        """
-        super().setUpClass()
-        cls.start_events_isolation()
 
     def setUp(self):  # pylint: disable=arguments-differ
         super().setUp()
@@ -164,8 +142,9 @@ class LoginSessionEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
         self.client.post(self.url, data)
 
         user = User.objects.get(username=self.user.username)
-        self.assertTrue(self.receiver_called)
-        self.assertDictContainsSubset(
+        self.assertTrue(self.receiver_called)  # noqa: PT009
+        assert_dict_contains_subset(
+            self,
             {
                 "signal": SESSION_LOGIN_COMPLETED,
                 "sender": None,
@@ -179,5 +158,5 @@ class LoginSessionEventTest(UserAPITestCase, OpenEdxEventsTestMixin):
                     is_active=user.is_active,
                 ),
             },
-            event_receiver.call_args.kwargs
+            event_receiver.call_args.kwargs,
         )

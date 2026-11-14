@@ -6,10 +6,9 @@ Third Party Auth REST API views
 from collections import namedtuple
 
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.db.models import Q
 from django.http import Http404
-from django.urls import reverse
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from edx_rest_framework_extensions.auth.session.authentication import SessionAuthenticationAllowInactiveUser
 from rest_framework import exceptions, permissions, status, throttling
@@ -18,16 +17,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from social_django.models import UserSocialAuth
 
-from openedx.core.lib.api.authentication import (
-    BearerAuthentication,
-    BearerAuthenticationAllowInactiveUser
-)
-from openedx.core.lib.api.permissions import ApiKeyHeaderPermission
 from common.djangoapps.third_party_auth import pipeline
 from common.djangoapps.third_party_auth.api import serializers
 from common.djangoapps.third_party_auth.api.permissions import TPA_PERMISSIONS
-from common.djangoapps.third_party_auth.provider import Registry
 from common.djangoapps.third_party_auth.api.utils import filter_user_social_auth_queryset_by_provider
+from common.djangoapps.third_party_auth.provider import Registry
+from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from openedx.core.lib.api.authentication import BearerAuthentication, BearerAuthenticationAllowInactiveUser
+from openedx.core.lib.api.permissions import ApiKeyHeaderPermission
 
 
 class ProviderBaseThrottle(throttling.UserRateThrottle):
@@ -66,6 +63,7 @@ class BaseUserView(APIView):
     identifier_kinds = ['email', 'username']
 
     authentication_classes = (
+        JwtAuthentication,
         # Users may want to view/edit the providers used for authentication before they've
         # activated their account, so we allow inactive users.
         BearerAuthenticationAllowInactiveUser,
@@ -175,7 +173,7 @@ class UserView(BaseUserView):
               login.
     """
 
-    def get(self, request, username):  # lint-amnesty, pylint: disable=unused-argument
+    def get(self, request, username):  # pylint: disable=unused-argument
         """Read provider information for a user.
 
         Allows reading the list of providers for a specified user.
@@ -250,6 +248,42 @@ class UserViewV2(BaseUserView):
         identifier = self.get_identifier_for_requested_user(request)
         return self.do_get(request, identifier)
 
+    def delete(self, request):
+        """
+        Delete given social auth record for a user.
+
+        Args:
+            request (Request): The HTTP DELETE request
+
+        Request Parameters:
+            email/username: Must provide one of 'email' or 'username'.  If both are provided,
+            the username will be ignored.
+            uid: UID of the social auth record to delete
+
+        Return:
+            JSON serialized list of the providers linked to this user after the delete operation.
+
+        """
+        identifier = self.get_identifier_for_requested_user(request)
+        uid = request.query_params.get("uid")
+        if not uid:
+            raise exceptions.ValidationError("Must provide uid")
+
+        is_unprivileged = self.is_unprivileged_query(request, identifier)
+
+        if is_unprivileged:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            UserSocialAuth.objects.get(**{"user__" + identifier.kind: identifier.value}, uid=uid).delete()
+        except UserSocialAuth.DoesNotExist:
+            return Response(
+                data={f"Either user {identifier.value} or social auth record {uid} does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     def get_identifier_for_requested_user(self, request):
         """
         Return an identifier namedtuple for the requested user.
@@ -287,6 +321,9 @@ class UserMappingView(ListAPIView):
 
           GET /api/third_party_auth/v0/providers/{provider_id}/users?username={username1},{username2}
 
+          GET /api/third_party_auth/v0/providers/{provider_id}/users?username={username1}&
+            remote_id_field_name={external_id_field_name}
+
           GET /api/third_party_auth/v0/providers/{provider_id}/users?username={username1}&usernames={username2}
 
           GET /api/third_party_auth/v0/providers/{provider_id}/users?remote_id={remote_id1},{remote_id2}
@@ -309,6 +346,9 @@ class UserMappingView(ListAPIView):
 
         * usernames: Optional. List of comma separated edX usernames to filter the result set.
           e.g. ?usernames=bob123,jane456
+
+        * remote_id_field_name: Optional. The field name to use for the remote id lookup.
+          Useful when learners are coming from external LMS. e.g. ?remote_id_field_name=ext_userid_sf
 
         * page, page_size: Optional. Used for paging the result set, especially when getting
           an unfiltered list.
@@ -379,6 +419,7 @@ class UserMappingView(ListAPIView):
         remove idp_slug from the remote_id if there is any
         """
         context = super().get_serializer_context()
+        context['remote_id_field_name'] = self.request.query_params.get('remote_id_field_name', None)
         context['provider'] = self.provider
 
         return context
@@ -425,7 +466,10 @@ class ThirdPartyAuthUserStatusView(APIView):
                         state.provider.provider_id,
                         pipeline.AUTH_ENTRY_ACCOUNT_SETTINGS,
                         # The url the user should be directed to after the auth process has completed.
-                        redirect_url=reverse('account_settings'),
+                        redirect_url=configuration_helpers.get_value(
+                            'ACCOUNT_MICROFRONTEND_URL',
+                            settings.ACCOUNT_MICROFRONTEND_URL,
+                        ),
                     ),
                     'accepts_logins': state.provider.accepts_logins,
                     # If the user is connected, sending a POST request to this url removes the connection

@@ -7,9 +7,9 @@ from unittest.mock import Mock, patch
 
 import ddt
 from django.test.testcases import TestCase
-from slumber.exceptions import HttpClientError
-from common.djangoapps.student.tests.factories import UserFactory
+from requests.exceptions import HTTPError
 
+from common.djangoapps.student.tests.factories import UserFactory
 from openedx.core.djangoapps.video_pipeline.api import update_3rd_party_transcription_service_credentials
 from openedx.core.djangoapps.video_pipeline.tests.mixins import VideoPipelineMixin
 
@@ -19,7 +19,7 @@ class TestAPIUtils(VideoPipelineMixin, TestCase):
     """
     Tests for API Utils.
     """
-    def setUp(self):  # lint-amnesty, pylint: disable=super-method-not-called
+    def setUp(self):  # pylint: disable=super-method-not-called
         """
         Setup VEM oauth client.
         """
@@ -66,7 +66,7 @@ class TestAPIUtils(VideoPipelineMixin, TestCase):
         error_response, is_updated = update_3rd_party_transcription_service_credentials(**credentials_payload)
 
         # Making sure log.exception is not called.
-        self.assertDictEqual(error_response, {})
+        self.assertDictEqual(error_response, {})  # noqa: PT009
         assert not mock_logger.exception.called
         assert is_updated
 
@@ -82,7 +82,10 @@ class TestAPIUtils(VideoPipelineMixin, TestCase):
         during communication with edx-video-pipeline.
         """
         error_content = '{"error_type": "1"}'
-        mock_client.return_value.request = Mock(side_effect=HttpClientError(content=error_content))
+        resp = Mock()
+        resp.content = error_content
+        resp.raise_for_status.side_effect = HTTPError(response=resp)
+        mock_client.return_value.post.return_value = resp
 
         # try updating the transcription service credentials
         credentials_payload = {
@@ -94,11 +97,10 @@ class TestAPIUtils(VideoPipelineMixin, TestCase):
 
         # Assert the results.
         assert not is_updated
-        self.assertDictEqual(error_response, json.loads(error_content))
+        self.assertDictEqual(error_response, json.loads(error_content))  # noqa: PT009
         mock_logger.exception.assert_called_with(
-            'Unable to update transcript credentials -- org={}, provider={}, response={}'.format(
-                credentials_payload['org'],
-                credentials_payload['provider'],
-                error_content
-            )
+            'Unable to update transcript credentials -- org=%s, provider=%s, response=%s',
+            credentials_payload['org'],
+            credentials_payload['provider'],
+            error_content
         )

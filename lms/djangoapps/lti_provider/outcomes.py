@@ -71,23 +71,23 @@ def generate_replace_result_xml(result_sourcedid, score):
     """
     # Pylint doesn't recognize members in the LXML module
     elem = ElementMaker(nsmap={None: 'http://www.imsglobal.org/services/ltiv1p1/xsd/imsoms_v1p0'})
-    xml = elem.imsx_POXEnvelopeRequest(  # lint-amnesty, pylint: disable=no-member
-        elem.imsx_POXHeader(  # lint-amnesty, pylint: disable=no-member
-            elem.imsx_POXRequestHeaderInfo(  # lint-amnesty, pylint: disable=no-member
-                elem.imsx_version('V1.0'),  # lint-amnesty, pylint: disable=no-member
-                elem.imsx_messageIdentifier(str(uuid.uuid4()))  # lint-amnesty, pylint: disable=no-member
+    xml = elem.imsx_POXEnvelopeRequest(  # pylint: disable=no-member
+        elem.imsx_POXHeader(  # pylint: disable=no-member
+            elem.imsx_POXRequestHeaderInfo(  # pylint: disable=no-member
+                elem.imsx_version('V1.0'),  # pylint: disable=no-member
+                elem.imsx_messageIdentifier(str(uuid.uuid4()))  # pylint: disable=no-member
             )
         ),
-        elem.imsx_POXBody(  # lint-amnesty, pylint: disable=no-member
-            elem.replaceResultRequest(  # lint-amnesty, pylint: disable=no-member
-                elem.resultRecord(  # lint-amnesty, pylint: disable=no-member
-                    elem.sourcedGUID(  # lint-amnesty, pylint: disable=no-member
-                        elem.sourcedId(result_sourcedid)  # lint-amnesty, pylint: disable=no-member
+        elem.imsx_POXBody(  # pylint: disable=no-member
+            elem.replaceResultRequest(  # pylint: disable=no-member
+                elem.resultRecord(  # pylint: disable=no-member
+                    elem.sourcedGUID(  # pylint: disable=no-member
+                        elem.sourcedId(result_sourcedid)  # pylint: disable=no-member
                     ),
-                    elem.result(  # lint-amnesty, pylint: disable=no-member
-                        elem.resultScore(  # lint-amnesty, pylint: disable=no-member
-                            elem.language('en'),  # lint-amnesty, pylint: disable=no-member
-                            elem.textString(str(score))  # lint-amnesty, pylint: disable=no-member
+                    elem.result(  # pylint: disable=no-member
+                        elem.resultScore(  # pylint: disable=no-member
+                            elem.language('en'),  # pylint: disable=no-member
+                            elem.textString(str(score))  # pylint: disable=no-member
                         )
                     )
                 )
@@ -97,7 +97,7 @@ def generate_replace_result_xml(result_sourcedid, score):
     return etree.tostring(xml, xml_declaration=True, encoding='UTF-8')
 
 
-def get_assignments_for_problem(problem_descriptor, user_id, course_key):
+def get_assignments_for_problem(problem_block, user_id, course_key):
     """
     Trace the parent hierarchy from a given problem to find all blocks that
     correspond to graded assignment launches for this user. A problem may
@@ -107,13 +107,13 @@ def get_assignments_for_problem(problem_descriptor, user_id, course_key):
     problem and as a problem in a vertical, for example).
 
     Returns a list of GradedAssignment objects that are associated with the
-    given descriptor for the current user.
+    given block for the current user.
     """
     locations = []
-    current_descriptor = problem_descriptor
-    while current_descriptor:
-        locations.append(current_descriptor.location)
-        current_descriptor = current_descriptor.get_parent()
+    current_block = problem_block
+    while current_block:
+        locations.append(current_block.location)
+        current_block = current_block.get_parent()
     assignments = GradedAssignment.objects.filter(
         user=user_id, course_key=course_key, usage_key__in=locations
     )

@@ -7,8 +7,8 @@
         });
     };
 
-    var jsOptimize = process.env.REQUIRE_BUILD_PROFILE_OPTIMIZE !== undefined ?
-        process.env.REQUIRE_BUILD_PROFILE_OPTIMIZE : 'uglify2';
+    var jsOptimize = process.env.REQUIRE_BUILD_PROFILE_OPTIMIZE !== undefined
+        ? process.env.REQUIRE_BUILD_PROFILE_OPTIMIZE : 'uglify2';
 
     return {
         /**
@@ -20,17 +20,9 @@
             'js/factories/asset_index',
             'js/factories/base',
             'js/factories/course_create_rerun',
-            'js/factories/course_info',
             'js/factories/export',
-            'js/factories/group_configurations',
-            'js/certificates/factories/certificates_page_factory',
             'js/factories/index',
-            'js/factories/manage_users',
             'js/factories/outline',
-            'js/factories/settings',
-            'js/factories/settings_advanced',
-            'js/factories/settings_graders',
-            'js/factories/videos_index'
         ]),
         /**
          * By default all the configuration for optimization happens from the command

@@ -1,13 +1,13 @@
 """Models governing integration with the catalog service."""
-
-
 from config_models.models import ConfigurationModel
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import models
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 from openedx.core.djangoapps.site_configuration import helpers
+
+User = get_user_model()
 
 
 class CatalogIntegration(ConfigurationModel):
@@ -44,6 +44,7 @@ class CatalogIntegration(ConfigurationModel):
         )
     )
 
+    # pylint: disable-next=pii-invalid-no-pii-annotation  # field does not store user PII data, safe under OEP-30
     service_username = models.CharField(
         max_length=100,
         default='lms_catalog_service_user',
@@ -72,7 +73,4 @@ class CatalogIntegration(ConfigurationModel):
         return helpers.get_value('COURSE_CATALOG_API_URL', settings.COURSE_CATALOG_API_URL)
 
     def get_service_user(self):
-        # NOTE: We load the user model here to avoid issues at startup time that result from the hacks
-        # in lms/startup.py.
-        User = get_user_model()  # pylint: disable=invalid-name
         return User.objects.get(username=self.service_username)

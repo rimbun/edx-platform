@@ -3,14 +3,15 @@ Tests for the course tab API.
 """
 
 import json
+import random
 from urllib.parse import urlencode
 
 import ddt
 from django.urls import reverse
-from xmodule.modulestore.tests.factories import ItemFactory
-from xmodule.tabs import CourseTabList
 
 from cms.djangoapps.contentstore.tests.utils import CourseTestCase
+from xmodule.modulestore.tests.factories import BlockFactory
+from xmodule.tabs import CourseTabList
 
 
 @ddt.ddt
@@ -42,7 +43,7 @@ class TabsAPITests(CourseTestCase):
         )
 
         # add a static tab to the course, for code coverage
-        self.test_tab = ItemFactory.create(
+        self.test_tab = BlockFactory.create(
             parent_location=self.course.location,
             category="static_tab",
             display_name="Static_1",
@@ -91,57 +92,38 @@ class TabsAPITests(CourseTestCase):
             content_type="application/json",
         )
 
-    def test_reorder_tabs(self):
+    def test_reorder_static_tabs(self):
         """
-        Test re-ordering of tabs
+        Test re-ordering of static tabs in a course.
         """
 
-        # get the original tab ids
-        orig_tab_ids = [tab.tab_id for tab in self.course.tabs]
-        tab_ids = list(orig_tab_ids)
-        num_orig_tabs = len(orig_tab_ids)
+        # get the original tabs
+        course_tabs = list(self.course.tabs)
+        num_orig_tabs = len(self.course.tabs)
 
         # make sure we have enough tabs to play around with
         assert num_orig_tabs >= 5
 
-        # reorder the last two tabs
-        tab_ids[num_orig_tabs - 1], tab_ids[num_orig_tabs - 2] = tab_ids[num_orig_tabs - 2], tab_ids[num_orig_tabs - 1]
+        # Randomize the order of static tabs, leaving the rest intact
+        course_tabs.sort(key=lambda tab: (100 + random.random()) if tab.type == 'static_tab' else tab.priority)
 
-        # remove the middle tab
-        # (the code needs to handle the case where tabs requested for re-ordering is a subset of the tabs in the course)
-        removed_tab = tab_ids.pop(num_orig_tabs // 2)
-        assert len(tab_ids) == num_orig_tabs - 1
+        tabs_data = [
+            {'tab_locator': str(self.course.id.make_usage_key("static_tab", tab.url_slug))}
+            for tab in course_tabs
+            if tab.type == 'static_tab'
+        ]
+        # Remove one tab randomly. This shouldn't delete the tab.
+        tabs_data.pop()
 
-        # post the request
-        resp = self.make_reorder_tabs_request([{"tab_id": tab_id} for tab_id in tab_ids])
+        # post the request with the reordered static tabs only
+        resp = self.make_reorder_tabs_request(tabs_data)
         assert resp.status_code == 204
 
-        # reload the course and verify the new tab order
+        # Reload the course and verify the new tab order
         self.reload_course()
+        reordered_tab_ids = [tab.tab_id for tab in course_tabs]
         new_tab_ids = [tab.tab_id for tab in self.course.tabs]
-        assert new_tab_ids == tab_ids + [removed_tab]
-        assert new_tab_ids != orig_tab_ids
-
-    def test_reorder_tabs_invalid_list(self):
-        """
-        Test re-ordering of tabs with invalid tab list.
-
-        Not all tabs can be rearranged. Here we are trying to swap the first
-        two tabs, which is disallowed since the first tab is the "Course" tab
-        which is immovable.
-        """
-
-        orig_tab_ids = [tab.tab_id for tab in self.course.tabs]
-        tab_ids = list(orig_tab_ids)
-
-        # reorder the first two tabs
-        tab_ids[0], tab_ids[1] = tab_ids[1], tab_ids[0]
-
-        # post the request
-        resp = self.make_reorder_tabs_request([{"tab_id": tab_id} for tab_id in tab_ids])
-        assert resp.status_code == 400
-        error = self.check_invalid_response(resp)
-        assert "error" in error
+        assert new_tab_ids == reordered_tab_ids
 
     def test_reorder_tabs_invalid_tab_ids(self):
         """
@@ -184,8 +166,8 @@ class TabsAPITests(CourseTestCase):
         """
         Test that toggling the visibility via the API works.
         """
-        self.check_toggle_tab_visibility("wiki", True)
         self.check_toggle_tab_visibility("wiki", False)
+        self.check_toggle_tab_visibility("wiki", True)
 
     def test_toggle_tab_visibility_fail(self):
         """

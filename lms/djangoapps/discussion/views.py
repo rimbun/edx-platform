@@ -2,21 +2,21 @@
 Views handling read (GET) requests for the Discussion tab and inline discussions.
 """
 
-
 import logging
 from functools import wraps
+from urllib.parse import urljoin
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.http import Http404, HttpResponseForbidden, HttpResponseServerError
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.template.context_processors import csrf
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.translation import get_language_bidi
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from django.views.decorators.cache import cache_control
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods
@@ -28,6 +28,7 @@ from web_fragments.fragment import Fragment
 import lms.djangoapps.discussion.django_comment_client.utils as utils
 import openedx.core.djangoapps.django_comment_common.comment_client as cc
 from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.roles import CourseInstructorRole, CourseStaffRole, GlobalStaff
 from common.djangoapps.util.json_request import JsonResponse, expect_json
 from lms.djangoapps.courseware.access import has_access
 from lms.djangoapps.courseware.courses import get_course_with_access
@@ -35,29 +36,41 @@ from lms.djangoapps.courseware.views.views import CourseTabView
 from lms.djangoapps.discussion.config.settings import is_forum_daily_digest_enabled
 from lms.djangoapps.discussion.django_comment_client.base.views import track_thread_viewed_event
 from lms.djangoapps.discussion.django_comment_client.constants import TYPE_ENTRY
-from lms.djangoapps.discussion.django_comment_client.permissions import has_permission
 from lms.djangoapps.discussion.django_comment_client.utils import (
     add_courseware_context,
-    available_division_schemes,
     course_discussion_division_enabled,
     extract,
     get_group_id_for_comments_service,
     get_group_id_for_user,
-    get_group_names_by_id,
     is_commentable_divided,
     strip_none,
 )
 from lms.djangoapps.discussion.exceptions import TeamDiscussionHiddenFromUserException
+from lms.djangoapps.discussion.toggles import ENABLE_DISCUSSIONS_MFE
 from lms.djangoapps.experiments.utils import get_experiment_user_metadata_context
 from lms.djangoapps.teams import api as team_api
-from openedx.core.djangoapps.django_comment_common.models import CourseDiscussionSettings
+from openedx.core.djangoapps.discussions.utils import (
+    available_division_schemes,
+    get_discussion_categories_ids,
+    get_divided_discussions,
+    get_group_names_by_id,
+)
+from openedx.core.djangoapps.django_comment_common.models import (
+    FORUM_ROLE_ADMINISTRATOR,
+    FORUM_ROLE_COMMUNITY_TA,
+    FORUM_ROLE_GROUP_MODERATOR,
+    FORUM_ROLE_MODERATOR,
+    CourseDiscussionSettings,
+    Role,
+    has_permission,
+)
 from openedx.core.djangoapps.django_comment_common.utils import ThreadContext
 from openedx.core.djangoapps.plugin_api.views import EdxFragmentView
 from openedx.features.course_duration_limits.access import generate_course_expired_fragment
 from xmodule.modulestore.django import modulestore
 
+User = get_user_model()
 log = logging.getLogger("edx.discussions")
-
 
 THREADS_PER_PAGE = 20
 INLINE_THREADS_PER_PAGE = 20
@@ -134,7 +147,7 @@ def get_threads(request, course, user_info, discussion_id=None, per_page=THREADS
         # If the user clicked a sort key, update their default sort key
         cc_user = cc.User.from_django_user(request.user)
         cc_user.default_sort_key = request.GET.get('sort_key')
-        cc_user.save()
+        cc_user.save(params={"course_id": str(course.id)})
 
     #there are 2 dimensions to consider when executing a search with respect to group id
     #is user a moderator
@@ -163,7 +176,7 @@ def get_threads(request, course, user_info, discussion_id=None, per_page=THREADS
     # If not provided with a discussion id, filter threads by commentable ids
     # which are accessible to the current user.
     if discussion_id is None:
-        discussion_category_ids = set(utils.get_discussion_categories_ids(course, request.user))
+        discussion_category_ids = set(get_discussion_categories_ids(course, request.user))
         threads = [
             thread for thread in threads
             if thread.get('commentable_id') in discussion_category_ids
@@ -190,6 +203,8 @@ def use_bulk_ops(view_func):
     @wraps(view_func)
     def wrapped_view(request, course_id, *args, **kwargs):
         course_key = CourseKey.from_string(course_id)
+        if course_key.deprecated:
+            raise Http404
         with modulestore().bulk_operations(course_key):
             return view_func(request, course_key, *args, **kwargs)
     return wrapped_view
@@ -204,7 +219,7 @@ def inline_discussion(request, course_key, discussion_id):
     with function_trace('get_course_and_user_info'):
         course = get_course_with_access(request.user, 'load', course_key, check_if_enrolled=True)
         cc_user = cc.User.from_django_user(request.user)
-        user_info = cc_user.to_dict()
+        user_info = cc_user.to_dict(course_key=str(course_key))
 
     try:
         with function_trace('get_threads'):
@@ -221,6 +236,7 @@ def inline_discussion(request, course_key, discussion_id):
 
     with function_trace('determine_group_permissions'):
         is_staff = has_permission(request.user, 'openclose_thread', course.id)
+        is_community_ta = utils.is_user_community_ta(request.user, course.id)
         course_discussion_settings = CourseDiscussionSettings.get(course.id)
         group_names_by_id = get_group_names_by_id(course_discussion_settings)
         course_is_divided = course_discussion_settings.division_scheme is not CourseDiscussionSettings.NONE
@@ -231,6 +247,7 @@ def inline_discussion(request, course_key, discussion_id):
                 thread,
                 course_key,
                 is_staff,
+                is_community_ta,
                 course_is_divided,
                 group_names_by_id
             ) for thread in threads
@@ -249,6 +266,20 @@ def inline_discussion(request, course_key, discussion_id):
     })
 
 
+def redirect_forum_url_to_new_mfe(request, course_id):
+    """
+    Returns the redirect link when user opens default discussion homepage
+    """
+    course_key = CourseKey.from_string(course_id)
+    discussions_mfe_enabled = ENABLE_DISCUSSIONS_MFE.is_enabled(course_key)
+
+    redirect_url = None
+    if discussions_mfe_enabled:
+        mfe_base_url = settings.DISCUSSIONS_MICROFRONTEND_URL
+        redirect_url = f"{mfe_base_url}/{str(course_key)}"
+    return redirect_url
+
+
 @cache_control(no_cache=True, no_store=True, must_revalidate=True)
 @login_required
 @use_bulk_ops
@@ -258,14 +289,16 @@ def forum_form_discussion(request, course_key):
     """
     course = get_course_with_access(request.user, 'load', course_key, check_if_enrolled=True)
     request.user.is_community_ta = utils.is_user_community_ta(request.user, course.id)
-    if request.is_ajax():
+    if request.headers.get('x-requested-with') == 'XMLHttpRequest':
         user = cc.User.from_django_user(request.user)
         user_info = user.to_dict()
 
         try:
             unsafethreads, query_params = get_threads(request, course, user_info)  # This might process a search query
             is_staff = has_permission(request.user, 'openclose_thread', course.id)
-            threads = [utils.prepare_content(thread, course_key, is_staff) for thread in unsafethreads]
+            threads = [utils.prepare_content(
+                thread, course_key, is_staff, request.user.is_community_ta
+            ) for thread in unsafethreads]
         except cc.utils.CommentClientMaintenanceError:
             return HttpResponseServerError('Forum is in maintenance mode', status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except ValueError:
@@ -285,9 +318,27 @@ def forum_form_discussion(request, course_key):
             'corrected_text': query_params['corrected_text'],
         })
     else:
+        redirect_url = redirect_forum_url_to_new_mfe(request, str(course.id))
+        if redirect_url:
+            return redirect(redirect_url)
+
         course_id = str(course.id)
         tab_view = CourseTabView()
         return tab_view.get(request, course_id, 'discussion')
+
+
+def redirect_thread_url_to_new_mfe(request, course_id, thread_id):
+    """
+    Returns MFE url of the thread if the user is not privileged
+    """
+    course_key = CourseKey.from_string(course_id)
+    discussions_mfe_enabled = ENABLE_DISCUSSIONS_MFE.is_enabled(course_key)
+    redirect_url = None
+    if discussions_mfe_enabled:
+        mfe_base_url = settings.DISCUSSIONS_MICROFRONTEND_URL
+        if thread_id:
+            redirect_url = f"{mfe_base_url}/{str(course_key)}/posts/{thread_id}"
+    return redirect_url
 
 
 @require_GET
@@ -304,9 +355,9 @@ def single_thread(request, course_key, discussion_id, thread_id):
     course = get_course_with_access(request.user, 'load', course_key, check_if_enrolled=True)
     request.user.is_community_ta = utils.is_user_community_ta(request.user, course.id)
 
-    if request.is_ajax():
+    if request.headers.get('x-requested-with') == 'XMLHttpRequest':
         cc_user = cc.User.from_django_user(request.user)
-        user_info = cc_user.to_dict()
+        user_info = cc_user.to_dict(course_key=str(course_key))
         is_staff = has_permission(request.user, 'openclose_thread', course.id)
 
         try:
@@ -330,7 +381,7 @@ def single_thread(request, course_key, discussion_id, thread_id):
                 user_info=user_info
             )
 
-        content = utils.prepare_content(thread.to_dict(), course_key, is_staff)
+        content = utils.prepare_content(thread.to_dict(), course_key, is_staff, request.user.is_community_ta)
         with function_trace("add_courseware_context"):
             add_courseware_context([content], course, request.user)
 
@@ -339,6 +390,10 @@ def single_thread(request, course_key, discussion_id, thread_id):
             'annotated_content_info': annotated_content_info,
         })
     else:
+        redirect_url = redirect_thread_url_to_new_mfe(request, str(course.id), thread_id)
+        if redirect_url:
+            return redirect(redirect_url)
+
         course_id = str(course.id)
         tab_view = CourseTabView()
         return tab_view.get(request, course_id, 'discussion', discussion_id=discussion_id, thread_id=thread_id)
@@ -359,15 +414,19 @@ def _find_thread(request, course, discussion_id, thread_id):
     """
     try:
         thread = cc.Thread.find(thread_id).retrieve(
-            with_responses=request.is_ajax(),
-            recursive=request.is_ajax(),
+            with_responses=request.headers.get('x-requested-with') == 'XMLHttpRequest',
+            recursive=request.headers.get('x-requested-with') == 'XMLHttpRequest',
             user_id=request.user.id,
             response_skip=request.GET.get("resp_skip"),
             response_limit=request.GET.get("resp_limit")
         )
     except cc.utils.CommentClientRequestError:
         return None
-    # Verify that the student has access to this thread if belongs to a course discussion module
+    # The access checks below use the course in the URL, so the thread has to belong to it.
+    thread_course_id = getattr(thread, "course_id", None)
+    if thread_course_id and str(thread_course_id) != str(course.id):
+        return None
+    # Verify that the student has access to this thread if belongs to a course discussion block
     thread_context = getattr(thread, "context", "course")
     if thread_context == "course" and not utils.discussion_category_id_access(course, request.user, discussion_id):
         return None
@@ -417,7 +476,7 @@ def _create_base_discussion_view_context(request, course_key):
     """
     user = request.user
     cc_user = cc.User.from_django_user(user)
-    user_info = cc_user.to_dict()
+    user_info = cc_user.to_dict(course_key=str(course_key))
     course = get_course_with_access(user, 'load', course_key, check_if_enrolled=True)
     course_settings = make_course_settings(course, user)
     return {
@@ -441,7 +500,7 @@ def _create_base_discussion_view_context(request, course_key):
 
 
 def _get_discussion_default_topic_id(course):
-    for topic, entry in course.discussion_topics.items():  # lint-amnesty, pylint: disable=unused-variable
+    for topic, entry in course.discussion_topics.items():  # pylint: disable=unused-variable  # noqa: B007
         if entry.get('default') is True:
             return entry['id']
 
@@ -465,7 +524,7 @@ def _create_discussion_board_context(request, base_context, thread=None):
         # we need only return the thread information for this one.
         threads = [thread.to_dict()]
 
-        for thread in threads:  # lint-amnesty, pylint: disable=redefined-argument-from-local
+        for thread in threads:  # pylint: disable=redefined-argument-from-local
             # patch for backward compatibility with comments service
             if "pinned" not in thread:
                 thread["pinned"] = False
@@ -476,7 +535,8 @@ def _create_discussion_board_context(request, base_context, thread=None):
         thread_pages = query_params['num_pages']
         root_url = request.path
     is_staff = has_permission(user, 'openclose_thread', course.id)
-    threads = [utils.prepare_content(thread, course_key, is_staff) for thread in threads]
+    is_community_ta = utils.is_user_community_ta(request.user, course.id)
+    threads = [utils.prepare_content(thread, course_key, is_staff, is_community_ta) for thread in threads]
 
     with function_trace("get_metadata_for_threads"):
         annotated_content_info = utils.get_metadata_for_threads(course_key, threads, user, user_info)
@@ -504,7 +564,8 @@ def _create_discussion_board_context(request, base_context, thread=None):
         'is_commentable_divided': is_commentable_divided(course_key, discussion_id, course_discussion_settings),
         # If the default topic id is None the front-end code will look for a topic that contains "General"
         'discussion_default_topic_id': _get_discussion_default_topic_id(course),
-        'enable_daily_digest': is_forum_daily_digest_enabled()
+        'enable_daily_digest': is_forum_daily_digest_enabled(),
+        'PLATFORM_NAME': settings.PLATFORM_NAME
     })
     context.update(
         get_experiment_user_metadata_context(
@@ -546,7 +607,8 @@ def create_user_profile_context(request, course_key, user_id):
         annotated_content_info = utils.get_metadata_for_threads(course_key, threads, request.user, user_info)
 
     is_staff = has_permission(request.user, 'openclose_thread', course.id)
-    threads = [utils.prepare_content(thread, course_key, is_staff) for thread in threads]
+    is_community_ta = utils.is_user_community_ta(request.user, course.id)
+    threads = [utils.prepare_content(thread, course_key, is_staff, is_community_ta) for thread in threads]
     with function_trace("add_courseware_context"):
         add_courseware_context(threads, course, request.user)
 
@@ -573,7 +635,7 @@ def create_user_profile_context(request, course_key, user_id):
             'page': query_params['page'],
             'num_pages': query_params['num_pages'],
             'sort_preference': user.default_sort_key,
-            'learner_profile_page_url': reverse('learner_profile', kwargs={'username': django_user.username}),
+            'learner_profile_page_url': urljoin(settings.PROFILE_MICROFRONTEND_URL, f'/u/{django_user.username}'),
         })
         return context
 
@@ -588,7 +650,7 @@ def user_profile(request, course_key, user_id):
     """
     try:
         context = create_user_profile_context(request, course_key, user_id)
-        if request.is_ajax():
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
             return utils.JsonResponse({
                 'discussion_data': context['threads'],
                 'page': context['page'],
@@ -596,6 +658,11 @@ def user_profile(request, course_key, user_id):
                 'annotated_content_info': context['annotated_content_info'],
             })
         else:
+            discussions_mfe_enabled = ENABLE_DISCUSSIONS_MFE.is_enabled(course_key)
+            if discussions_mfe_enabled:
+                mfe_base_url = settings.DISCUSSIONS_MICROFRONTEND_URL
+                return redirect(f"{mfe_base_url}/{str(course_key)}/learners")
+
             tab_view = CourseTabView()
 
             # To avoid mathjax loading from 'mathjax_include.html'
@@ -605,7 +672,7 @@ def user_profile(request, course_key, user_id):
 
             return tab_view.get(request, str(course_key), 'discussion', profile_page_context=context)
     except User.DoesNotExist:
-        raise Http404  # lint-amnesty, pylint: disable=raise-missing-from
+        raise Http404  # pylint: disable=raise-missing-from  # noqa: B904
     except ValueError:
         return HttpResponseServerError("Invalid group_id")
 
@@ -660,12 +727,15 @@ def followed_threads(request, course_key, user_id):
                 paginated_results.collection,
                 request.user, user_info
             )
-        if request.is_ajax():
+        if request.headers.get('x-requested-with') == 'XMLHttpRequest':
             is_staff = has_permission(request.user, 'openclose_thread', course.id)
+            is_community_ta = utils.is_user_community_ta(request.user, course.id)
             return utils.JsonResponse({
                 'annotated_content_info': annotated_content_info,
                 'discussion_data': [
-                    utils.prepare_content(thread, course_key, is_staff) for thread in paginated_results.collection
+                    utils.prepare_content(
+                        thread, course_key, is_staff, is_community_ta
+                    ) for thread in paginated_results.collection
                 ],
                 'page': query_params['page'],
                 'num_pages': query_params['num_pages'],
@@ -685,7 +755,30 @@ def followed_threads(request, course_key, user_id):
 
             return render(request, 'discussion/user_profile.html', context)
     except User.DoesNotExist:
-        raise Http404  # lint-amnesty, pylint: disable=raise-missing-from
+        raise Http404  # pylint: disable=raise-missing-from  # noqa: B904
+
+
+def is_course_staff(course_key: CourseKey, user: User):
+    """
+    Check if user has course instructor or course staff role.
+    """
+    return CourseInstructorRole(course_key).has_user(user) or CourseStaffRole(course_key).has_user(user)
+
+
+def is_privileged_user(course_key: CourseKey, user: User):
+    """
+    Returns True if user has one of following course role
+    Administrator, Moderator, Group Moderator, Community TA,
+    or Global Staff.
+    """
+    forum_roles = [
+        FORUM_ROLE_COMMUNITY_TA,
+        FORUM_ROLE_GROUP_MODERATOR,
+        FORUM_ROLE_MODERATOR,
+        FORUM_ROLE_ADMINISTRATOR,
+    ]
+    has_course_role = Role.user_has_role_for_course(user, course_key, forum_roles)
+    return GlobalStaff().has_user(user) or has_course_role
 
 
 class DiscussionBoardFragmentView(EdxFragmentView):
@@ -693,7 +786,7 @@ class DiscussionBoardFragmentView(EdxFragmentView):
     Component implementation of the discussion board.
     """
 
-    def render_to_fragment(  # lint-amnesty, pylint: disable=arguments-differ
+    def render_to_fragment(  # pylint: disable=arguments-differ
         self,
         request,
         course_id=None,
@@ -714,8 +807,11 @@ class DiscussionBoardFragmentView(EdxFragmentView):
         Returns:
             Fragment: The fragment representing the discussion board
         """
+        course_key = CourseKey.from_string(course_id)
+        # Force using the legacy view if a user profile is requested or the URL contains a specific topic or thread
+        force_legacy_view = (profile_page_context or thread_id or discussion_id)  # noqa: F841
+        is_educator_or_staff = is_course_staff(course_key, request.user) or GlobalStaff().has_user(request.user)  # noqa: F841  # pylint: disable=line-too-long
         try:
-            course_key = CourseKey.from_string(course_id)
             base_context = _create_base_discussion_view_context(request, course_key)
             # Note:
             #   After the thread is rendered in this fragment, an AJAX
@@ -763,7 +859,7 @@ class DiscussionBoardFragmentView(EdxFragmentView):
             return fragment
         except TeamDiscussionHiddenFromUserException:
             log.warning(
-                'User with id={user_id} tried to view private discussion with id={discussion_id}'.format(
+                'User with id={user_id} tried to view private discussion with id={discussion_id}'.format(  # noqa: UP032
                     user_id=request.user.id,
                     discussion_id=discussion_id
                 )
@@ -862,7 +958,7 @@ def discussion_topics(request, course_key_string):
     course_key = CourseKey.from_string(course_key_string)
     course = get_course_with_access(request.user, 'staff', course_key)
 
-    discussion_topics = {}  # lint-amnesty, pylint: disable=redefined-outer-name
+    discussion_topics = {}  # pylint: disable=redefined-outer-name
     discussion_category_map = utils.get_discussion_category_map(
         course, request.user, divided_only_if_explicit=True, exclude_unstarted=False
     )
@@ -955,25 +1051,6 @@ def course_discussions_settings_handler(request, course_key_string):
         'division_scheme': discussion_settings.division_scheme,
         'available_division_schemes': available_division_schemes(course_key)
     })
-
-
-def get_divided_discussions(course, discussion_settings):
-    """
-    Returns the course-wide and inline divided discussion ids separately.
-    """
-    divided_course_wide_discussions = []
-    divided_inline_discussions = []
-
-    course_wide_discussions = [topic['id'] for __, topic in course.discussion_topics.items()]
-    all_discussions = utils.get_discussion_categories_ids(course, None, include_all=True)
-
-    for divided_discussion_id in discussion_settings.divided_discussions:
-        if divided_discussion_id in course_wide_discussions:
-            divided_course_wide_discussions.append(divided_discussion_id)
-        elif divided_discussion_id in all_discussions:
-            divided_inline_discussions.append(divided_discussion_id)
-
-    return divided_course_wide_discussions, divided_inline_discussions
 
 
 def _check_team_discussion_access(request, course, discussion_id):

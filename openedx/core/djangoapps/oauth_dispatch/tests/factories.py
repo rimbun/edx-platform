@@ -2,15 +2,15 @@
 
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import factory
-import pytz
 from factory.django import DjangoModelFactory
 from factory.fuzzy import FuzzyText
 from oauth2_provider.models import AccessToken, Application, RefreshToken
 
-from openedx.core.djangoapps.oauth_dispatch.models import ApplicationAccess
 from common.djangoapps.student.tests.factories import UserFactory
+from openedx.core.djangoapps.oauth_dispatch.models import ApplicationAccess
 
 
 class ApplicationFactory(DjangoModelFactory):
@@ -39,7 +39,7 @@ class AccessTokenFactory(DjangoModelFactory):
         django_get_or_create = ('user', 'application')
 
     token = FuzzyText(length=32)
-    expires = datetime.now(pytz.UTC) + timedelta(days=1)
+    expires = datetime.now(ZoneInfo("UTC")) + timedelta(days=1)
 
 
 class RefreshTokenFactory(DjangoModelFactory):

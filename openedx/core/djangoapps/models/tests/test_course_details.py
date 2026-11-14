@@ -4,17 +4,18 @@ Tests for CourseDetails
 
 
 import datetime
-import pytest
-import ddt
-from pytz import UTC
-from unittest.mock import patch
+from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
-from django.conf import settings
+import ddt
+import pytest
+from django.test import override_settings
 
 from openedx.core.djangoapps.models.course_details import ABOUT_ATTRIBUTES, CourseDetails
-from xmodule.modulestore import ModuleStoreEnum
 from xmodule.data import CertificatesDisplayBehaviors
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore import ModuleStoreEnum
+from xmodule.modulestore.django import SignalHandler
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
 from xmodule.modulestore.tests.factories import CourseFactory
 
 EXAMPLE_CERTIFICATE_AVAILABLE_DATE = datetime.date(2020, 1, 1)
@@ -25,30 +26,38 @@ class CourseDetailsTestCase(ModuleStoreTestCase):
     """
     Tests the first course settings page (course dates, overview, etc.).
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     def setUp(self):
         super().setUp()
-        self.course = CourseFactory.create()
+        self.course = CourseFactory.create(default_enrollment_start=True)
 
-    def test_virgin_fetch(self):
-        details = CourseDetails.fetch(self.course.id)
-        assert details.org == self.course.location.org, 'Org not copied into'
-        assert details.course_id == self.course.location.course, 'Course_id not copied into'
-        assert details.run == self.course.location.block_id, 'Course name not copied into'
-        assert details.course_image_name == self.course.course_image
-        assert details.start_date.tzinfo is not None
-        assert details.end_date is None, ('end date somehow initialized ' + str(details.end_date))
-        assert details.enrollment_start is None,\
-            ('enrollment_start date somehow initialized ' + str(details.enrollment_start))
-        assert details.enrollment_end is None,\
-            ('enrollment_end date somehow initialized ' + str(details.enrollment_end))
-        assert details.certificate_available_date is None,\
-            ('certificate_available_date date somehow initialized ' + str(details.certificate_available_date))
-        assert details.syllabus is None, ('syllabus somehow initialized' + str(details.syllabus))
-        assert details.intro_video is None, ('intro_video somehow initialized' + str(details.intro_video))
-        assert details.effort is None, ('effort somehow initialized' + str(details.effort))
-        assert details.language is None, ('language somehow initialized' + str(details.language))
-        assert not details.self_paced
+    @ddt.data(True, False)
+    def test_virgin_fetch(self, should_have_default_enroll_start):
+        with override_settings(CREATE_COURSE_WITH_DEFAULT_ENROLLMENT_START_DATE=should_have_default_enroll_start):
+            course = CourseFactory.create(default_enrollment_start=should_have_default_enroll_start)
+            details = CourseDetails.fetch(course.id)
+            wrong_enrollment_start_msg = (
+                'enrollment_start not copied into'
+                if should_have_default_enroll_start
+                else f'enrollment_start date somehow initialized {str(details.enrollment_start)}'
+            )
+            assert details.org == course.location.org, 'Org not copied into'
+            assert details.course_id == course.location.course, 'Course_id not copied into'
+            assert details.run == course.location.run, 'Course run not copied into'
+            assert details.course_image_name == course.course_image
+            assert details.start_date.tzinfo is not None
+            assert details.end_date is None, ('end date somehow initialized ' + str(details.end_date))
+            assert details.enrollment_start == course.enrollment_start, wrong_enrollment_start_msg
+            assert details.enrollment_end is None,\
+                ('enrollment_end date somehow initialized ' + str(details.enrollment_end))
+            assert details.certificate_available_date is None,\
+                ('certificate_available_date date somehow initialized ' + str(details.certificate_available_date))
+            assert details.syllabus is None, ('syllabus somehow initialized' + str(details.syllabus))
+            assert details.intro_video is None, ('intro_video somehow initialized' + str(details.intro_video))
+            assert details.effort is None, ('effort somehow initialized' + str(details.effort))
+            assert details.language is None, ('language somehow initialized' + str(details.language))
+            assert not details.self_paced
 
     def test_update_and_fetch(self):
         jsondetails = CourseDetails.fetch(self.course.id)
@@ -75,13 +84,13 @@ class CourseDetailsTestCase(ModuleStoreTestCase):
             jsondetails.self_paced = True
             assert CourseDetails.update_from_json(self.course.id, jsondetails.__dict__, self.user).self_paced ==\
                    jsondetails.self_paced
-            jsondetails.start_date = datetime.datetime(2010, 10, 1, 0, tzinfo=UTC)
+            jsondetails.start_date = datetime.datetime(2010, 10, 1, 0, tzinfo=ZoneInfo("UTC"))
             assert CourseDetails.update_from_json(self.course.id, jsondetails.__dict__, self.user).start_date ==\
                    jsondetails.start_date
-            jsondetails.end_date = datetime.datetime(2011, 10, 1, 0, tzinfo=UTC)
+            jsondetails.end_date = datetime.datetime(2011, 10, 1, 0, tzinfo=ZoneInfo("UTC"))
             assert CourseDetails.update_from_json(self.course.id, jsondetails.__dict__, self.user).end_date ==\
                    jsondetails.end_date
-            jsondetails.certificate_available_date = datetime.datetime(2010, 10, 1, 0, tzinfo=UTC)
+            jsondetails.certificate_available_date = datetime.datetime(2010, 10, 1, 0, tzinfo=ZoneInfo("UTC"))
             assert CourseDetails.update_from_json(self.course.id, jsondetails.__dict__, self.user)\
                 .certificate_available_date == jsondetails.certificate_available_date
             jsondetails.course_image_name = "an_image.jpg"
@@ -115,7 +124,7 @@ class CourseDetailsTestCase(ModuleStoreTestCase):
                    jsondetails.instructor_info
 
     def test_toggle_pacing_during_course_run(self):
-        self.course.start = datetime.datetime.now()
+        self.course.start = datetime.datetime.now(ZoneInfo("UTC"))
         self.store.update_item(self.course, self.user.id)
 
         details = CourseDetails.fetch(self.course.id)
@@ -138,7 +147,7 @@ class CourseDetailsTestCase(ModuleStoreTestCase):
         attribute_name = 'not_an_about_attribute'
         with self.store.branch_setting(ModuleStoreEnum.Branch.draft_preferred, self.course.id):
             CourseDetails.update_about_item(self.course, attribute_name, 'test_value', self.user.id)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             CourseDetails.fetch_about_attribute(self.course.id, attribute_name)
 
     def test_fetch_video(self):
@@ -147,7 +156,7 @@ class CourseDetailsTestCase(ModuleStoreTestCase):
             CourseDetails.update_about_video(self.course, video_value, self.user.id)
         assert CourseDetails.fetch_youtube_video_id(self.course.id) == video_value
         video_url = CourseDetails.fetch_video_url(self.course.id)
-        self.assertRegex(video_url, fr'http://.*{video_value}')
+        self.assertRegex(video_url, fr'http://.*{video_value}')  # noqa: PT009
 
     @ddt.data(
         (
@@ -200,30 +209,36 @@ class CourseDetailsTestCase(ModuleStoreTestCase):
         ),
     )
     @ddt.unpack
-    @patch.dict(settings.FEATURES, ENABLE_V2_CERT_DISPLAY_SETTINGS=True)
-    def test_validate_certificate_settings_v2(self, stored_date, stored_behavior, expected_date, expected_behavior):
+    def test_validate_certificate_settings(self, stored_date, stored_behavior, expected_date, expected_behavior):
         assert CourseDetails.validate_certificate_settings(
             stored_date, stored_behavior
         ) == (expected_date, expected_behavior)
 
-    @ddt.data(
-        (
-            EXAMPLE_CERTIFICATE_AVAILABLE_DATE,
-            CertificatesDisplayBehaviors.END_WITH_DATE,
-            EXAMPLE_CERTIFICATE_AVAILABLE_DATE,
-            CertificatesDisplayBehaviors.END_WITH_DATE
-        ),
-        (
-            None,
-            "invalid_option",
-            None,
-            "invalid_option"
-        ),
-    )
-    @ddt.unpack
-    @patch.dict(settings.FEATURES, ENABLE_V2_CERT_DISPLAY_SETTINGS=False)
-    def test_validate_certificate_settings_v1(self, stored_date, stored_behavior, expected_date, expected_behavior):
-        """Test that method just returns passed in arguments if v2 is off"""
-        assert CourseDetails.validate_certificate_settings(
-            stored_date, stored_behavior
-        ) == (expected_date, expected_behavior)
+    def test_update_from_json_emits_course_published_signal_once(self):
+        """
+        Verify that update_from_json emits the course_published signal exactly
+        once per call.
+
+        The bulk_operations context wrapping all writes inside update_from_json
+        coalesces every update_item / delete_item call into a single
+        course_published signal emission.
+        """
+        signal_handler = MagicMock()
+        SignalHandler.course_published.connect(signal_handler)
+        try:
+            jsondetails = CourseDetails.fetch(self.course.id)
+            jsondetails.overview = "<p>Updated overview</p>"
+            jsondetails.short_description = "Updated short description"
+            jsondetails.effort = "2 hours/week"
+            jsondetails.language = "en"
+            jsondetails.intro_video = None
+
+            # ModuleStoreTestCase disables all signals by default; re-enable
+            # course_published for this test so we can assert on its emission.
+            with SignalHandler.course_published.for_state(is_enabled=True):
+                with self.store.branch_setting(ModuleStoreEnum.Branch.draft_preferred, self.course.id):
+                    CourseDetails.update_from_json(self.course.id, jsondetails.__dict__, self.user)
+
+            signal_handler.assert_called_once()
+        finally:
+            SignalHandler.course_published.disconnect(signal_handler)

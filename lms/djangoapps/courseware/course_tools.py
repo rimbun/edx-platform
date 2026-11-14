@@ -7,12 +7,14 @@ import datetime
 
 import pytz
 from django.conf import settings
-from django.utils.translation import ugettext as _
 from django.urls import reverse
+from django.utils.translation import gettext as _
+
 from common.djangoapps.course_modes.models import CourseMode
-from openedx.features.course_experience.course_tools import CourseTool
 from common.djangoapps.student.models import CourseEnrollment
+from lms.djangoapps.courseware.utils import _use_new_financial_assistance_flow
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
+from openedx.features.course_experience.course_tools import CourseTool
 
 
 class FinancialAssistanceTool(CourseTool):
@@ -32,16 +34,13 @@ class FinancialAssistanceTool(CourseTool):
         Show this link for active courses where financial assistance is available, unless upgrade deadline has passed
         """
         now = datetime.datetime.now(pytz.UTC)
-        feature_flags = None
         try:
             course_overview = CourseOverview.objects.get(id=course_key)
         except CourseOverview.DoesNotExist:
             course_overview = None
 
-        # hide link if there's no ENABLE_FINANCIAL_ASSISTANCE_FORM setting (ex: Edge) or if it's False
-        subset_name = 'FEATURES'
-        feature_flags = getattr(settings, subset_name)
-        if feature_flags is None or not feature_flags.get('ENABLE_FINANCIAL_ASSISTANCE_FORM'):
+        # hide link if financial assistance is not enabled
+        if not settings.ENABLE_FINANCIAL_ASSISTANCE_FORM:
             return False
 
         # hide link for archived courses
@@ -86,4 +85,6 @@ class FinancialAssistanceTool(CourseTool):
         """
         Returns the URL for this tool for the specified course key.
         """
+        if _use_new_financial_assistance_flow(str(course_key)):
+            return reverse('financial_assistance_v2', args=[course_key])
         return reverse('financial_assistance')

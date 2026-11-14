@@ -14,12 +14,12 @@ from lms.djangoapps.ccx.tasks import send_ccx_course_published
 from lms.djangoapps.ccx.tests.factories import CcxFactory
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from xmodule.modulestore.django import SignalHandler
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
 from xmodule.modulestore.tests.factories import CourseFactory
 
 
 @contextlib.contextmanager
-def mock_signal_receiver(signal):  # lint-amnesty, pylint: disable=missing-function-docstring
+def mock_signal_receiver(signal):  # pylint: disable=missing-function-docstring
     receiver = mock.Mock()
     signal.connect(receiver)
     yield receiver
@@ -30,8 +30,6 @@ class TestSendCCXCoursePublished(ModuleStoreTestCase):
     """
     Unit tests for the send ccx course published task
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     ENABLED_SIGNALS = ['course_published']
 
     def setUp(self):

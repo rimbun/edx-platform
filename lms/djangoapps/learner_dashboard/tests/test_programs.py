@@ -13,17 +13,22 @@ from bs4 import BeautifulSoup
 from django.conf import settings
 from django.test import override_settings
 from django.urls import reverse, reverse_lazy
+from edx_toggles.toggles.testutils import override_waffle_flag
+from lti_consumer.models import LtiConfiguration
 
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
+from lms.djangoapps.learner_dashboard.config.waffle import ENABLE_PROGRAM_TAB_VIEW
+from lms.djangoapps.program_enrollments.rest_api.v1.tests.test_views import ProgramCacheMixin
 from lms.envs.test import CREDENTIALS_PUBLIC_SERVICE_URL
 from openedx.core.djangoapps.catalog.constants import PathwayType
 from openedx.core.djangoapps.catalog.tests.factories import (
     CourseFactory,
     CourseRunFactory,
     PathwayFactory,
-    ProgramFactory
+    ProgramFactory,
 )
 from openedx.core.djangoapps.catalog.tests.mixins import CatalogIntegrationMixin
+from openedx.core.djangoapps.programs.models import ProgramDiscussionsConfiguration
 from openedx.core.djangoapps.programs.tests.mixins import ProgramsApiConfigMixin
 from openedx.core.djangolib.testing.utils import skip_unless_lms
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
@@ -50,7 +55,6 @@ def load_serialized_data(response, key):
 class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
     """Unit tests for the program listing page."""
     maxDiff = None
-    password = 'test'
     url = reverse_lazy('program_listing_view')
 
     @classmethod
@@ -58,7 +62,7 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
         super().setUpClass()
 
         cls.course = ModuleStoreCourseFactory()
-        course_run = CourseRunFactory(key=str(cls.course.id))  # lint-amnesty, pylint: disable=no-member
+        course_run = CourseRunFactory(key=str(cls.course.id))  # pylint: disable=no-member
         course = CourseFactory(course_runs=[course_run])
 
         cls.first_program = ProgramFactory(courses=[course])
@@ -70,7 +74,7 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
         super().setUp()
 
         self.user = UserFactory()
-        self.client.login(username=self.user.username, password=self.password)
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
     @classmethod
     def program_sort_key(cls, program):
@@ -82,15 +86,9 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
     def assert_dict_contains_subset(self, superset, subset):
         """
         Verify that the dict superset contains the dict subset.
-
-        Works like assertDictContainsSubset, deprecated since Python 3.2.
-        See: https://docs.python.org/2.7/library/unittest.html#unittest.TestCase.assertDictContainsSubset.
         """
-        superset_keys = set(superset.keys())
-        subset_keys = set(subset.keys())
-        intersection = {key: superset[key] for key in superset_keys & subset_keys}
-
-        assert subset == intersection
+        for key, value in subset.items():
+            assert key in superset and superset[key] == value, f"{key}: {value} not found in superset or does not match"  # noqa: PT018  # pylint: disable=line-too-long
 
     def test_login_required(self, mock_get_programs):
         """
@@ -107,12 +105,12 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
             '{}?next={}'.format(reverse('signin_user'), self.url)
         )
 
-        self.client.login(username=self.user.username, password=self.password)
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
         response = self.client.get(self.url)
         assert response.status_code == 200
 
-    def test_404_if_disabled(self, _mock_get_programs):
+    def test_404_if_disabled(self, _mock_get_programs):  # noqa: PT019
         """
         Verify that the page 404s if disabled.
         """
@@ -138,7 +136,7 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
         self.create_programs_config()
         mock_get_programs.return_value = self.data
 
-        CourseEnrollmentFactory(user=self.user, course_id=self.course.id)  # lint-amnesty, pylint: disable=no-member
+        CourseEnrollmentFactory(user=self.user, course_id=self.course.id)  # pylint: disable=no-member
 
         response = self.client.get(self.url)
         actual = load_serialized_data(response, 'programsData')
@@ -179,7 +177,7 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
         self.create_programs_config()
         mock_get_programs.return_value = self.data
 
-        CourseEnrollmentFactory(user=self.user, course_id=self.course.id)  # lint-amnesty, pylint: disable=no-member
+        CourseEnrollmentFactory(user=self.user, course_id=self.course.id)  # pylint: disable=no-member
 
         response = self.client.get(self.url)
         actual = load_serialized_data(response, 'programsData')
@@ -193,7 +191,7 @@ class TestProgramListing(ProgramsApiConfigMixin, SharedModuleStoreTestCase):
 
 
 @skip_unless_lms
-@mock.patch(PROGRAMS_MODULE + '.get_pathways')
+@mock.patch(PROGRAMS_UTILS_MODULE + '.get_pathways')
 @mock.patch(PROGRAMS_UTILS_MODULE + '.get_programs')
 class TestProgramDetails(ProgramsApiConfigMixin, CatalogIntegrationMixin, SharedModuleStoreTestCase):
     """Unit tests for the program details page."""
@@ -206,20 +204,20 @@ class TestProgramDetails(ProgramsApiConfigMixin, CatalogIntegrationMixin, Shared
         super().setUpClass()
 
         modulestore_course = ModuleStoreCourseFactory()
-        course_run = CourseRunFactory(key=str(modulestore_course.id))  # lint-amnesty, pylint: disable=no-member
+        course_run = CourseRunFactory(key=str(modulestore_course.id))  # pylint: disable=no-member
         course = CourseFactory(course_runs=[course_run])
 
         cls.program_data = ProgramFactory(uuid=cls.program_uuid, courses=[course])
         cls.pathway_data = PathwayFactory()
         cls.program_data['pathway_ids'] = [cls.pathway_data['id']]
         cls.pathway_data['program_uuids'] = [cls.program_data['uuid']]
-        del cls.pathway_data['programs']  # lint-amnesty, pylint: disable=unsupported-delete-operation
+        del cls.pathway_data['programs']  # pylint: disable=unsupported-delete-operation
 
     def setUp(self):
         super().setUp()
 
         self.user = UserFactory()
-        self.client.login(username=self.user.username, password=self.password)
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
     def assert_program_data_present(self, response):
         """Verify that program data is present."""
@@ -272,7 +270,7 @@ class TestProgramDetails(ProgramsApiConfigMixin, CatalogIntegrationMixin, Shared
             '{}?next={}'.format(reverse('signin_user'), self.url)
         )
 
-        self.client.login(username=self.user.username, password=self.password)
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
         with mock.patch('lms.djangoapps.learner_dashboard.programs.get_certificates') as certs:
             certs.return_value = [{'type': 'program', 'url': '/'}]
@@ -281,7 +279,7 @@ class TestProgramDetails(ProgramsApiConfigMixin, CatalogIntegrationMixin, Shared
         self.assert_program_data_present(response)
         self.assert_pathway_data_present(response)
 
-    def test_404_if_disabled(self, _mock_get_programs, _mock_get_pathways):
+    def test_404_if_disabled(self, _mock_get_programs, _mock_get_pathways):  # noqa: PT019
         """
         Verify that the page 404s if disabled.
         """
@@ -290,7 +288,7 @@ class TestProgramDetails(ProgramsApiConfigMixin, CatalogIntegrationMixin, Shared
         response = self.client.get(self.url)
         assert response.status_code == 404
 
-    def test_404_if_no_data(self, mock_get_programs, _mock_get_pathways):
+    def test_404_if_no_data(self, mock_get_programs, _mock_get_pathways):  # noqa: PT019
         """Verify that the page 404s if no program data is found."""
         self.create_programs_config()
 
@@ -298,3 +296,49 @@ class TestProgramDetails(ProgramsApiConfigMixin, CatalogIntegrationMixin, Shared
 
         response = self.client.get(self.url)
         assert response.status_code == 404
+
+
+@override_waffle_flag(ENABLE_PROGRAM_TAB_VIEW, active=True)
+class TestProgramDetailsFragmentView(SharedModuleStoreTestCase, ProgramCacheMixin, ProgramsApiConfigMixin):
+    """Unit tests for the program details page."""
+    program_uuid = str(uuid4())
+    password = 'test'
+    url = reverse_lazy('program_details_fragment_view', kwargs={'program_uuid': program_uuid})
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        modulestore_course = ModuleStoreCourseFactory()
+        course_run = CourseRunFactory(key=str(modulestore_course.id))
+        course = CourseFactory(course_runs=[course_run])
+        cls.program = ProgramFactory(uuid=cls.program_uuid, courses=[course])
+
+    def setUp(self):
+        super().setUp()
+        self.user = UserFactory()
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
+        self.set_program_in_catalog_cache(self.program_uuid, self.program)
+        self.create_programs_config()
+
+    def test_discussion_flags_exist(self):
+        """
+        Test if programTabViewEnabled and discussionFragment exist in html.
+        """
+
+        discussion_config = ProgramDiscussionsConfiguration.objects.create(
+            program_uuid=self.program_uuid,
+            enabled=True,
+            provider_type="piazza",
+        )
+        discussion_config.lti_configuration = LtiConfiguration.objects.create(
+            config_store=LtiConfiguration.CONFIG_ON_DB,
+            lti_1p1_launch_url='http://test.url',
+            lti_1p1_client_key='test_client_key',
+            lti_1p1_client_secret='test_client_secret',
+        )
+        discussion_config.save()
+
+        response = self.client.get(self.url)
+        self.assertContains(response, 'programTabViewEnabled: true',)
+        self.assertContains(response, 'discussionFragment: {"configured": true, "iframe":')

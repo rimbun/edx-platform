@@ -41,6 +41,12 @@ working_config_block = {
                     "type": "private_managed",
                     "description": "Private Topic 2 desc",
                     "name": "Private Topic 2 Name"
+                },
+                {
+                    "id": "open_managed_topic_1_id",
+                    "type": "open_managed",
+                    "description": "Open Managed Topic 1 desc",
+                    "name": "Open Managed Topic 1 Name"
                 }
             ]
         }
@@ -419,7 +425,7 @@ class TeamsConfigurationTests(unittest.TestCase):
     @ddt.unpack
     def test_team_settings(self, config_block, error_message):
         result = CourseMetadata.validate_team_settings(config_block)
-        self.assertEqual(len(result), len(error_message))
+        self.assertEqual(len(result), len(error_message))  # noqa: PT009
         if len(error_message) > 0:
             for res in result:
-                self.assertIn(res['message'], error_message)
+                self.assertIn(res['message'], error_message)  # noqa: PT009

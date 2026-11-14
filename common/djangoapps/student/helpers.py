@@ -14,13 +14,13 @@ from completion.exceptions import UnavailableCompletionData
 from completion.utilities import get_key_to_last_completed_block
 from django.conf import settings
 from django.contrib.auth import load_backend
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
-from django.core.exceptions import PermissionDenied, ObjectDoesNotExist
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
 from django.core.validators import ValidationError
-from django.db import IntegrityError, transaction, ProgrammingError
+from django.db import IntegrityError, ProgrammingError, transaction
 from django.urls import NoReverseMatch, reverse
-from django.utils.translation import ugettext as _
-from pytz import UTC
+from django.utils.translation import gettext as _
+from pytz import UTC, timezone
 
 from common.djangoapps import third_party_auth
 from common.djangoapps.course_modes.models import CourseMode
@@ -32,27 +32,38 @@ from common.djangoapps.student.models import (
     UserProfile,
     email_exists_or_retired,
     unique_id_for_user,
-    username_exists_or_retired
+    username_exists_or_retired,
 )
 from common.djangoapps.util.password_policy_validators import normalize_password
 from lms.djangoapps.certificates.api import (
+    auto_certificate_generation_enabled,
+    certificate_status_for_student,
     certificates_viewable_for_course,
-    has_self_generated_certificates_enabled,
     get_certificate_url,
     has_html_certificates_enabled,
-    certificate_status_for_student,
-    auto_certificate_generation_enabled,
+    has_self_generated_certificates_enabled,
 )
 from lms.djangoapps.certificates.data import CertificateStatuses
+from lms.djangoapps.course_blocks.api import get_course_blocks
+from lms.djangoapps.course_home_api.dates.serializers import DateSummarySerializer
+from lms.djangoapps.courseware.context_processor import user_timezone_locale_prefs
+from lms.djangoapps.courseware.courses import get_course_date_blocks, get_course_with_access
+from lms.djangoapps.courseware.date_summary import TodaysDate
 from lms.djangoapps.grades.api import CourseGradeFactory
 from lms.djangoapps.instructor import access
 from lms.djangoapps.verify_student.models import VerificationDeadline
 from lms.djangoapps.verify_student.services import IDVerificationService
 from lms.djangoapps.verify_student.utils import is_verification_expiring_soon, verification_for_datetime
+from openedx.core.djangoapps.content.block_structure.exceptions import UsageKeyNotInBlockStructure
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
 from openedx.core.djangoapps.theming.helpers import get_themes
 from openedx.core.djangoapps.user_authn.utils import is_safe_login_or_logout_redirect
-from xmodule.data import CertificatesDisplayBehaviors
+from openedx.core.lib.log_utils import (
+    get_standalone_pii_or_redacted_for_log,
+    get_username_or_pii_safe_user_id_for_log,
+)
+from openedx.core.lib.time_zone_utils import get_time_zone_offset
+from xmodule.data import CertificatesDisplayBehaviors  # pylint: disable=wrong-import-order
 
 # Enumeration of per-course verification statuses
 # we display on the student dashboard.
@@ -113,6 +124,10 @@ def check_verify_status_by_course(user, course_enrollments):
 
     """
     status_by_course = {}
+
+    # If integrity signature is enabled, this is a no-op because IDV is not required
+    if settings.ENABLE_INTEGRITY_SIGNATURE:
+        return status_by_course
 
     # Retrieve all verifications for the user, sorted in descending
     # order by submission datetime
@@ -221,7 +236,7 @@ def check_verify_status_by_course(user, course_enrollments):
                 }
 
     if recent_verification_datetime:
-        for key, value in status_by_course.items():  # pylint: disable=unused-variable
+        for key, value in status_by_course.items():  # pylint: disable=unused-variable  # noqa: B007
             status_by_course[key]['verification_good_until'] = recent_verification_datetime.strftime("%m/%d/%Y")
 
     return status_by_course
@@ -305,7 +320,7 @@ def get_next_url_for_login_page(request, include_host=False):
     # Append a tpa_hint query parameter, if one is configured
     tpa_hint = configuration_helpers.get_value(
         "THIRD_PARTY_AUTH_HINT",
-        settings.FEATURES.get("THIRD_PARTY_AUTH_HINT", '')
+        settings.THIRD_PARTY_AUTH_HINT
     )
     if tpa_hint:
         # Don't add tpa_hint if we're already in the TPA pipeline (prevent infinite loop),
@@ -428,7 +443,7 @@ def authenticate_new_user(request, username, password):
     backend = load_backend(NEW_USER_AUTH_BACKEND)
     user = backend.authenticate(request=request, username=username, password=password)
     if not user:
-        log.warning(f"Unable to authenticate user: {username}")
+        log.warning(f"Unable to authenticate user: {get_standalone_pii_or_redacted_for_log(username)}")
     user.backend = NEW_USER_AUTH_BACKEND
     return user
 
@@ -565,7 +580,7 @@ def _cert_info(user, enrollment, cert_status):
         elif 'download_url' not in cert_status:
             log.warning(
                 "User %s has a downloadable cert for %s, but no download url",
-                user.username,
+                get_username_or_pii_safe_user_id_for_log(user),
                 course_overview.id
             )
             return default_info
@@ -578,7 +593,7 @@ def _cert_info(user, enrollment, cert_status):
             linkedin_config = LinkedInAddToProfileConfiguration.current()
             if linkedin_config.is_enabled():
                 status_dict['linked_in_url'] = linkedin_config.add_to_profile_url(
-                    course_overview.display_name, cert_status.get('mode'), cert_status['download_url'],
+                    course_overview, cert_status.get('mode'), cert_status['download_url'],
                 )
 
     if status in {'generating', 'downloadable', 'notpassing', 'restricted', 'auditing', 'unverified'}:
@@ -635,21 +650,14 @@ def _is_certificate_earned_but_not_available(course_overview, status):
         (bool): True if the user earned the certificate but it's hidden due to display behavior, else False
 
     """
-    if settings.FEATURES.get("ENABLE_V2_CERT_DISPLAY_SETTINGS"):
-        return (
-            not certificates_viewable_for_course(course_overview)
-            and CertificateStatuses.is_passing_status(status)
-            and course_overview.certificates_display_behavior in (
-                CertificatesDisplayBehaviors.END_WITH_DATE,
-                CertificatesDisplayBehaviors.END
-            )
+    return (
+        not certificates_viewable_for_course(course_overview)
+        and CertificateStatuses.is_passing_status(status)
+        and course_overview.certificates_display_behavior in (
+            CertificatesDisplayBehaviors.END_WITH_DATE,
+            CertificatesDisplayBehaviors.END
         )
-    else:
-        return (
-            not certificates_viewable_for_course(course_overview) and
-            CertificateStatuses.is_passing_status(status) and
-            course_overview.certificate_available_date
-        )
+    )
 
 
 def process_survey_link(survey_link, user):
@@ -672,7 +680,7 @@ def do_create_account(form, custom_form=None):
     # Check if ALLOW_PUBLIC_ACCOUNT_CREATION flag turned off to restrict user account creation
     if not configuration_helpers.get_value(
             'ALLOW_PUBLIC_ACCOUNT_CREATION',
-            settings.FEATURES.get('ALLOW_PUBLIC_ACCOUNT_CREATION', True)
+            settings.ALLOW_PUBLIC_ACCOUNT_CREATION
     ):
         raise PermissionDenied()
 
@@ -710,14 +718,14 @@ def do_create_account(form, custom_form=None):
         # AccountValidationError and a consistent user message returned (i.e. both should
         # return "It looks like {username} belongs to an existing account. Try again with a
         # different username.")
-        if username_exists_or_retired(user.username):  # lint-amnesty, pylint: disable=no-else-raise
-            raise AccountValidationError(  # lint-amnesty, pylint: disable=raise-missing-from
+        if username_exists_or_retired(user.username):  # pylint: disable=no-else-raise
+            raise AccountValidationError(  # pylint: disable=raise-missing-from  # noqa: B904
                 USERNAME_EXISTS_MSG_FMT.format(username=proposed_username),
                 field="username",
                 error_code='duplicate-username',
             )
         elif email_exists_or_retired(user.email):
-            raise AccountValidationError(  # lint-amnesty, pylint: disable=raise-missing-from
+            raise AccountValidationError(  # pylint: disable=raise-missing-from  # noqa: B904
                 _("An account with the Email '{email}' already exists.").format(email=user.email),
                 field="email",
                 error_code='duplicate-email'
@@ -766,10 +774,18 @@ def get_resume_urls_for_enrollments(user, enrollments):
     for enrollment in enrollments:
         try:
             block_key = get_key_to_last_completed_block(user, enrollment.course_id)
-            url_to_block = reverse(
-                'jump_to',
-                kwargs={'course_id': enrollment.course_id, 'location': block_key}
-            )
+            try:
+                block_data = get_course_blocks(user, block_key)
+            except UsageKeyNotInBlockStructure:
+                url_to_block = ''
+            else:
+                if block_key in block_data:
+                    url_to_block = reverse(
+                        'jump_to',
+                        kwargs={'course_id': enrollment.course_id, 'location': block_key}
+                    )
+                else:
+                    url_to_block = ''
         except UnavailableCompletionData:
             url_to_block = ''
         resume_course_urls[enrollment.course_id] = url_to_block
@@ -800,3 +816,100 @@ def user_has_passing_grade_in_course(enrollment):
     except AttributeError:
         pass
     return False
+
+
+def get_instructors(course_run, marketing_root_url):
+    """
+    Get course instructors.
+    """
+    if course_run is None:
+        raise ValueError("missing course_run")
+    instructors = []
+    staff = course_run.get('staff', [])
+    for instructor in staff:
+        instructor = {
+            'name': f"{instructor.get('given_name')} {instructor.get('family_name')}",
+            'profile_image_url': instructor.get('profile_image_url'),
+            'organization_name': (instructor.get('position').get('organization_name')
+                                  if instructor.get('position') else ''),
+            'bio_url': f"{marketing_root_url}/bio/{instructor.get('slug')}"
+        }
+        instructors.append(instructor)
+
+    return instructors
+
+
+def _prepare_date_block(block, block_date, user_timezone):
+    """
+    Prepare date block which include assignment related data for this date
+    """
+    timezone_offset = get_time_zone_offset(user_timezone, block_date)
+    block = {
+        'title': block.get('title', ''),
+        'assignment_type': block.get('assignment_type', '') or '',
+        'assignment_count': 0,
+        'link': block.get('link', ''),
+        'date': block_date,
+        'due_date': block_date.strftime("%a, %b %d, %Y"),
+        'due_time': (f'{block_date.strftime("%H:%M %p")} GMT{timezone_offset}' if block.get('assignment_type') else '')
+    }
+    return block
+
+
+def _remove_date_key_from_course_dates(course_data):
+    """
+    Remove date key from course dates list
+    """
+    _ = course_data.pop('date')
+    return course_data
+
+
+def get_course_dates_for_email(user, course_id, request):
+    """
+    Getting nearest dates from today one would be before today and one
+    would be after today.
+    """
+    user_timezone_locale = user_timezone_locale_prefs(request)
+    user_timezone = timezone(user_timezone_locale['user_timezone'] or str(UTC))
+
+    course = get_course_with_access(user, 'load', course_id)
+    date_blocks = get_course_date_blocks(course, user, request, include_access=True, include_past_dates=True)
+    date_blocks = [block for block in date_blocks if not isinstance(block, TodaysDate)]
+    blocks = DateSummarySerializer(date_blocks, many=True).data
+
+    today = datetime.now(user_timezone)
+    course_date = {
+        'title': '',
+        'assignment_type': '',
+        'link': '',
+        'assignment_count': 0,
+        'date': '',
+        'due_date': today.strftime("%a, %b %d, %Y"),
+        'due_time': ''
+    }
+    course_date_list = [{**course_date, }, {**course_date, 'date': today}, {**course_date}]
+    for block in blocks:
+        block_date = datetime.strptime(block.get('date')[:19], '%Y-%m-%dT%H:%M:%S')
+        block_date = block_date.replace(tzinfo=UTC)
+        block_date = block_date.astimezone(user_timezone)
+
+        if block_date < today:
+            if block_date == course_date_list[0]['date'] and block.get('assignment_type'):
+                course_date_list[0]['assignment_count'] += 1
+            else:
+                course_date_list[0].update(_prepare_date_block(block, block_date, user_timezone))
+
+        if block_date == today:
+            if block.get('assignment_type') and course_date_list[1]['assignment_type'] != '':
+                course_date_list[1]['assignment_count'] += 1
+            else:
+                course_date_list[1].update(_prepare_date_block(block, block_date, user_timezone))
+
+        if block_date > today:
+            if block_date == course_date_list[2]['date'] and block.get('assignment_type'):
+                course_date_list[2]['assignment_count'] += 1
+            if course_date_list[2]['date'] == '':
+                course_date_list[2].update(_prepare_date_block(block, block_date, user_timezone))
+
+    course_date_list = list(map(_remove_date_key_from_course_dates, course_date_list))
+    return course_date_list

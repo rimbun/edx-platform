@@ -3,14 +3,12 @@ APIs related to Course Import.
 """
 
 
-import base64
 import logging
 import os
+from uuid import uuid4
 
-from django.conf import settings
 from django.core.files import File
 from edx_django_utils.monitoring import set_custom_attribute, set_custom_attributes_for_course_key
-from path import Path as path
 from rest_framework import status
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.generics import GenericAPIView
@@ -18,7 +16,13 @@ from rest_framework.response import Response
 from user_tasks.models import UserTaskStatus
 
 from cms.djangoapps.contentstore.storage import course_import_export_storage
-from cms.djangoapps.contentstore.tasks import CourseImportTask, import_olx
+from cms.djangoapps.contentstore.tasks import (
+    CourseImportTask,
+    course_import_working_dir,
+    import_olx,
+    remove_course_import_working_dir,
+)
+from cms.djangoapps.contentstore.utils import IMPORTABLE_FILE_TYPES
 from openedx.core.lib.api.view_utils import DeveloperErrorViewMixin, view_auth_classes
 
 from .utils import course_author_access_required
@@ -44,8 +48,8 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
     """
     **Use Case**
 
-        * Start an asynchronous task to import a course from a .tar.gz file into
-        the specified course ID, overwriting the existing course
+        * Start an asynchronous task to import a course from a .tar.gz or .zip
+        file into the specified course ID, overwriting the existing course
         * Get a status on an asynchronous task import
 
     **Example Requests**
@@ -59,7 +63,7 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
 
         * course_id: (required) A string representation of a Course ID,
                                 e.g., course-v1:edX+DemoX+Demo_Course
-        * course_data: (required) The course .tar.gz file to import
+        * course_data: (required) The course .tar.gz or .zip file to import
 
     **POST Response Values**
 
@@ -83,7 +87,7 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
         A GET request must include the following parameters.
 
         * task_id: (required) The UUID of the task to check, e.g. "4b357bb3-2a1e-441d-9f6c-2210cf76606f"
-        * filename: (required) The filename of the uploaded course .tar.gz
+        * filename: (required) The filename of the uploaded course .tar.gz or .zip
 
     **GET Response Values**
 
@@ -105,7 +109,7 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
     # TODO: ARCH-91
     # This view is excluded from Swagger doc generation because it
     # does not specify a serializer class.
-    exclude_from_schema = True
+    swagger_schema = None
 
     @course_author_access_required
     def post(self, request, course_key):
@@ -124,28 +128,32 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
                 )
 
             filename = request.FILES['course_data'].name
-            if not filename.endswith('.tar.gz'):
+            if not filename.endswith(IMPORTABLE_FILE_TYPES):
                 raise self.api_error(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     developer_message='Parameter in the wrong format',
                     error_code='internal_error',
                 )
-            course_dir = path(settings.GITHUB_REPO_ROOT) / base64.urlsafe_b64encode(
-                repr(course_key).encode('utf-8')
-            ).decode('utf-8')
+            # Staging directory private to this upload, so that a concurrent import of
+            # the same course cannot overwrite this archive or delete it on its way out.
+            course_dir = course_import_working_dir(course_key, f'upload-{uuid4().hex}')
             temp_filepath = course_dir / filename
-            if not course_dir.isdir():
-                os.mkdir(course_dir)
+            os.makedirs(course_dir, exist_ok=True)
 
-            log.debug(f'importing course to {temp_filepath}')
-            with open(temp_filepath, "wb+") as temp_file:
-                for chunk in request.FILES['course_data'].chunks():
-                    temp_file.write(chunk)
+            try:
+                log.debug(f'importing course to {temp_filepath}')
+                with open(temp_filepath, "wb+") as temp_file:
+                    for chunk in request.FILES['course_data'].chunks():
+                        temp_file.write(chunk)
 
-            log.info("Course import %s: Upload complete", course_key)
-            with open(temp_filepath, 'rb') as local_file:
-                django_file = File(local_file)
-                storage_path = course_import_export_storage.save('olx_import/' + filename, django_file)
+                log.info("Course import %s: Upload complete", course_key)
+                with open(temp_filepath, 'rb') as local_file:
+                    django_file = File(local_file)
+                    storage_path = course_import_export_storage.save('olx_import/' + filename, django_file)
+            finally:
+                # The archive now lives in storage; the import task downloads it into its
+                # own working directory, so this staging copy is no longer needed.
+                remove_course_import_working_dir(course_dir)
 
             async_result = import_olx.delay(
                 request.user.id, str(course_key), storage_path, filename, request.LANGUAGE_CODE)
@@ -154,7 +162,7 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
             })
         except Exception as e:
             log.exception(f'Course import {course_key}: Unknown error in import')
-            raise self.api_error(
+            raise self.api_error(  # noqa: B904
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 developer_message=str(e),
                 error_code='internal_error'
@@ -176,7 +184,7 @@ class CourseImportView(CourseImportExportViewMixin, GenericAPIView):
             })
         except Exception as e:
             log.exception(str(e))
-            raise self.api_error(
+            raise self.api_error(  # noqa: B904
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 developer_message=str(e),
                 error_code='internal_error'

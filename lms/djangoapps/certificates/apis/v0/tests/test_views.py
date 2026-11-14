@@ -6,7 +6,7 @@ Tests for the Certificate REST APIs.
 from unittest.mock import patch
 
 import ddt
-from django.conf import settings
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from freezegun import freeze_time
@@ -21,8 +21,11 @@ from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFact
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangoapps.user_api.tests.factories import UserPreferenceFactory
 from openedx.core.djangoapps.user_authn.tests.utils import JWT_AUTH_TYPES, AuthAndScopesTestMixin, AuthType
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from openedx.core.djangoapps.waffle_utils.testutils import WAFFLE_TABLES
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
@@ -172,17 +175,22 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
 
     def assert_success_response_for_student(self, response, download_url='www.google.com'):
         """ This method is required by AuthAndScopesTestMixin. """
-        assert response.data ==\
-               [{'username': self.student.username,
-                 'course_id': str(self.course.id),
-                 'course_display_name': self.course.display_name,
-                 'course_organization': self.course.org,
-                 'certificate_type': CourseMode.VERIFIED,
-                 'created_date': self.now,
-                 'modified_date': self.now,
-                 'status': CertificateStatuses.downloadable,
-                 'is_passing': True,
-                 'download_url': download_url, 'grade': '0.88'}]
+        assert response.data == [
+            {
+                'username': self.student.username,
+                'course_id': str(self.course.id),
+                'course_display_name': self.course.display_name,
+                'course_organization': self.course.org,
+                'certificate_type': CourseMode.VERIFIED,
+                'created_date': self.now,
+                'modified_date': self.now,
+                'status': CertificateStatuses.downloadable,
+                'is_passing': True,
+                'download_url': download_url,
+                'grade': '0.88',
+                'uuid': str(self.cert.verify_uuid)
+            }
+        ]
 
     @patch('edx_rest_framework_extensions.permissions.log')
     @ddt.data(*list(AuthType))
@@ -211,6 +219,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
 
         assert resp.status_code == status.HTTP_200_OK
         assert len(resp.data) == 1
+        assert 'uuid' in resp.data[0]
 
     def test_owner_can_access_its_certs(self):
         """
@@ -226,6 +235,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
 
         resp = self.get_response(AuthType.session, requesting_user=self.student)
         assert resp.status_code == status.HTTP_200_OK
+        assert 'uuid' in resp.data[0]
 
         # verifies that other than owner cert list api is not accessible
         resp = self.get_response(AuthType.session, requesting_user=self.other_student)
@@ -245,12 +255,15 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
 
         resp = self.get_response(AuthType.session, requesting_user=self.student)
         assert resp.status_code == status.HTTP_200_OK
+        assert 'uuid' in resp.data[0]
 
         resp = self.get_response(AuthType.session, requesting_user=self.other_student)
         assert resp.status_code == status.HTTP_200_OK
+        assert 'uuid' in resp.data[0]
 
         resp = self.get_response(AuthType.session, requesting_user=self.global_staff)
         assert resp.status_code == status.HTTP_200_OK
+        assert 'uuid' in resp.data[0]
 
     @ddt.data(*list(AuthType))
     def test_another_user_with_certs_shared_custom(self, auth_type):
@@ -275,6 +288,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
 
         assert resp.status_code == status.HTTP_200_OK
         assert len(resp.data) == 1
+        assert 'uuid' in resp.data[0]
 
     @patch('edx_rest_framework_extensions.permissions.log')
     @ddt.data(*JWT_AUTH_TYPES)
@@ -289,6 +303,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
         else:
             assert resp.status_code == status.HTTP_200_OK
             assert len(resp.data) == 1
+            assert 'uuid' in resp.data[0]
 
     @patch('edx_rest_framework_extensions.permissions.log')
     @ddt.data(*JWT_AUTH_TYPES)
@@ -308,7 +323,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
     def test_query_counts(self):
         # Test student with no certificates
         student_no_cert = UserFactory.create(password=self.user_password)
-        with self.assertNumQueries(18):
+        with self.assertNumQueries(20, table_ignorelist=WAFFLE_TABLES):
             resp = self.get_response(
                 AuthType.jwt,
                 requesting_user=self.global_staff,
@@ -318,7 +333,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
             assert len(resp.data) == 0
 
         # Test student with 1 certificate
-        with self.assertNumQueries(12):
+        with self.assertNumQueries(13, table_ignorelist=WAFFLE_TABLES):
             resp = self.get_response(
                 AuthType.jwt,
                 requesting_user=self.global_staff,
@@ -358,7 +373,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
             download_url='www.google.com',
             grade="0.88",
         )
-        with self.assertNumQueries(12):
+        with self.assertNumQueries(13, table_ignorelist=WAFFLE_TABLES):
             resp = self.get_response(
                 AuthType.jwt,
                 requesting_user=self.global_staff,
@@ -367,7 +382,7 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
             assert resp.status_code == status.HTTP_200_OK
             assert len(resp.data) == 2
 
-    @patch.dict(settings.FEATURES, {'CERTIFICATES_HTML_VIEW': True})
+    @override_settings(CERTIFICATES_HTML_VIEW=True)
     def test_with_no_certificate_configuration(self):
         """
         Verify that certificates are not returned until there is an active
@@ -421,3 +436,4 @@ class CertificatesListRestApiTest(AuthAndScopesTestMixin, SharedModuleStoreTestC
         assert response.status_code == status.HTTP_200_OK
         self.assertContains(response, cert_for_deleted_course.download_url)
         self.assertContains(response, expected_course_name)
+        assert 'uuid' in response.data[0]

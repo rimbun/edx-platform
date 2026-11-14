@@ -1,4 +1,4 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 
 
 import json
@@ -12,12 +12,14 @@ from django.urls import reverse
 from edxval import api
 
 from cms.djangoapps.contentstore.tests.utils import CourseTestCase
+from cms.djangoapps.contentstore.transcript_storage_handlers import (
+    TranscriptionProviderErrorType,
+    validate_transcript_credentials,
+)
 from cms.djangoapps.contentstore.utils import reverse_course_url
 from common.djangoapps.student.roles import CourseStaffRole
-from openedx.core.djangoapps.profile_images.tests.helpers import make_image_file
 from openedx.core.djangoapps.oauth_dispatch.jwt import create_jwt_for_user
-
-from ..transcript_settings import TranscriptionProviderErrorType, validate_transcript_credentials
+from openedx.core.djangoapps.profile_images.tests.helpers import make_image_file
 
 
 @ddt.ddt
@@ -41,7 +43,7 @@ class TranscriptCredentialsTest(CourseTestCase):
         self.client.logout()
         transcript_credentials_url = self.get_url_for_course_key(self.course.id)
         response = self.client.post(transcript_credentials_url, content_type='application/json')
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 302)  # noqa: PT009
 
     def test_405_with_not_allowed_request_method(self):
         """
@@ -50,7 +52,7 @@ class TranscriptCredentialsTest(CourseTestCase):
         """
         transcript_credentials_url = self.get_url_for_course_key(self.course.id)
         response = self.client.get(transcript_credentials_url, content_type='application/json')
-        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 405)  # noqa: PT009
 
     def test_404_with_feature_disabled(self):
         """
@@ -60,7 +62,7 @@ class TranscriptCredentialsTest(CourseTestCase):
         with patch('openedx.core.djangoapps.video_config.models.VideoTranscriptEnabledFlag.feature_enabled') as feature:
             feature.return_value = False
             response = self.client.post(transcript_credentials_url, content_type='application/json')
-            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.status_code, 404)  # noqa: PT009
 
     @ddt.data(
         (
@@ -94,7 +96,7 @@ class TranscriptCredentialsTest(CourseTestCase):
         )
     )
     @ddt.unpack
-    @patch('cms.djangoapps.contentstore.views.transcript_settings.update_3rd_party_transcription_service_credentials')
+    @patch('cms.djangoapps.contentstore.transcript_storage_handlers.update_3rd_party_transcription_service_credentials')
     def test_transcript_credentials_handler(self, request_payload, update_credentials_response, expected_status_code,
                                             expected_response, mock_update_credentials):
         """
@@ -107,8 +109,8 @@ class TranscriptCredentialsTest(CourseTestCase):
             data=json.dumps(request_payload),
             content_type='application/json'
         )
-        self.assertEqual(response.status_code, expected_status_code)
-        self.assertEqual(response.content.decode('utf-8'), expected_response)
+        self.assertEqual(response.status_code, expected_status_code)  # noqa: PT009
+        self.assertEqual(response.content.decode('utf-8'), expected_response)  # noqa: PT009
 
 
 @ddt.ddt
@@ -178,8 +180,8 @@ class TranscriptCredentialsValidationTest(TestCase):
         """
         error_message, validated_credentials = validate_transcript_credentials(provider, **credentials)
         # Assert the results.
-        self.assertEqual(error_message, expected_error_message)
-        self.assertDictEqual(validated_credentials, expected_validated_credentials)
+        self.assertEqual(error_message, expected_error_message)  # noqa: PT009
+        self.assertDictEqual(validated_credentials, expected_validated_credentials)  # noqa: PT009
 
 
 @ddt.ddt
@@ -201,7 +203,7 @@ class TranscriptDownloadTest(CourseTestCase):
         """
         self.client.logout()
         response = self.client.get(self.view_url, content_type='application/json')
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 302)  # noqa: PT009
 
     def test_405_with_not_allowed_request_method(self):
         """
@@ -209,9 +211,9 @@ class TranscriptDownloadTest(CourseTestCase):
         Allowed request methods include GET.
         """
         response = self.client.post(self.view_url, content_type='application/json')
-        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 405)  # noqa: PT009
 
-    @patch('cms.djangoapps.contentstore.views.transcript_settings.get_video_transcript_data')
+    @patch('cms.djangoapps.contentstore.transcript_storage_handlers.get_video_transcript_data')
     def test_transcript_download_handler(self, mock_get_video_transcript_data):
         """
         Tests that transcript download handler works as expected.
@@ -244,10 +246,10 @@ class TranscriptDownloadTest(CourseTestCase):
         }
 
         # Assert the actual response
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content.decode('utf-8'), expected_content)
+        self.assertEqual(response.status_code, 200)  # noqa: PT009
+        self.assertEqual(response.content.decode('utf-8'), expected_content)  # noqa: PT009
         for attribute, value in expected_headers.items():
-            self.assertEqual(response.get(attribute), value)
+            self.assertEqual(response.get(attribute), value)  # noqa: PT009
 
     @ddt.data(
         (
@@ -271,8 +273,8 @@ class TranscriptDownloadTest(CourseTestCase):
         # Make request to transcript download handler
         response = self.client.get(self.view_url, data=request_payload)
         # Assert the response
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(json.loads(response.content.decode('utf-8'))['error'], expected_error_message)
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(json.loads(response.content.decode('utf-8'))['error'], expected_error_message)  # noqa: PT009
 
 
 @ddt.ddt
@@ -293,7 +295,7 @@ class TranscriptUploadTest(CourseTestCase):
         """
         self.client.logout()
         response = self.client.post(self.view_url, content_type='application/json')
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 302)  # noqa: PT009
 
     def test_405_with_not_allowed_request_method(self):
         """
@@ -301,11 +303,11 @@ class TranscriptUploadTest(CourseTestCase):
         Allowed request methods include POST.
         """
         response = self.client.get(self.view_url, content_type='application/json')
-        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 405)  # noqa: PT009
 
-    @patch('cms.djangoapps.contentstore.views.transcript_settings.create_or_update_video_transcript')
+    @patch('cms.djangoapps.contentstore.transcript_storage_handlers.create_or_update_video_transcript')
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler(self, mock_create_or_update_video_transcript):
@@ -325,7 +327,7 @@ class TranscriptUploadTest(CourseTestCase):
             format='multipart'
         )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201)  # noqa: PT009
         mock_create_or_update_video_transcript.assert_called_with(
             video_id='123',
             language_code='en',
@@ -336,6 +338,31 @@ class TranscriptUploadTest(CourseTestCase):
             },
             file_data=ANY,
         )
+
+    @patch('cms.djangoapps.contentstore.transcript_storage_handlers.create_or_update_video_transcript')
+    @patch(
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
+        Mock(return_value=['en']),
+    )
+    def test_transcript_upload_handler_returns_200_on_replace(self, mock_create_or_update_video_transcript):
+        """
+        Verify that uploading a transcript for a language that already has a
+        transcript returns 200 (replace) instead of 201 (create).
+        """
+        transcript_file_stream = StringIO('0\n00:00:00,010 --> 00:00:00,100\nHello, edX greets you.\n\n')
+        response = self.client.post(
+            self.view_url,
+            {
+                'edx_video_id': '123',
+                'language_code': 'en',
+                'new_language_code': 'en',
+                'file': transcript_file_stream,
+            },
+            format='multipart'
+        )
+
+        self.assertEqual(response.status_code, 200)  # noqa: PT009
+        mock_create_or_update_video_transcript.assert_called_once()
 
     @ddt.data(
         (
@@ -370,7 +397,7 @@ class TranscriptUploadTest(CourseTestCase):
     )
     @ddt.unpack
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler_missing_attrs(self, request_payload, expected_error_message):
@@ -379,11 +406,11 @@ class TranscriptUploadTest(CourseTestCase):
         """
         # Make request to transcript upload handler
         response = self.client.post(self.view_url, request_payload, format='multipart')
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(json.loads(response.content.decode('utf-8'))['error'], expected_error_message)
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(json.loads(response.content.decode('utf-8'))['error'], expected_error_message)  # noqa: PT009
 
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en', 'es'])
     )
     def test_transcript_upload_handler_existing_transcript(self):
@@ -398,14 +425,14 @@ class TranscriptUploadTest(CourseTestCase):
             'new_language_code': 'es'
         }
         response = self.client.post(self.view_url, request_payload, format='multipart')
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(  # noqa: PT009
             json.loads(response.content.decode('utf-8'))['error'],
             'A transcript with the "es" language code already exists.'
         )
 
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler_with_image(self):
@@ -425,14 +452,14 @@ class TranscriptUploadTest(CourseTestCase):
                 format='multipart'
             )
 
-            self.assertEqual(response.status_code, 400)
-            self.assertEqual(
+            self.assertEqual(response.status_code, 400)  # noqa: PT009
+            self.assertEqual(  # noqa: PT009
                 json.loads(response.content.decode('utf-8'))['error'],
                 'There is a problem with this transcript file. Try to upload a different file.'
             )
 
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler_with_invalid_transcript(self):
@@ -452,8 +479,8 @@ class TranscriptUploadTest(CourseTestCase):
             format='multipart'
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(  # noqa: PT009
             json.loads(response.content.decode('utf-8'))['error'],
             'There is a problem with this transcript file. Try to upload a different file.'
         )
@@ -476,7 +503,7 @@ class TranscriptDeleteTest(CourseTestCase):
         self.client.logout()
         transcript_delete_url = self.get_url_for_course_key(self.course.id, edx_video_id='test_id', language_code='en')
         response = self.client.delete(transcript_delete_url)
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 302)  # noqa: PT009
 
     def test_405_with_not_allowed_request_method(self):
         """
@@ -485,7 +512,7 @@ class TranscriptDeleteTest(CourseTestCase):
         """
         transcript_delete_url = self.get_url_for_course_key(self.course.id, edx_video_id='test_id', language_code='en')
         response = self.client.post(transcript_delete_url)
-        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 405)  # noqa: PT009
 
     def test_404_with_non_staff_user(self):
         """
@@ -496,13 +523,13 @@ class TranscriptDeleteTest(CourseTestCase):
         self.user.save()
 
         # Assert the user's role
-        self.assertFalse(self.user.is_staff)
-        self.assertFalse(CourseStaffRole(self.course.id).has_user(self.user))
+        self.assertFalse(self.user.is_staff)  # noqa: PT009
+        self.assertFalse(CourseStaffRole(self.course.id).has_user(self.user))  # noqa: PT009
 
         # Now, Make request to deletion handler
         transcript_delete_url = self.get_url_for_course_key(self.course.id, edx_video_id='test_id', language_code='en')
         response = self.client.delete(transcript_delete_url)
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 404)  # noqa: PT009
 
     @ddt.data(
         {
@@ -533,8 +560,8 @@ class TranscriptDeleteTest(CourseTestCase):
             course_staff_role.remove_users(self.user)
 
         # Assert the user role
-        self.assertEqual(self.user.is_staff, is_staff)
-        self.assertEqual(CourseStaffRole(self.course.id).has_user(self.user), is_course_staff)
+        self.assertEqual(self.user.is_staff, is_staff)  # noqa: PT009
+        self.assertEqual(CourseStaffRole(self.course.id).has_user(self.user), is_course_staff)  # noqa: PT009
 
         video_id, language_code = '1234', 'en'
         # Create a real transcript in VAL.
@@ -550,8 +577,8 @@ class TranscriptDeleteTest(CourseTestCase):
             edx_video_id=video_id,
             language_code=language_code
         ))
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(api.get_video_transcript_data(video_id=video_id, language_code=language_code))
+        self.assertEqual(response.status_code, 200)  # noqa: PT009
+        self.assertFalse(api.get_video_transcript_data(video_id=video_id, language_code=language_code))  # noqa: PT009
 
 
 @ddt.ddt
@@ -578,7 +605,7 @@ class TranscriptUploadApiTest(CourseTestCase):
         Verify that redirection happens in case of an unauthenticated request.
         """
         response = self.client.post(self.view_url, content_type='application/json', HTTP_AUTHORIZATION='')
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 401)  # noqa: PT009
 
     def test_405_with_not_allowed_request_method(self):
         """
@@ -586,11 +613,11 @@ class TranscriptUploadApiTest(CourseTestCase):
         Allowed request methods include POST.
         """
         response = self.client.get(self.view_url, content_type='application/json')
-        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 405)  # noqa: PT009
 
-    @patch('cms.djangoapps.contentstore.views.transcript_settings.create_or_update_video_transcript')
+    @patch('cms.djangoapps.contentstore.transcript_storage_handlers.create_or_update_video_transcript')
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler(self, mock_create_or_update_video_transcript):
@@ -610,7 +637,7 @@ class TranscriptUploadApiTest(CourseTestCase):
             format='multipart'
         )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201)  # noqa: PT009
         mock_create_or_update_video_transcript.assert_called_with(
             video_id='123',
             language_code='en',
@@ -655,7 +682,7 @@ class TranscriptUploadApiTest(CourseTestCase):
     )
     @ddt.unpack
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler_missing_attrs(self, request_payload, expected_error_message):
@@ -664,11 +691,11 @@ class TranscriptUploadApiTest(CourseTestCase):
         """
         # Make request to transcript upload handler
         response = self.client.post(self.view_url, request_payload, format='multipart')
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(json.loads(response.content.decode('utf-8'))['error'], expected_error_message)
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(json.loads(response.content.decode('utf-8'))['error'], expected_error_message)  # noqa: PT009
 
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en', 'es'])
     )
     def test_transcript_upload_handler_existing_transcript(self):
@@ -683,14 +710,14 @@ class TranscriptUploadApiTest(CourseTestCase):
             'new_language_code': 'es'
         }
         response = self.client.post(self.view_url, request_payload, format='multipart')
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(  # noqa: PT009
             json.loads(response.content.decode('utf-8'))['error'],
             'A transcript with the "es" language code already exists.'
         )
 
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler_with_image(self):
@@ -710,14 +737,14 @@ class TranscriptUploadApiTest(CourseTestCase):
                 format='multipart'
             )
 
-            self.assertEqual(response.status_code, 400)
-            self.assertEqual(
+            self.assertEqual(response.status_code, 400)  # noqa: PT009
+            self.assertEqual(  # noqa: PT009
                 json.loads(response.content.decode('utf-8'))['error'],
                 'There is a problem with this transcript file. Try to upload a different file.'
             )
 
     @patch(
-        'cms.djangoapps.contentstore.views.transcript_settings.get_available_transcript_languages',
+        'cms.djangoapps.contentstore.transcript_storage_handlers.get_available_transcript_languages',
         Mock(return_value=['en']),
     )
     def test_transcript_upload_handler_with_invalid_transcript(self):
@@ -737,8 +764,8 @@ class TranscriptUploadApiTest(CourseTestCase):
             format='multipart'
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(  # noqa: PT009
             json.loads(response.content.decode('utf-8'))['error'],
             'There is a problem with this transcript file. Try to upload a different file.'
         )

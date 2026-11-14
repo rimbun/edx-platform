@@ -8,6 +8,7 @@ from `lms.djangoapps.program_enrollments.api`.
 
 import logging
 
+from requests.structures import CaseInsensitiveDict
 from simple_history.utils import bulk_create_with_history
 
 from common.djangoapps.course_modes.models import CourseMode
@@ -15,9 +16,8 @@ from common.djangoapps.student.models import CourseEnrollment, NonExistentCourse
 from common.djangoapps.student.roles import CourseStaffRole
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 
-from ..constants import ProgramCourseEnrollmentRoles, ProgramCourseEnrollmentStatuses
+from ..constants import ProgramCourseEnrollmentRoles, ProgramCourseEnrollmentStatuses, ProgramEnrollmentStatuses
 from ..constants import ProgramCourseOperationStatuses as ProgramCourseOpStatuses
-from ..constants import ProgramEnrollmentStatuses
 from ..constants import ProgramOperationStatuses as ProgramOpStatuses
 from ..exceptions import ProviderDoesNotExistException
 from ..models import CourseAccessRoleAssignment, ProgramCourseEnrollment, ProgramEnrollment
@@ -61,7 +61,7 @@ def write_program_enrollments(program_uuid, enrollment_requests, create, update)
     existing_enrollments = fetch_program_enrollments(
         program_uuid=program_uuid, external_user_keys=external_keys
     )
-    existing_enrollments_by_key = {key: None for key in external_keys}
+    existing_enrollments_by_key = CaseInsensitiveDict({key: None for key in external_keys})
     existing_enrollments_by_key.update({
         enrollment.external_user_key: enrollment
         for enrollment in existing_enrollments
@@ -210,9 +210,9 @@ def write_program_course_enrollments(
         program_uuid=program_uuid,
         external_user_keys=processable_external_keys,
     ).prefetch_related('program_course_enrollments')
-    program_enrollments_by_key = {
+    program_enrollments_by_key = CaseInsensitiveDict({
         enrollment.external_user_key: enrollment for enrollment in program_enrollments
-    }
+    })
 
     # Fetch enrollments regardless of anchored Program Enrollments
     existing_course_enrollments = fetch_program_course_enrollments_by_students(
@@ -239,7 +239,9 @@ def write_program_course_enrollments(
         program_enrollment__program_uuid=program_uuid
     )
 
-    existing_course_enrollments_by_key = {key: None for key in processable_external_keys}
+    existing_course_enrollments_by_key = CaseInsensitiveDict({
+        key: None for key in processable_external_keys
+    })
     existing_course_enrollments_by_key.update({
         enrollment.program_enrollment.external_user_key: enrollment
         for enrollment in existing_course_enrollments_of_program_enrollment
@@ -252,7 +254,7 @@ def write_program_course_enrollments(
     enrollments_to_save = []
     created_enrollments = []
     updated_enrollments = []
-    staff_assignments_by_user_key = {}
+    staff_assignments_by_user_key = CaseInsensitiveDict()
     for external_key, request in requests_by_key.items():
         course_staff = request['course_staff']
         status = request['status']
@@ -407,7 +409,7 @@ def enroll_in_masters_track(user, course_key, status):
                 message_template.format(user.id, course_key, course_enrollment.mode)
             )
         elif course_enrollment.mode != CourseMode.MASTERS:
-            error_message = (
+            error_message = (  # noqa: UP032
                 "Cannot convert CourseEnrollment to Master's from mode {}. "
                 "user id={}, course_key={}."
             ).format(
@@ -476,7 +478,7 @@ def _ensure_course_exists(course_key, user_key_or_id):
     if CourseOverview.course_exists(course_key):
         return
     logger.error(
-        "Cannot enroll user={} in non-existent course={}".format(
+        "Cannot enroll user={} in non-existent course={}".format(  # noqa: UP032
             user_key_or_id,
             course_key,
         )
@@ -498,7 +500,7 @@ def _organize_requests_by_external_key(enrollment_requests):
         where requests_by_key is dict[str: dict]
           and duplicated_keys is set[str].
     """
-    requests_by_key = {}
+    requests_by_key = CaseInsensitiveDict()
     duplicated_keys = set()
     for request in enrollment_requests:
         key = request['external_user_key']
@@ -534,11 +536,11 @@ def _get_conflicting_active_course_enrollments(
     Returns:
         results (dict) with detected conflict entry, or empty dict.
     """
-    conflicted_by_user_key = {}
+    conflicted_by_user_key = CaseInsensitiveDict()
 
-    requested_statuses_by_user_key = {
+    requested_statuses_by_user_key = CaseInsensitiveDict({
         key: request.get('status') for key, request in requests_by_key.items()
-    }
+    })
 
     for existing_enrollment in existing_course_enrollments:
         external_user_key = existing_enrollment.program_enrollment.external_user_key
@@ -552,7 +554,7 @@ def _get_conflicting_active_course_enrollments(
             and str(existing_enrollment.program_enrollment.program_uuid) != str(program_uuid)
         ):
             logger.error(
-                'Detected conflicting active ProgramCourseEnrollment. This is happening on'
+                'Detected conflicting active ProgramCourseEnrollment. This is happening on'  # noqa: UP032
                 ' The program_uuid [{}] with course_key [{}] for external_user_key [{}]'.format(
                     program_uuid,
                     course_key,

@@ -4,16 +4,16 @@ Unit tests for the API module
 import datetime
 from unittest import mock
 from urllib import parse
+from zoneinfo import ZoneInfo
 
 import pytest
-import pytz
 from opaque_keys.edx.keys import CourseKey
 
-from openedx.core.djangoapps.ccxcon import api as ccxconapi
 from common.djangoapps.student.tests.factories import AdminFactory
+from openedx.core.djangoapps.ccxcon import api as ccxconapi
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 from .factories import CcxConFactory
 
@@ -36,8 +36,6 @@ class APIsTestCase(SharedModuleStoreTestCase):
     """
     Unit tests for the API module functions
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -46,23 +44,23 @@ class APIsTestCase(SharedModuleStoreTestCase):
 
         # Create a course outline
         start = datetime.datetime(
-            2010, 5, 12, 2, 42, tzinfo=pytz.UTC
+            2010, 5, 12, 2, 42, tzinfo=ZoneInfo("UTC")
         )
         due = datetime.datetime(
-            2010, 7, 7, 0, 0, tzinfo=pytz.UTC
+            2010, 7, 7, 0, 0, tzinfo=ZoneInfo("UTC")
         )
 
         cls.chapters = [
-            ItemFactory.create(start=start, parent=course) for _ in range(2)
+            BlockFactory.create(start=start, parent=course) for _ in range(2)
         ]
         cls.sequentials = flatten([
             [
-                ItemFactory.create(parent=chapter) for _ in range(2)
+                BlockFactory.create(parent=chapter) for _ in range(2)
             ] for chapter in cls.chapters
         ])
         cls.verticals = flatten([
             [
-                ItemFactory.create(
+                BlockFactory.create(
                     start=start, due=due, parent=sequential, graded=True, format='Homework', category='vertical'
                 ) for _ in range(2)
             ] for sequential in cls.sequentials
@@ -71,9 +69,9 @@ class APIsTestCase(SharedModuleStoreTestCase):
         # Trying to wrap the whole thing in a bulk operation fails because it
         # doesn't find the parents. But we can at least wrap this part...
         with cls.store.bulk_operations(course.id, emit_signals=False):
-            blocks = flatten([  # pylint: disable=unused-variable
+            blocks = flatten([  # pylint: disable=unused-variable  # noqa: F841
                 [
-                    ItemFactory.create(parent=vertical) for _ in range(2)
+                    BlockFactory.create(parent=vertical) for _ in range(2)
                 ] for vertical in cls.verticals
             ])
 

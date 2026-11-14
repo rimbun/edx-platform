@@ -5,32 +5,27 @@ For additional information and historical context, see:
 https://openedx.atlassian.net/wiki/display/TNL/User+API
 """
 
-
 import datetime
 import logging
-import uuid
 from functools import wraps
+from zoneinfo import ZoneInfo
 
-import pytz
-from rest_framework.exceptions import UnsupportedMediaType
-
-from consent.models import DataSharingConsent
 from django.apps import apps
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, logout
 from django.contrib.sites.models import Site
 from django.core.cache import cache
 from django.db import transaction
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
+from django_ratelimit.core import is_ratelimited
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from edx_ace import ace
 from edx_ace.recipient import Recipient
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from edx_rest_framework_extensions.auth.session.authentication import SessionAuthenticationAllowInactiveUser
-from enterprise.models import EnterpriseCourseEnrollment, EnterpriseCustomerUser, PendingEnterpriseCustomerUser
-from integrated_channels.degreed.models import DegreedLearnerDataTransmissionAudit
-from integrated_channels.sap_success_factors.models import SapSuccessFactorsLearnerDataTransmissionAudit
-from rest_framework import permissions, status
+from rest_framework import permissions, serializers, status
 from rest_framework.authentication import SessionAuthentication
+from rest_framework.exceptions import UnsupportedMediaType
 from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 from rest_framework.serializers import ValidationError
@@ -47,25 +42,33 @@ from common.djangoapps.student.models import (  # lint-amnesty, pylint: disable=
     ManualEnrollmentAudit,
     PendingEmailChange,
     PendingNameChange,
-    Registration,
+    PendingSecondaryEmailChange,
     User,
     UserProfile,
     get_potentially_retired_user_by_username,
     get_retired_email_by_email,
     get_retired_username_by_username,
-    is_username_retired
+    is_email_retired,
+    is_username_retired,  # noqa: F401
 )
-from common.djangoapps.student.models_api import do_name_change_request
+from common.djangoapps.student.models_api import confirm_name_change, do_name_change_request, get_pending_name_change
+from common.djangoapps.track import segment
+from lms.djangoapps.certificates.api import clear_pii_from_certificate_records_for_user
 from openedx.core.djangoapps.ace_common.template_context import get_base_template_context
 from openedx.core.djangoapps.api_admin.models import ApiAccessRequest
 from openedx.core.djangoapps.course_groups.models import UnregisteredLearnerCohortAssignments
 from openedx.core.djangoapps.credit.models import CreditRequest, CreditRequirementStatus
-from openedx.core.djangoapps.external_user_ids.models import ExternalId, ExternalIdType
 from openedx.core.djangoapps.lang_pref import LANGUAGE_KEY
 from openedx.core.djangoapps.profile_images.images import remove_profile_images
+from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from openedx.core.djangoapps.user_api import accounts
 from openedx.core.djangoapps.user_api.accounts.image_helpers import get_profile_image_names, set_has_profile_image
+from openedx.core.djangoapps.user_api.accounts.utils import (
+    handle_retirement_cancellation,
+    redact_and_delete_historical_social_auth,
+)
 from openedx.core.djangoapps.user_authn.exceptions import AuthFailedError
-from openedx.core.lib.api.authentication import BearerAuthenticationAllowInactiveUser
+from openedx.core.lib.api.authentication import BearerAuthentication, BearerAuthenticationAllowInactiveUser
 from openedx.core.lib.api.parsers import MergePatchParser
 
 from ..errors import AccountUpdateError, AccountValidationError, UserNotAuthorized, UserNotFound
@@ -75,37 +78,38 @@ from ..models import (
     RetirementStateError,
     UserOrgTag,
     UserRetirementPartnerReportingStatus,
-    UserRetirementStatus
+    UserRetirementStatus,
 )
 from .api import get_account_settings, update_account_settings
-from .permissions import CanDeactivateUser, CanReplaceUsername, CanRetireUser
+from .permissions import (
+    CanCancelUserRetirement,
+    CanDeactivateUser,
+    CanGetAccountInfo,
+    CanReplaceUsername,
+    CanRetireUser,
+)
 from .serializers import (
     PendingNameChangeSerializer,
     UserRetirementPartnerReportSerializer,
     UserRetirementStatusSerializer,
-    UserSearchEmailSerializer
+    UserSearchEmailSerializer,
 )
 from .signals import USER_RETIRE_LMS_CRITICAL, USER_RETIRE_LMS_MISC, USER_RETIRE_MAILINGS
-from .utils import create_retirement_request_and_deactivate_account
-
-try:
-    from coaching.api import has_ever_consented_to_coaching
-except ImportError:
-    has_ever_consented_to_coaching = None
+from .utils import create_retirement_request_and_deactivate_account, username_suffix_generator
 
 log = logging.getLogger(__name__)
 
 USER_PROFILE_PII = {
-    'name': '',
-    'meta': '',
-    'location': '',
-    'year_of_birth': None,
-    'gender': None,
-    'mailing_address': None,
-    'city': None,
-    'country': None,
-    'bio': None,
-    'phone_number': None,
+    "name": "",
+    "meta": "",
+    "location": "",
+    "year_of_birth": None,
+    "gender": None,
+    "mailing_address": None,
+    "city": None,
+    "country": None,
+    "bio": None,
+    "phone_number": None,
 }
 
 
@@ -114,290 +118,294 @@ def request_requires_username(function):
     Requires that a ``username`` key containing a truthy value exists in
     the ``request.data`` attribute of the decorated function.
     """
+
     @wraps(function)
     def wrapper(self, request):  # pylint: disable=missing-docstring
-        username = request.data.get('username', None)
+        username = request.data.get("username", None)
         if not username:
-            return Response(
-                status=status.HTTP_404_NOT_FOUND,
-                data={'message': 'The user was not specified.'}
-            )
+            return Response(status=status.HTTP_404_NOT_FOUND, data={"message": "The user was not specified."})
         return function(self, request)
+
     return wrapper
 
 
-class AccountViewSet(ViewSet):
-    """
-        **Use Cases**
+account_get_me_return_schema = inline_serializer(
+    name="AccountGetMe",
+    fields={
+        "username": serializers.CharField(),
+    },
+)
 
-            Get or update a user's account information. Updates are supported
-            only through merge patch.
+
+# pylint: disable=line-too-long
+class AccountViewSet(ViewSet):
+    """View or update a user's account information."""
+
+    authentication_classes = (
+        JwtAuthentication,
+        BearerAuthenticationAllowInactiveUser,
+        SessionAuthenticationAllowInactiveUser,
+    )
+    permission_classes = (permissions.IsAuthenticated, CanGetAccountInfo)
+    parser_classes = (
+        JSONParser,
+        MergePatchParser,
+    )
+    account_user_get_responses = {
+        status.HTTP_200_OK: account_get_me_return_schema,
+        status.HTTP_401_UNAUTHORIZED: OpenApiResponse(description=""),
+    }
+
+    @extend_schema(
+        responses=account_user_get_responses,
+    )
+    def get(self, request):
+        """Return an authenticated user's username
 
         **Example Requests**
 
             GET /api/user/v1/me[?view=shared]
-            GET /api/user/v1/accounts?usernames={username1,username2}[?view=shared]
-            GET /api/user/v1/accounts?email={user_email}
-            GET /api/user/v1/accounts/{username}/[?view=shared]
-
-            PATCH /api/user/v1/accounts/{username}/{"key":"value"} "application/merge-patch+json"
-
-            POST /api/user/v1/accounts/search_emails "application/json"
-
-        **Notes for PATCH requests to /accounts endpoints**
-            * Requested updates to social_links are automatically merged with
-              previously set links. That is, any newly introduced platforms are
-              add to the previous list. Updated links to pre-existing platforms
-              replace their values in the previous list. Pre-existing platforms
-              can be removed by setting the value of the social_link to an
-              empty string ("").
-
-        **Response Values for GET requests to the /me endpoint**
-            If the user is not logged in, an HTTP 401 "Not Authorized" response
-            is returned.
-
-            Otherwise, an HTTP 200 "OK" response is returned. The response
-            contains the following value:
-
-            * username: The username associated with the account.
-
-        **Response Values for GET requests to /accounts endpoints**
-
-            If no user exists with the specified username, or email, an HTTP 404 "Not
-            Found" response is returned.
-
-            If the user makes the request for her own account, or makes a
-            request for another account and has "is_staff" access, an HTTP 200
-            "OK" response is returned. The response contains the following
-            values.
-
-            * id: numerical lms user id in db
-            * activation_key: auto-genrated activation key when signed up via email
-            * bio: null or textual representation of user biographical
-              information ("about me").
-            * country: An ISO 3166 country code or null.
-            * date_joined: The date the account was created, in the string
-              format provided by datetime. For example, "2014-08-26T17:52:11Z".
-            * last_login: The latest date the user logged in, in the string datetime format.
-            * email: Email address for the user. New email addresses must be confirmed
-              via a confirmation email, so GET does not reflect the change until
-              the address has been confirmed.
-            * secondary_email: A secondary email address for the user. Unlike
-              the email field, GET will reflect the latest update to this field
-              even if changes have yet to be confirmed.
-            * gender: One of the following values:
-
-                * null
-                * "f"
-                * "m"
-                * "o"
-
-            * goals: The textual representation of the user's goals, or null.
-            * is_active: Boolean representation of whether a user is active.
-            * language: The user's preferred language, or null.
-            * language_proficiencies: Array of language preferences. Each
-              preference is a JSON object with the following keys:
-
-                * "code": string ISO 639-1 language code e.g. "en".
-
-            * level_of_education: One of the following values:
-
-                * "p": PhD or Doctorate
-                * "m": Master's or professional degree
-                * "b": Bachelor's degree
-                * "a": Associate's degree
-                * "hs": Secondary/high school
-                * "jhs": Junior secondary/junior high/middle school
-                * "el": Elementary/primary school
-                * "none": None
-                * "o": Other
-                * null: The user did not enter a value
-
-            * mailing_address: The textual representation of the user's mailing
-              address, or null.
-            * name: The full name of the user.
-            * profile_image: A JSON representation of a user's profile image
-              information. This representation has the following keys.
-
-                * "has_image": Boolean indicating whether the user has a profile
-                  image.
-                * "image_url_*": Absolute URL to various sizes of a user's
-                  profile image, where '*' matches a representation of the
-                  corresponding image size, such as 'small', 'medium', 'large',
-                  and 'full'. These are configurable via PROFILE_IMAGE_SIZES_MAP.
-
-            * requires_parental_consent: True if the user is a minor
-              requiring parental consent.
-            * social_links: Array of social links, sorted alphabetically by
-              "platform". Each preference is a JSON object with the following keys:
-
-                * "platform": A particular social platform, ex: 'facebook'
-                * "social_link": The link to the user's profile on the particular platform
-
-            * username: The username associated with the account.
-            * year_of_birth: The year the user was born, as an integer, or null.
-
-            * account_privacy: The user's setting for sharing her personal
-              profile. Possible values are "all_users", "private", or "custom".
-              If "custom", the user has selectively chosen a subset of shareable
-              fields to make visible to others via the User Preferences API.
-
-            * accomplishments_shared: Signals whether badges are enabled on the
-              platform and should be fetched.
-
-            * phone_number: The phone number for the user. String of numbers with
-              an optional `+` sign at the start.
-
-            * pending_name_change: If the user has an active name change request, returns the
-              requested name.
-
-            * is_verified_name_enabled: Temporary flag to control verified name field - see
-              https://github.com/edx/edx-name-affirmation/blob/main/edx_name_affirmation/toggles.py
-
-            For all text fields, plain text instead of HTML is supported. The
-            data is stored exactly as specified. Clients must HTML escape
-            rendered values to avoid script injections.
-
-            If a user who does not have "is_staff" access requests account
-            information for a different user, only a subset of these fields is
-            returned. The returned fields depend on the
-            ACCOUNT_VISIBILITY_CONFIGURATION configuration setting and the
-            visibility preference of the user for whom data is requested.
-
-            Note that a user can view which account fields they have shared
-            with other users by requesting their own username and providing
-            the "view=shared" URL parameter.
-
-        **Response Values for PATCH**
-
-            Users can only modify their own account information. If the
-            requesting user does not have the specified username and has staff
-            access, the request returns an HTTP 403 "Forbidden" response. If
-            the requesting user does not have staff access, the request
-            returns an HTTP 404 "Not Found" response to avoid revealing the
-            existence of the account.
-
-            If no user exists with the specified username, an HTTP 404 "Not
-            Found" response is returned.
-
-            If "application/merge-patch+json" is not the specified content
-            type, a 415 "Unsupported Media Type" response is returned.
-
-            If validation errors prevent the update, this method returns a 400
-            "Bad Request" response that includes a "field_errors" field that
-            lists all error messages.
-
-            If a failure at the time of the update prevents the update, a 400
-            "Bad Request" error is returned. The JSON collection contains
-            specific errors.
-
-            If the update is successful, updated user account data is returned.
-    """
-    authentication_classes = (
-        JwtAuthentication, BearerAuthenticationAllowInactiveUser, SessionAuthenticationAllowInactiveUser
-    )
-    permission_classes = (permissions.IsAuthenticated,)
-    parser_classes = (JSONParser, MergePatchParser,)
-
-    def get(self, request):
         """
-        GET /api/user/v1/me
-        """
-        return Response({'username': request.user.username})
+        return Response({"username": request.user.username})
 
     def list(self, request):
+        """Return a list of user details objects
+
+        **Example Requests**
+
+            GET /api/user/v1/accounts?usernames={username1,username2}[?view=shared]
+
+            GET /api/user/v1/accounts?email={user_email} (staff only)
+
+            GET /api/user/v1/accounts?lms_user_id={user_email} (staff only)
+
+        **Responses**
+
+        If no user exists with the specified username, or email, an HTTP 404 "Not Found" response is returned.
+
+        If the user makes the request for her own account, or makes a request for another account and has "is_staff" access, an HTTP 200 "OK" response is returned.
+
+        The response consists of a list of one or more  user objects, in the same format as is returned for `GET /user/v1/accounts/{username}`.
         """
-        GET /api/user/v1/accounts?username={username1,username2}
-        GET /api/user/v1/accounts?email={user_email}
-        """
-        usernames = request.GET.get('username')
-        user_email = request.GET.get('email')
+        usernames = request.GET.get("username")
+        user_email = request.GET.get("email")
+        lms_user_id = request.GET.get("lms_user_id")
         search_usernames = []
 
         if usernames:
-            search_usernames = usernames.strip(',').split(',')
+            search_usernames = usernames.strip(",").split(",")
         elif user_email:
-            user_email = user_email.strip('')
+            if is_email_retired(user_email):
+                can_cancel_retirement = True
+                retirement_id = None
+                earliest_datetime = datetime.datetime.now(ZoneInfo("UTC")) - datetime.timedelta(days=settings.COOL_OFF_DAYS)
+                try:
+                    retirement_status = UserRetirementStatus.objects.get(
+                        created__gt=earliest_datetime,
+                        created__lt=datetime.datetime.now(ZoneInfo("UTC")),
+                        original_email=user_email,
+                    )
+                    retirement_id = retirement_status.id
+                except UserRetirementStatus.DoesNotExist:
+                    can_cancel_retirement = False
+
+                context = {
+                    "error_msg": accounts.RETIRED_EMAIL_MSG,
+                    "can_cancel_retirement": can_cancel_retirement,
+                    "retirement_id": retirement_id,
+                }
+
+                return Response(context, status=status.HTTP_404_NOT_FOUND)
+            user_email = user_email.strip("")
             try:
                 user = User.objects.get(email=user_email)
             except (UserNotFound, User.DoesNotExist):
                 return Response(status=status.HTTP_404_NOT_FOUND)
             search_usernames = [user.username]
+        elif lms_user_id:
+            try:
+                user = User.objects.get(id=lms_user_id)
+            except (UserNotFound, User.DoesNotExist):
+                return Response(status=status.HTTP_404_NOT_FOUND)
+            except ValueError:
+                return Response(status=status.HTTP_400_BAD_REQUEST)
+            search_usernames = [user.username]
         try:
-            account_settings = get_account_settings(
-                request, search_usernames, view=request.query_params.get('view'))
+            account_settings = get_account_settings(request, search_usernames, view=request.query_params.get("view"))
         except UserNotFound:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         return Response(account_settings)
 
     def search_emails(self, request):
-        """
+        """Return information about users associated with a list of email addresses
+
+        **Example Requests**
+
         POST /api/user/v1/accounts/search_emails
-        Content Type: "application/json"
-        {
-            "emails": ["edx@example.com", "staff@example.com"]
-        }
-        Response:
-        [
+
             {
-                "username": "edx",
-                "email": "edx@example.com",
-                "id": 3,
-            },
-            {
-                "username": "staff",
-                "email": "staff@example.com",
-                "id": 8,
+                "emails": ["edx@example.com", "staff@example.com"]
             }
-        ]
+
+        **Response**
+
+        If no `emails` key is present in the request, or the user does not have "is_staff" access, an HTTP 404 "Not Found" response is returned.
+
+        If the has "is_staff" access, an HTTP 200 "OK" response is returned. The response contains the following values.
+
+            [
+                {
+                    "username": "edx",
+                    "email": "edx@example.com",
+                    "id": 3,
+                },
+                {
+                    "username": "staff",
+                    "email": "staff@example.com",
+                    "id": 8,
+                }
+            ]
         """
         if not request.user.is_staff:
             return Response(
-                {
-                    'developer_message': 'not_found',
-                    'user_message': 'Not Found'
-                },
-                status=status.HTTP_404_NOT_FOUND
+                {"developer_message": "not_found", "user_message": "Not Found"}, status=status.HTTP_404_NOT_FOUND
             )
 
         try:
-            user_emails = request.data['emails']
+            user_emails = request.data["emails"]
         except KeyError as error:
-            error_message = f'{error} field is required'
+            error_message = f"{error} field is required"
             return Response(
-                {
-                    'developer_message': error_message,
-                    'user_message': error_message
-                },
-                status=status.HTTP_400_BAD_REQUEST
+                {"developer_message": error_message, "user_message": error_message}, status=status.HTTP_400_BAD_REQUEST
             )
         users = User.objects.filter(email__in=user_emails)
         data = UserSearchEmailSerializer(users, many=True).data
         return Response(data)
 
     def retrieve(self, request, username):
-        """
-        GET /api/user/v1/accounts/{username}/
+        """Retrieve a single detailed user object
+
+        **Example Requests**
+
+            GET /api/user/v1/accounts/{username}/
+
+        **Response**
+
+        If no user exists with the specified username, or email, an HTTP 404 "Not Found" response is returned.
+
+        If the user makes the request for her own account, or makes a request for another account and has "is_staff" access, an HTTP 200 "OK" response is returned. The response contains the following values.
+
+        * `id`: numerical lms user id in db
+        * `bio`: null or textual representation of user biographical information ("about me").
+        * `country`: An ISO 3166 country code or null.
+        * `date_joined`: The date the account was created, in the string format provided by datetime. For example, "2014-08-26T17:52:11Z".
+        * `last_login`: The latest date the user logged in, in the string datetime format.
+        * `email`: Email address for the user. New email addresses must be confirmed via a confirmation email, so GET does not reflect the change until the address has been confirmed.
+        * `secondary_email`: A secondary email address for the user. Unlike the email field, GET will reflect the latest update to this field even if changes have yet to be confirmed.
+        * `verified_name`: Approved verified name of the learner present in name affirmation plugin
+        * `extended_profile`: A list of objects with the keys `field_name` and `field_value`, returning any populated `extended_profile_fields` configured in the **Site Configuration**
+        * `gender`: One of the following values:
+            * null
+            * "f"
+            * "m"
+            * "o"
+        * `goals`: The textual representation of the user's goals, or null.
+        * `is_active`: Boolean representation of whether a user is active.
+        * `language`: The user's preferred language, or null.
+        * `language_proficiencies`: Array of language preferences. Each preference is a JSON object with the following keys:
+            * "code": string ISO 639-1 language code e.g. "en".
+        * `level_of_education`: One of the following values:
+            * "p": PhD or Doctorate
+            * "m": Master's or professional degree
+            * "b": Bachelor's degree
+            * "a": Associate's degree
+            * "hs": Secondary/high school
+            * "jhs": Junior secondary/junior high/middle school
+            * "el": Elementary/primary school
+            * "none": None
+            * "o": Other
+            * null: The user did not enter a value
+        * `mailing_address`: The textual representation of the user's mailing address, or null.
+        * `name`: The full name of the user.
+        * `profile_image`: A JSON representation of a user's profile image information. This representation has the following keys.
+            * "has_image": Boolean indicating whether the user has a profile image.
+            * "image_url_*": Absolute URL to various sizes of a user's profile image, where '*' matches a representation of the corresponding image size, such as 'small', 'medium', 'large', and 'full'. These are configurable via PROFILE_IMAGE_SIZES_MAP.
+        * `requires_parental_consent`: True if the user is a minor requiring parental consent.
+        * `social_links`: Array of social links, sorted alphabetically by "platform". Each preference is a JSON object with the following keys:
+            * "platform": A particular social platform, ex: 'facebook'
+            * "social_link": The link to the user's profile on the particular platform
+        * `username`: The username associated with the account.
+        * `year_of_birth`: The year the user was born, as an integer, or null.
+        * `account_privacy`: The user's setting for sharing her personal profile. Possible values are "all_users", "private", or "custom".  If "custom", the user has selectively chosen a subset of shareable fields to make visible to others via the User Preferences API.
+        * `phone_number`: The phone number for the user. String of numbers with an optional `+` sign at the start.
+        * `pending_name_change`: If the user has an active name change request, returns the requested name.
+
+        For all text fields, plain text instead of HTML is supported. The data is stored exactly as specified. Clients must HTML escape rendered values to avoid script injections.
+
+        If a user who does not have "is_staff" access requests account information for a different user, only a subset of these fields is returned. The returned fields depend on the `ACCOUNT_VISIBILITY_CONFIGURATION` configuration setting and the visibility preference of the user for whom data is requested.
+
+        A user can view which account fields they have shared with other users by requesting their own username and providing the "view=shared" URL parameter.
         """
         try:
-            account_settings = get_account_settings(
-                request, [username], view=request.query_params.get('view'))
+            account_settings = get_account_settings(request, [username], view=request.query_params.get("view"))
         except UserNotFound:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         return Response(account_settings[0])
 
     def partial_update(self, request, username):
-        """
-        PATCH /api/user/v1/accounts/{username}/
+        """Update user account or profile information
 
-        Note that this implementation is the "merge patch" implementation proposed in
-        https://tools.ietf.org/html/rfc7396. The content_type must be "application/merge-patch+json" or
-        else an error response with status code 415 will be returned.
+        **Example Requests**
+
+
+            Content-Type: application/merge-patch+json
+
+            PATCH /api/user/v1/accounts/{username}
+
+        **Request Body
+
+            {
+              "level_of_education": "m",
+              "extended_profile":
+                [
+                    {"field_name": "favorite_beatle", "field_value": {"name": "ringo"}},
+                    {"field_name": "conlangs_spoken", "field_value":["Láadan", "Rikchik", "Lojban"]}
+                ]
+            }
+
+        **Notes regarding `social_links`**
+
+        Requested updates to social_links are automatically merged with previously set links. That is, any newly introduced platforms are add to the previous list. Updated links to pre-existing platforms replace their values in the previous list. Pre-existing platforms can be removed by setting the value of the social_link to an empty string ("").
+
+        **Response Values for PATCH**
+
+        Users can only modify their own account information. If the requesting user does not have the specified username and has staff access, the request returns an HTTP 403 "Forbidden" response. If the requesting user does not have staff access, the request returns an HTTP 404 "Not Found" response to avoid revealing the existence of the account.
+
+        If no user exists with the specified username, an HTTP 404 "Not Found" response is returned.
+
+        If "application/merge-patch+json" is not the specified content type, a 415 "Unsupported Media Type" response is returned.
+
+        If validation errors prevent the update, this method returns a 400 "Bad Request" response that includes a "field_errors" field that lists all error messages. This will happen if an attempt is made to edit any read-only fields.
+
+        If a failure at the time of the update prevents the update, a 400 "Bad Request" error is returned. The JSON collection contains specific errors.
+
+        If the update is successful, updated user account data is returned.
         """
         if request.content_type != MergePatchParser.media_type:
             raise UnsupportedMediaType(request.content_type)
+
+        for key, limit in [
+            ('email', settings.EMAIL_CHANGE_RATE_LIMIT),
+            ('secondary_email', settings.SECONDARY_EMAIL_RATE_LIMIT)
+        ]:
+            if request.data.get(key) and limit:
+                if is_ratelimited(
+                    request=request, group=f"{key}_change_rate_limit", key="user",
+                    rate=limit, increment=True,
+                ):
+                    return Response({"error": "Too many requests"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         try:
             with transaction.atomic():
@@ -411,27 +419,29 @@ class AccountViewSet(ViewSet):
             return Response({"field_errors": err.field_errors}, status=status.HTTP_400_BAD_REQUEST)
         except AccountUpdateError as err:
             return Response(
-                {
-                    "developer_message": err.developer_message,
-                    "user_message": err.user_message
-                },
-                status=status.HTTP_400_BAD_REQUEST
+                {"developer_message": err.developer_message, "user_message": err.user_message},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         return Response(account_settings)
 
 
-class NameChangeView(APIView):
+# pylint: enable=line-too-long
+
+
+class NameChangeView(ViewSet):
     """
-    Request a profile name change. This creates a PendingNameChange to be verified later,
-    rather than updating the user's profile name directly.
+    Viewset to manage profile name change requests.
     """
-    authentication_classes = (JwtAuthentication, SessionAuthentication,)
+
     permission_classes = (permissions.IsAuthenticated,)
 
-    def post(self, request):
+    def create(self, request):
         """
         POST /api/user/v1/accounts/name_change/
+
+        Request a profile name change. This creates a PendingNameChange to be verified later,
+        rather than updating the user's profile name directly.
 
         Example request:
             {
@@ -439,10 +449,10 @@ class NameChangeView(APIView):
             }
         """
         user = request.user
-        new_name = request.data.get('name', None)
-        rationale = f'Name change requested through account API by {user.username}'
+        new_name = request.data.get("name", None)
+        rationale = f"Name change requested through account API by {user.username}"
 
-        serializer = PendingNameChangeSerializer(data={'new_name': new_name})
+        serializer = PendingNameChangeSerializer(data={"new_name": new_name})
 
         if serializer.is_valid():
             pending_name_change = do_name_change_request(user, new_name, rationale)[0]
@@ -450,11 +460,30 @@ class NameChangeView(APIView):
                 return Response(status=status.HTTP_201_CREATED)
             else:
                 return Response(
-                    {'new_name': 'The profile name given was identical to the current name.'},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {"new_name": "The profile name given was identical to the current name."},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
         return Response(status=status.HTTP_400_BAD_REQUEST, data=serializer.errors)
+
+    def confirm(self, request, username):
+        """
+        POST /api/user/v1/account/name_change/{username}/confirm
+
+        Confirm a name change request for the specified user, and update their profile name.
+        """
+        if not request.user.is_staff:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        user_model = get_user_model()
+        user = user_model.objects.get(username=username)
+        pending_name_change = get_pending_name_change(user)
+
+        if pending_name_change:
+            confirm_name_change(user, pending_name_change)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        else:
+            return Response(status=status.HTTP_404_NOT_FOUND)
 
 
 class AccountDeactivationView(APIView):
@@ -462,7 +491,7 @@ class AccountDeactivationView(APIView):
     Account deactivation viewset. Currently only supports POST requests.
     Only admins can deactivate accounts.
     """
-    authentication_classes = (JwtAuthentication, )
+
     permission_classes = (permissions.IsAuthenticated, CanDeactivateUser)
 
     def post(self, request, username):
@@ -471,7 +500,9 @@ class AccountDeactivationView(APIView):
 
         Marks the user as having no password set for deactivation purposes.
         """
-        _set_unusable_password(User.objects.get(username=username))
+        user = User.objects.get(username=username)
+        segment.identify(user.id, {"is_disabled": "true"})
+        _set_unusable_password(user)
         return Response(get_account_settings(request, [username])[0])
 
 
@@ -508,8 +539,12 @@ class DeactivateLogoutView(APIView):
     -  Log the user out
     - Create a row in the retirement table for that user
     """
-    authentication_classes = (JwtAuthentication, SessionAuthentication, )
-    permission_classes = (permissions.IsAuthenticated, )
+
+    # BearerAuthentication is added here to support account deletion
+    # from the mobile app until it moves to JWT Auth.
+    # See mobile roadmap issue https://github.com/openedx/edx-platform/issues/33307.
+    authentication_classes = (JwtAuthentication, SessionAuthentication, BearerAuthentication)
+    permission_classes = (permissions.IsAuthenticated,)
 
     def post(self, request):
         """
@@ -518,6 +553,15 @@ class DeactivateLogoutView(APIView):
         Marks the user as having no password set for deactivation purposes,
         and logs the user out.
         """
+
+        # Ensure the account deletion is not disable
+        enable_account_deletion = configuration_helpers.get_value(
+            "ENABLE_ACCOUNT_DELETION", settings.ENABLE_ACCOUNT_DELETION
+        )
+
+        if not enable_account_deletion:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         user_model = get_user_model()
         try:
             # Get the username from the request and check that it exists
@@ -532,11 +576,9 @@ class DeactivateLogoutView(APIView):
                     # Send notification email to user
                     site = Site.objects.get_current()
                     notification_context = get_base_template_context(site)
-                    notification_context.update({'full_name': request.user.profile.name})
+                    notification_context.update({"full_name": request.user.profile.name})
                     language_code = request.user.preferences.model.get_value(
-                        request.user,
-                        LANGUAGE_KEY,
-                        default=settings.LANGUAGE_CODE
+                        request.user, LANGUAGE_KEY, default=settings.LANGUAGE_CODE
                     )
                     notification = DeletionNotificationMessage().personalize(
                         recipient=Recipient(lms_user_id=0, email_address=user_email),
@@ -545,22 +587,20 @@ class DeactivateLogoutView(APIView):
                     )
                     ace.send(notification)
                 except Exception as exc:
-                    log.exception('Error sending out deletion notification email')
-                    raise
+                    log.exception("Error sending out deletion notification email")
+                    raise exc
 
                 # Log the user out.
                 logout(request)
             return Response(status=status.HTTP_204_NO_CONTENT)
         except KeyError:
-            log.exception(f'Username not specified {request.user}')
-            return Response('Username not specified.', status=status.HTTP_404_NOT_FOUND)
+            log.exception(f"Username not specified {request.user}")
+            return Response("Username not specified.", status=status.HTTP_404_NOT_FOUND)
         except user_model.DoesNotExist:
             log.exception(f'The user "{request.user.username}" does not exist.')
-            return Response(
-                f'The user "{request.user.username}" does not exist.', status=status.HTTP_404_NOT_FOUND
-            )
+            return Response(f'The user "{request.user.username}" does not exist.', status=status.HTTP_404_NOT_FOUND)
         except Exception as exc:  # pylint: disable=broad-except
-            log.exception(f'500 error deactivating account {exc}')
+            log.exception(f"500 error deactivating account {exc}")
             return Response(str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def _verify_user_password(self, request):
@@ -573,7 +613,7 @@ class DeactivateLogoutView(APIView):
         """
         try:
             self._check_excessive_login_attempts(request.user)
-            user = authenticate(username=request.user.username, password=request.POST['password'], request=request)
+            user = authenticate(username=request.user.username, password=request.POST["password"], request=request)
             if user:
                 if LoginFailures.is_feature_enabled():
                     LoginFailures.clear_lockout_counter(user)
@@ -581,9 +621,7 @@ class DeactivateLogoutView(APIView):
             else:
                 self._handle_failed_authentication(request.user)
         except AuthFailedError as err:
-            log.exception(
-                f"The user password to deactivate was incorrect. {request.user.username}"
-            )
+            log.exception(f"The user password to deactivate was incorrect. {request.user.username}")
             return Response(str(err), status=status.HTTP_403_FORBIDDEN)
         except Exception as err:  # pylint: disable=broad-except
             return Response(f"Could not verify user password: {err}", status=status.HTTP_400_BAD_REQUEST)
@@ -594,8 +632,9 @@ class DeactivateLogoutView(APIView):
         """
         if user and LoginFailures.is_feature_enabled():
             if LoginFailures.is_user_locked_out(user):
-                raise AuthFailedError(_('This account has been temporarily locked due '
-                                        'to excessive login failures. Try again later.'))
+                raise AuthFailedError(
+                    _("This account has been temporarily locked due to excessive login failures. Try again later.")
+                )
 
     def _handle_failed_authentication(self, user):
         """
@@ -604,7 +643,7 @@ class DeactivateLogoutView(APIView):
         if user and LoginFailures.is_feature_enabled():
             LoginFailures.increment_lockout_counter(user)
 
-        raise AuthFailedError(_('Email or password is incorrect.'))
+        raise AuthFailedError(_("Email or password is incorrect."))
 
 
 def _set_unusable_password(user):
@@ -621,16 +660,19 @@ class AccountRetirementPartnerReportView(ViewSet):
     Provides API endpoints for managing partner reporting of retired
     users.
     """
-    DELETION_COMPLETED_KEY = 'deletion_completed'
-    ORGS_CONFIG_KEY = 'orgs_config'
-    ORGS_CONFIG_ORG_KEY = 'org'
-    ORGS_CONFIG_FIELD_HEADINGS_KEY = 'field_headings'
-    ORIGINAL_EMAIL_KEY = 'original_email'
-    ORIGINAL_NAME_KEY = 'original_name'
-    STUDENT_ID_KEY = 'student_id'
 
-    authentication_classes = (JwtAuthentication,)
-    permission_classes = (permissions.IsAuthenticated, CanRetireUser,)
+    DELETION_COMPLETED_KEY = "deletion_completed"
+    ORGS_CONFIG_KEY = "orgs_config"
+    ORGS_CONFIG_ORG_KEY = "org"
+    ORGS_CONFIG_FIELD_HEADINGS_KEY = "field_headings"
+    ORIGINAL_EMAIL_KEY = "original_email"
+    ORIGINAL_NAME_KEY = "original_name"
+    STUDENT_ID_KEY = "student_id"
+
+    permission_classes = (
+        permissions.IsAuthenticated,
+        CanRetireUser,
+    )
     parser_classes = (JSONParser,)
     serializer_class = UserRetirementStatusSerializer
 
@@ -644,16 +686,8 @@ class AccountRetirementPartnerReportView(ViewSet):
             org = enrollment.course_id.org
 
             # Org can conceivably be blank or this bogus default value
-            if org and org != 'outdated_entry':
+            if org and org != "outdated_entry":
                 orgs.add(org)
-        try:
-            # if the user has ever launched a managed Zoom xblock,
-            # we'll notify Zoom to delete their records.
-            if user.launchlog_set.filter(managed=True).count():
-                orgs.add('zoom')
-        except AttributeError:
-            # Zoom XBlock not installed
-            pass
         return orgs
 
     def retirement_partner_report(self, request):  # pylint: disable=unused-argument
@@ -664,9 +698,9 @@ class AccountRetirementPartnerReportView(ViewSet):
         that are not already being processed and updates their status
         to indicate they are currently being processed.
         """
-        retirement_statuses = UserRetirementPartnerReportingStatus.objects.filter(
-            is_being_processed=False
-        ).order_by('id')
+        retirement_statuses = UserRetirementPartnerReportingStatus.objects.filter(is_being_processed=False).order_by(
+            "id"
+        )
 
         retirements = []
         for retirement_status in retirement_statuses:
@@ -683,56 +717,15 @@ class AccountRetirementPartnerReportView(ViewSet):
         Get the retirement for this retirement_status. The retirement info will be included in the partner report.
         """
         retirement = {
-            'user_id': retirement_status.user.pk,
-            'original_username': retirement_status.original_username,
+            "user_id": retirement_status.user.pk,
+            "original_username": retirement_status.original_username,
             AccountRetirementPartnerReportView.ORIGINAL_EMAIL_KEY: retirement_status.original_email,
             AccountRetirementPartnerReportView.ORIGINAL_NAME_KEY: retirement_status.original_name,
-            'orgs': self._get_orgs_for_user(retirement_status.user),
-            'created': retirement_status.created,
+            "orgs": self._get_orgs_for_user(retirement_status.user),
+            "created": retirement_status.created,
         }
 
-        # Some orgs have a custom list of headings and content for the partner report. Add this, if applicable.
-        self._add_orgs_config_for_user(retirement, retirement_status.user)
-
         return retirement
-
-    def _add_orgs_config_for_user(self, retirement, user):
-        """
-        Check to see if the user's info was sent to any partners (orgs) that have a a custom list of headings and
-        content for the partner report. If so, add this.
-        """
-        # See if the MicroBachelors coaching provider needs to be notified of this user's retirement
-        if has_ever_consented_to_coaching is not None and has_ever_consented_to_coaching(user):
-            # See if the user has a MicroBachelors external id. If not, they were never sent to the
-            # coaching provider.
-            external_ids = ExternalId.objects.filter(
-                user=user,
-                external_id_type__name=ExternalIdType.MICROBACHELORS_COACHING
-            )
-            if external_ids.exists():
-                # User has an external id. Add the additional info.
-                external_id = str(external_ids[0].external_user_id)
-                self._add_coaching_orgs_config(retirement, external_id)
-
-    def _add_coaching_orgs_config(self, retirement, external_id):
-        """
-        Add the orgs configuration for MicroBachelors coaching
-        """
-        # Add the custom field headings
-        retirement[AccountRetirementPartnerReportView.ORGS_CONFIG_KEY] = [
-            {
-                AccountRetirementPartnerReportView.ORGS_CONFIG_ORG_KEY: 'mb_coaching',
-                AccountRetirementPartnerReportView.ORGS_CONFIG_FIELD_HEADINGS_KEY: [
-                    AccountRetirementPartnerReportView.STUDENT_ID_KEY,
-                    AccountRetirementPartnerReportView.ORIGINAL_EMAIL_KEY,
-                    AccountRetirementPartnerReportView.ORIGINAL_NAME_KEY,
-                    AccountRetirementPartnerReportView.DELETION_COMPLETED_KEY
-                ]
-            }
-        ]
-
-        # Add the custom field value
-        retirement[AccountRetirementPartnerReportView.STUDENT_ID_KEY] = external_id
 
     @request_requires_username
     def retirement_partner_status_create(self, request):
@@ -748,7 +741,7 @@ class AccountRetirementPartnerReportView(ViewSet):
         Creates a UserRetirementPartnerReportingStatus object for the given user
         as part of the retirement pipeline.
         """
-        username = request.data['username']
+        username = request.data["username"]
 
         try:
             retirement = UserRetirementStatus.get_retirement_for_retirement_action(username)
@@ -758,10 +751,10 @@ class AccountRetirementPartnerReportView(ViewSet):
                 UserRetirementPartnerReportingStatus.objects.get_or_create(
                     user=retirement.user,
                     defaults={
-                        'original_username': retirement.original_username,
-                        'original_email': retirement.original_email,
-                        'original_name': retirement.original_name
-                    }
+                        "original_username": retirement.original_username,
+                        "original_email": retirement.original_email,
+                        "original_name": retirement.original_name,
+                    },
                 )
 
             return Response(status=status.HTTP_204_NO_CONTENT)
@@ -777,14 +770,13 @@ class AccountRetirementPartnerReportView(ViewSet):
         Deletes UserRetirementPartnerReportingStatus objects for a list of users
         that have been reported on.
         """
-        usernames = [u['original_username'] for u in request.data]
+        usernames = [u["original_username"] for u in request.data]
 
         if not usernames:
-            return Response('No original_usernames given.', status=status.HTTP_400_BAD_REQUEST)
+            return Response("No original_usernames given.", status=status.HTTP_400_BAD_REQUEST)
 
         retirement_statuses = UserRetirementPartnerReportingStatus.objects.filter(
-            is_being_processed=True,
-            original_username__in=usernames
+            is_being_processed=True, original_username__in=usernames
         )
 
         # Need to de-dupe usernames that differ only by case to find the exact right match
@@ -796,15 +788,15 @@ class AccountRetirementPartnerReportView(ViewSet):
         # to disambiguate them in Python, which will respect case in the comparison.
         if len(usernames) != len(retirement_statuses_clean):
             return Response(
-                '{} original_usernames given, {} found!\n'
-                'Given usernames:\n{}\n'
-                'Found UserRetirementReportingStatuses:\n{}'.format(
+                "{} original_usernames given, {} found!\n"
+                "Given usernames:\n{}\n"
+                "Found UserRetirementReportingStatuses:\n{}".format(
                     len(usernames),
                     len(retirement_statuses_clean),
                     usernames,
-                    ', '.join([rs.original_username for rs in retirement_statuses_clean])
+                    ", ".join([rs.original_username for rs in retirement_statuses_clean]),
                 ),
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         retirement_statuses.delete()
@@ -812,54 +804,108 @@ class AccountRetirementPartnerReportView(ViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class CancelAccountRetirementStatusView(ViewSet):
+    """
+    Provides API endpoints for canceling retirement process for a user's account.
+    """
+
+    permission_classes = (
+        permissions.IsAuthenticated,
+        CanCancelUserRetirement,
+    )
+
+    def cancel_retirement(self, request):
+        """
+        POST /api/user/v1/accounts/cancel_retirement/
+
+        Cancels the retirement for a user's account.
+        This also handles the top level error handling, and permissions.
+        """
+        try:
+            retirement_id = request.data["retirement_id"]
+        except KeyError:
+            return Response(status=status.HTTP_400_BAD_REQUEST, data={"message": "retirement_id must be specified."})
+
+        try:
+            retirement = UserRetirementStatus.objects.get(id=retirement_id)
+        except UserRetirementStatus.DoesNotExist:
+            return Response(data={"message": "Retirement does not exist!"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if retirement.current_state.state_name != "PENDING":
+            return Response(
+                status=status.HTTP_400_BAD_REQUEST,
+                data={
+                    "message": f"Retirement requests can only be cancelled for users in the PENDING state. Current "
+                    f"request state for '{retirement.original_username}': "
+                    f"{retirement.current_state.state_name}"
+                },
+            )
+
+        handle_retirement_cancellation(retirement)
+
+        return Response(data={"success": True}, status=status.HTTP_200_OK)
+
+
 class AccountRetirementStatusView(ViewSet):
     """
     Provides API endpoints for managing the user retirement process.
     """
-    authentication_classes = (JwtAuthentication,)
-    permission_classes = (permissions.IsAuthenticated, CanRetireUser,)
+
+    permission_classes = (
+        permissions.IsAuthenticated,
+        CanRetireUser,
+    )
     parser_classes = (JSONParser,)
     serializer_class = UserRetirementStatusSerializer
 
     def retirement_queue(self, request):
         """
         GET /api/user/v1/accounts/retirement_queue/
-        {'cool_off_days': 7, 'states': ['PENDING', 'COMPLETE']}
+        {'cool_off_days': 7, 'states': ['PENDING', 'COMPLETE'], 'limit': 500}
 
         Returns the list of RetirementStatus users in the given states that were
         created in the retirement queue at least `cool_off_days` ago.
         """
         try:
-            cool_off_days = int(request.GET['cool_off_days'])
+            cool_off_days = int(request.GET["cool_off_days"])
             if cool_off_days < 0:
-                raise RetirementStateError('Invalid argument for cool_off_days, must be greater than 0.')
+                raise RetirementStateError("Invalid argument for cool_off_days, must be greater than 0.")
 
-            states = request.GET.getlist('states')
+            states = request.GET.getlist("states")
             if not states:
                 raise RetirementStateError('Param "states" required with at least one state.')
 
             state_objs = RetirementState.objects.filter(state_name__in=states)
             if state_objs.count() != len(states):
                 found = [s.state_name for s in state_objs]
-                raise RetirementStateError(f'Unknown state. Requested: {states} Found: {found}')
+                raise RetirementStateError(f"Unknown state. Requested: {states} Found: {found}")
 
-            earliest_datetime = datetime.datetime.now(pytz.UTC) - datetime.timedelta(days=cool_off_days)
+            limit = request.GET.get("limit")
+            if limit:
+                try:
+                    limit_count = int(limit)
+                except ValueError:
+                    return Response(
+                        f"Limit could not be parsed: {limit}, please ensure this is an integer",
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
-            retirements = UserRetirementStatus.objects.select_related(
-                'user', 'current_state', 'last_state'
-            ).filter(
-                current_state__in=state_objs, created__lt=earliest_datetime
-            ).order_by(
-                'id'
+            earliest_datetime = datetime.datetime.now(ZoneInfo("UTC")) - datetime.timedelta(days=cool_off_days)
+
+            retirements = (
+                UserRetirementStatus.objects.select_related("user", "current_state", "last_state")
+                .filter(current_state__in=state_objs, created__lt=earliest_datetime)
+                .order_by("id")
             )
+            if limit:
+                retirements = retirements[:limit_count]
             serializer = UserRetirementStatusSerializer(retirements, many=True)
             return Response(serializer.data)
         # This should only occur on the int() conversion of cool_off_days at this point
         except ValueError:
-            return Response('Invalid cool_off_days, should be integer.', status=status.HTTP_400_BAD_REQUEST)
+            return Response("Invalid cool_off_days, should be integer.", status=status.HTTP_400_BAD_REQUEST)
         except KeyError as exc:
-            return Response(f'Missing required parameter: {str(exc)}',
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(f"Missing required parameter: {str(exc)}", status=status.HTTP_400_BAD_REQUEST)
         except RetirementStateError as exc:
             return Response(str(exc), status=status.HTTP_400_BAD_REQUEST)
 
@@ -874,36 +920,36 @@ class AccountRetirementStatusView(ViewSet):
         so to get one day you would set both dates to that day.
         """
         try:
-            start_date = datetime.datetime.strptime(request.GET['start_date'], '%Y-%m-%d').replace(tzinfo=pytz.UTC)
-            end_date = datetime.datetime.strptime(request.GET['end_date'], '%Y-%m-%d').replace(tzinfo=pytz.UTC)
-            now = datetime.datetime.now(pytz.UTC)
+            start_date = (
+                datetime.datetime.strptime(request.GET["start_date"], "%Y-%m-%d")
+                .replace(tzinfo=ZoneInfo("UTC"))
+            )
+            end_date = datetime.datetime.strptime(request.GET["end_date"], "%Y-%m-%d").replace(tzinfo=ZoneInfo("UTC"))
+            now = datetime.datetime.now(ZoneInfo("UTC"))
             if start_date > now or end_date > now or start_date > end_date:
-                raise RetirementStateError('Dates must be today or earlier, and start must be earlier than end.')
+                raise RetirementStateError("Dates must be today or earlier, and start must be earlier than end.")
 
             # Add a day to make sure we get all the way to 23:59:59.999, this is compared "lt" in the query
             # not "lte".
             end_date += datetime.timedelta(days=1)
-            state = request.GET['state']
+            state = request.GET["state"]
 
             state_obj = RetirementState.objects.get(state_name=state)
 
-            retirements = UserRetirementStatus.objects.select_related(
-                'user', 'current_state', 'last_state'
-            ).filter(
-                current_state=state_obj, created__lt=end_date, created__gte=start_date
-            ).order_by(
-                'id'
+            retirements = (
+                UserRetirementStatus.objects.select_related("user", "current_state", "last_state", "user__profile")
+                .filter(current_state=state_obj, created__lt=end_date, created__gte=start_date)
+                .order_by("id")
             )
             serializer = UserRetirementStatusSerializer(retirements, many=True)
             return Response(serializer.data)
         # This should only occur on the datetime conversion of the start / end dates.
         except ValueError as exc:
-            return Response(f'Invalid start or end date: {str(exc)}', status=status.HTTP_400_BAD_REQUEST)
+            return Response(f"Invalid start or end date: {str(exc)}", status=status.HTTP_400_BAD_REQUEST)
         except KeyError as exc:
-            return Response(f'Missing required parameter: {str(exc)}',
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(f"Missing required parameter: {str(exc)}", status=status.HTTP_400_BAD_REQUEST)
         except RetirementState.DoesNotExist:
-            return Response('Unknown retirement state.', status=status.HTTP_400_BAD_REQUEST)
+            return Response("Unknown retirement state.", status=status.HTTP_400_BAD_REQUEST)
         except RetirementStateError as exc:
             return Response(str(exc), status=status.HTTP_400_BAD_REQUEST)
 
@@ -915,9 +961,9 @@ class AccountRetirementStatusView(ViewSet):
         """
         try:
             user = get_potentially_retired_user_by_username(username)
-            retirement = UserRetirementStatus.objects.select_related(
-                'user', 'current_state', 'last_state'
-            ).get(user=user)
+            retirement = UserRetirementStatus.objects.select_related("user", "current_state", "last_state").get(
+                user=user
+            )
             serializer = UserRetirementStatusSerializer(instance=retirement)
             return Response(serializer.data)
         except (UserRetirementStatus.DoesNotExist, User.DoesNotExist):
@@ -939,13 +985,11 @@ class AccountRetirementStatusView(ViewSet):
         Updates the RetirementStatus row for the given user to the new
         status, and append any messages to the message log.
 
-        Note that this implementation DOES NOT use the "merge patch"
-        implementation seen in AccountViewSet. Slumber, the project
-        we use to power edx-rest-api-client, does not currently support
-        it. The content type for this request is 'application/json'.
+        Note that this implementation DOES NOT use the "merge patch" implementation seen in AccountViewSet.
+        The content type for this request is 'application/json'.
         """
         try:
-            username = request.data['username']
+            username = request.data["username"]
             retirements = UserRetirementStatus.objects.filter(original_username=username)
 
             # During a narrow window learners were able to re-use a username that had been retired if
@@ -953,7 +997,7 @@ class AccountRetirementStatusView(ViewSet):
             # than one row returned here (due to our MySQL collation being case-insensitive), and need
             # to disambiguate them in Python, which will respect case in the comparison.
             retirement = None
-            if len(retirements) < 1:  # lint-amnesty, pylint: disable=no-else-raise
+            if len(retirements) < 1:  # pylint: disable=no-else-raise
                 raise UserRetirementStatus.DoesNotExist()
             elif len(retirements) >= 1:
                 for r in retirements:
@@ -983,25 +1027,37 @@ class AccountRetirementStatusView(ViewSet):
         }
         ```
 
-        Deletes a batch of retirement requests by username.
+        Redacts and then deletes a batch of retirement requests by username.
         """
         try:
-            usernames = request.data['usernames']
+            usernames = request.data["usernames"]
 
             if not isinstance(usernames, list):
-                raise TypeError('Usernames should be an array.')
+                raise TypeError("Usernames should be an array.")
 
-            complete_state = RetirementState.objects.get(state_name='COMPLETE')
+            complete_state = RetirementState.objects.get(state_name="COMPLETE")
             retirements = UserRetirementStatus.objects.filter(
-                original_username__in=usernames,
-                current_state=complete_state
+                original_username__in=usernames, current_state=complete_state
             )
 
             # Sanity check that they're all valid usernames in the right state
             if len(usernames) != len(retirements):
-                raise UserRetirementStatus.DoesNotExist('Not all usernames exist in the COMPLETE state.')
+                raise UserRetirementStatus.DoesNotExist("Not all usernames exist in the COMPLETE state.")
 
-            retirements.delete()
+            # Redact PII fields first, then delete. In case an ETL tool is syncing data
+            # to a downstream data warehouse, and treats the deletes as soft-deletes,
+            # the data will have first been redacted, protecting the sensitive PII.
+            # Get the IDs of the retirements to update/delete
+            retirement_ids = list(retirements.values_list('id', flat=True))
+            # Update by IDs
+            UserRetirementStatus.objects.filter(id__in=retirement_ids).update(
+                original_username="redacted-before-delete",
+                original_email="redacted-before-delete@safe.com",
+                original_name="redacted-before-delete"
+            )
+            # Delete by IDs
+            UserRetirementStatus.objects.filter(id__in=retirement_ids, current_state=complete_state).delete()
+
             return Response(status=status.HTTP_204_NO_CONTENT)
         except (RetirementStateError, UserRetirementStatus.DoesNotExist, TypeError) as exc:
             return Response(str(exc), status=status.HTTP_400_BAD_REQUEST)
@@ -1013,8 +1069,11 @@ class LMSAccountRetirementView(ViewSet):
     """
     Provides an API endpoint for retiring a user in the LMS.
     """
-    authentication_classes = (JwtAuthentication,)
-    permission_classes = (permissions.IsAuthenticated, CanRetireUser,)
+
+    permission_classes = (
+        permissions.IsAuthenticated,
+        CanRetireUser,
+    )
     parser_classes = (JSONParser,)
 
     @request_requires_username
@@ -1031,18 +1090,19 @@ class LMSAccountRetirementView(ViewSet):
         Retires the user with the given username in the LMS.
         """
 
-        username = request.data['username']
+        username = request.data["username"]
 
         try:
             retirement = UserRetirementStatus.get_retirement_for_retirement_action(username)
             RevisionPluginRevision.retire_user(retirement.user)
             ArticleRevision.retire_user(retirement.user)
-            PendingNameChange.delete_by_user_value(retirement.user, field='user')
+            PendingNameChange.delete_by_user_value(retirement.user, field="user")
             ManualEnrollmentAudit.retire_manual_enrollments(retirement.user, retirement.retired_email)
 
             CreditRequest.retire_user(retirement)
             ApiAccessRequest.retire_user(retirement.user)
             CreditRequirementStatus.retire_user(retirement)
+            redact_and_delete_historical_social_auth(retirement.user.id)
 
             # This signal allows code in higher points of LMS to retire the user as necessary
             USER_RETIRE_LMS_MISC.send(sender=self.__class__, user=retirement.user)
@@ -1053,7 +1113,7 @@ class LMSAccountRetirementView(ViewSet):
                 sender=self.__class__,
                 email=retirement.original_email,
                 new_email=retirement.retired_email,
-                user=retirement.user
+                user=retirement.user,
             )
         except UserRetirementStatus.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -1069,8 +1129,11 @@ class AccountRetirementView(ViewSet):
     """
     Provides API endpoint for retiring a user.
     """
-    authentication_classes = (JwtAuthentication,)
-    permission_classes = (permissions.IsAuthenticated, CanRetireUser,)
+
+    permission_classes = (
+        permissions.IsAuthenticated,
+        CanRetireUser,
+    )
     parser_classes = (JSONParser,)
 
     @request_requires_username
@@ -1084,11 +1147,10 @@ class AccountRetirementView(ViewSet):
         }
         ```
 
-        Retires the user with the given username.  This includes
-        retiring this username, the associated email address, and
-        any other PII associated with this user.
+        Retires the user with the given username.  This includes retiring this username, the associated email address,
+        and any other PII associated with this user.
         """
-        username = request.data['username']
+        username = request.data["username"]
 
         try:
             retirement_status = UserRetirementStatus.get_retirement_for_retirement_action(username)
@@ -1102,28 +1164,34 @@ class AccountRetirementView(ViewSet):
             self.delete_users_profile_images(user)
             self.delete_users_country_cache(user)
 
-            # Retire data from Enterprise models
-            self.retire_users_data_sharing_consent(username, retired_username)
-            self.retire_sapsf_data_transmission(user)
-            self.retire_degreed_data_transmission(user)
-            self.retire_user_from_pending_enterprise_customer_user(user, retired_email)
+            # Retire user information from any certificate records associated with the learner
+            self.clear_pii_from_certificate_records(user)
+
             self.retire_entitlement_support_detail(user)
 
             # Retire misc. models that may contain PII of this user
-            PendingEmailChange.delete_by_user_value(user, field='user')
-            UserOrgTag.delete_by_user_value(user, field='user')
+            PendingEmailChange.delete_by_user_value(user, field="user")
+            UserOrgTag.delete_by_user_value(user, field="user")
+            PendingSecondaryEmailChange.redact_and_delete_pending_secondary_email(user.id)
+            AccountRecovery.retire_recovery_email(user.id)
 
             # Retire any objects linked to the user via their original email
-            CourseEnrollmentAllowed.delete_by_user_value(original_email, field='email')
-            UnregisteredLearnerCohortAssignments.delete_by_user_value(original_email, field='email')
+            CourseEnrollmentAllowed.delete_by_user_value(original_email, field="email")
+            UnregisteredLearnerCohortAssignments.delete_by_user_value(original_email, field="email")
 
             # This signal allows code in higher points of LMS to retire the user as necessary
-            USER_RETIRE_LMS_CRITICAL.send(sender=self.__class__, user=user)
+            USER_RETIRE_LMS_CRITICAL.send(
+                sender=self.__class__,
+                user=user,
+                retired_username=retired_username,
+                retired_email=retired_email,
+            )
 
-            user.first_name = ''
-            user.last_name = ''
+            user.first_name = ""
+            user.last_name = ""
             user.is_active = False
             user.username = retired_username
+            user.email = retired_email
             user.save()
         except UserRetirementStatus.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -1137,8 +1205,8 @@ class AccountRetirementView(ViewSet):
     @staticmethod
     def clear_pii_from_userprofile(user):
         """
-        For the given user, sets all of the user's profile fields to some retired value.
-        This also deletes all ``SocialLink`` objects associated with this user's profile.
+        For the given user, sets all of the user's profile fields to some retired value. This also deletes all
+        ``SocialLink`` objects associated with this user's profile.
         """
         for model_field, value_to_assign in USER_PROFILE_PII.items():
             setattr(user.profile, model_field, value_to_assign)
@@ -1158,43 +1226,20 @@ class AccountRetirementView(ViewSet):
         cache.delete(cache_key)
 
     @staticmethod
-    def retire_users_data_sharing_consent(username, retired_username):
-        DataSharingConsent.objects.filter(username=username).update(username=retired_username)
-
-    @staticmethod
-    def retire_sapsf_data_transmission(user):  # lint-amnesty, pylint: disable=missing-function-docstring
-        for ent_user in EnterpriseCustomerUser.objects.filter(user_id=user.id):
-            for enrollment in EnterpriseCourseEnrollment.objects.filter(
-                enterprise_customer_user=ent_user
-            ):
-                audits = SapSuccessFactorsLearnerDataTransmissionAudit.objects.filter(
-                    enterprise_course_enrollment_id=enrollment.id
-                )
-                audits.update(sapsf_user_id='')
-
-    @staticmethod
-    def retire_degreed_data_transmission(user):  # lint-amnesty, pylint: disable=missing-function-docstring
-        for ent_user in EnterpriseCustomerUser.objects.filter(user_id=user.id):
-            for enrollment in EnterpriseCourseEnrollment.objects.filter(
-                enterprise_customer_user=ent_user
-            ):
-                audits = DegreedLearnerDataTransmissionAudit.objects.filter(
-                    enterprise_course_enrollment_id=enrollment.id
-                )
-                audits.update(degreed_user_email='')
-
-    @staticmethod
-    def retire_user_from_pending_enterprise_customer_user(user, retired_email):
-        PendingEnterpriseCustomerUser.objects.filter(user_email=user.email).update(user_email=retired_email)
-
-    @staticmethod
     def retire_entitlement_support_detail(user):
         """
-        Updates all CourseEntitleSupportDetail records for the given
-        user to have an empty ``comments`` field.
+        Updates all CourseEntitleSupportDetail records for the given user to have an empty ``comments`` field.
         """
         for entitlement in CourseEntitlement.objects.filter(user_id=user.id):
-            entitlement.courseentitlementsupportdetail_set.all().update(comments='')
+            entitlement.courseentitlementsupportdetail_set.all().update(comments="")
+
+    @staticmethod
+    def clear_pii_from_certificate_records(user):
+        """
+        Calls a utility function in the `certificates` Django app responsible for removing PII (name) from any
+        certificate records associated with the learner being retired.
+        """
+        clear_pii_from_certificate_records_for_user(user)
 
 
 class UsernameReplacementView(APIView):
@@ -1209,7 +1254,7 @@ class UsernameReplacementView(APIView):
     This API will be called first, before calling the APIs in other services as this
     one handles the checks on the usernames provided.
     """
-    authentication_classes = (JwtAuthentication, )
+
     permission_classes = (permissions.IsAuthenticated, CanReplaceUsername)
 
     def post(self, request):
@@ -1251,16 +1296,16 @@ class UsernameReplacementView(APIView):
 
         # (model_name, column_name)
         MODELS_WITH_USERNAME = (
-            ('auth.user', 'username'),
-            ('consent.DataSharingConsent', 'username'),
-            ('consent.HistoricalDataSharingConsent', 'username'),
-            ('credit.CreditEligibility', 'username'),
-            ('credit.CreditRequest', 'username'),
-            ('credit.CreditRequirementStatus', 'username'),
-            ('user_api.UserRetirementPartnerReportingStatus', 'original_username'),
-            ('user_api.UserRetirementStatus', 'original_username')
+            ("auth.user", "username"),
+            ("consent.DataSharingConsent", "username"),
+            ("consent.HistoricalDataSharingConsent", "username"),
+            ("credit.CreditEligibility", "username"),
+            ("credit.CreditRequest", "username"),
+            ("credit.CreditRequirementStatus", "username"),
+            ("user_api.UserRetirementPartnerReportingStatus", "original_username"),
+            ("user_api.UserRetirementStatus", "original_username"),
         )
-        UNIQUE_SUFFIX_LENGTH = getattr(settings, 'SOCIAL_AUTH_UUID_LENGTH', 4)
+        UNIQUE_SUFFIX_LENGTH = getattr(settings, "SOCIAL_AUTH_UUID_LENGTH", 4)
 
         username_mappings = request.data.get("username_mappings")
         replacement_locations = self._load_models(MODELS_WITH_USERNAME)
@@ -1275,9 +1320,7 @@ class UsernameReplacementView(APIView):
             desired_username = list(username_pair.values())[0]
             new_username = self._generate_unique_username(desired_username, suffix_length=UNIQUE_SUFFIX_LENGTH)
             successfully_replaced = self._replace_username_for_all_models(
-                current_username,
-                new_username,
-                replacement_locations
+                current_username, new_username, replacement_locations
             )
             if successfully_replaced:
                 successful_replacements.append({current_username: new_username})
@@ -1285,14 +1328,11 @@ class UsernameReplacementView(APIView):
                 failed_replacements.append({current_username: new_username})
         return Response(
             status=status.HTTP_200_OK,
-            data={
-                "successful_replacements": successful_replacements,
-                "failed_replacements": failed_replacements
-            }
+            data={"successful_replacements": successful_replacements, "failed_replacements": failed_replacements},
         )
 
     def _load_models(self, models_with_fields):
-        """ Takes tuples that contain a model path and returns the list with a loaded version of the model """
+        """Takes tuples that contain a model path and returns the list with a loaded version of the model"""
         try:
             replacement_locations = [(apps.get_model(model), column) for (model, column) in models_with_fields]
         except LookupError:
@@ -1301,7 +1341,7 @@ class UsernameReplacementView(APIView):
         return replacement_locations
 
     def _has_valid_schema(self, post_data):
-        """ Verifies the data is a list of objects with a single key:value pair """
+        """Verifies the data is a list of objects with a single key:value pair"""
         if not isinstance(post_data, list):
             return False
         for obj in post_data:
@@ -1319,8 +1359,8 @@ class UsernameReplacementView(APIView):
         # Keep checking usernames in case desired_username + random suffix is already taken
         while True:
             if User.objects.filter(username=new_username).exists():
-                unique_suffix = uuid.uuid4().hex[:suffix_length]
-                new_username = desired_username + unique_suffix
+                # adding a dash between user-supplied and system-generated values to avoid weird combinations
+                new_username = desired_username + "-" + username_suffix_generator(suffix_length)
             else:
                 break
         return new_username
@@ -1335,10 +1375,8 @@ class UsernameReplacementView(APIView):
         try:
             with transaction.atomic():
                 num_rows_changed = 0
-                for (model, column) in replacement_locations:
-                    num_rows_changed += model.objects.filter(
-                        **{column: current_username}
-                    ).update(
+                for model, column in replacement_locations:
+                    num_rows_changed += model.objects.filter(**{column: current_username}).update(
                         **{column: new_username}
                     )
         except Exception as exc:  # pylint: disable=broad-except
@@ -1347,7 +1385,7 @@ class UsernameReplacementView(APIView):
                 current_username,
                 new_username,
                 model.__class__.__name__,  # Retrieves the model name that it failed on
-                exc
+                exc,
             )
             return False
         if num_rows_changed == 0:

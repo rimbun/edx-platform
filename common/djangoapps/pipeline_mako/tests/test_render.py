@@ -1,7 +1,5 @@
 """ Tests for rendering functions in the mako pipeline. """
 
-
-from unittest import skipUnless
 from unittest.mock import patch
 
 import ddt
@@ -9,6 +7,7 @@ from django.conf import settings
 from django.test import TestCase
 
 from common.djangoapps.pipeline_mako import compressed_css, compressed_js, render_require_js_path_overrides
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 
 class RequireJSPathOverridesTest(TestCase):
@@ -37,10 +36,10 @@ class RequireJSPathOverridesTest(TestCase):
     def test_requirejs_path_overrides(self):
         result = render_require_js_path_overrides(self.OVERRIDES)
         # To make the string comparision easy remove the whitespaces
-        self.assertCountEqual(list(map(str.strip, result.splitlines())), self.OVERRIDES_JS)
+        self.assertCountEqual(list(map(str.strip, result.splitlines())), self.OVERRIDES_JS)  # noqa: PT009
 
 
-@skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in LMS')
+@skip_unless_lms
 @ddt.ddt
 class PipelineRenderTest(TestCase):
     """Test individual pipeline rendering functions. """
@@ -54,7 +53,7 @@ class PipelineRenderTest(TestCase):
         (True,),
         (False,),
     )
-    def test_compressed_css(self, pipeline_enabled, mock_staticfiles_lookup):  # lint-amnesty, pylint: disable=unused-argument
+    def test_compressed_css(self, pipeline_enabled, mock_staticfiles_lookup):  # pylint: disable=unused-argument
         """
         Verify the behavior of compressed_css, with the pipeline
         both enabled and disabled.
@@ -72,7 +71,7 @@ class PipelineRenderTest(TestCase):
 
     @patch('django.contrib.staticfiles.storage.staticfiles_storage.exists', return_value=True)
     @patch('common.djangoapps.static_replace.try_staticfiles_lookup', side_effect=mock_staticfiles_lookup)
-    def test_compressed_js(self, mock_staticfiles_lookup, mock_staticfiles_exists):  # lint-amnesty, pylint: disable=unused-argument
+    def test_compressed_js(self, mock_staticfiles_lookup, mock_staticfiles_exists):  # pylint: disable=unused-argument
         """
         Verify the behavior of compressed_css, with the pipeline
         both enabled and disabled.

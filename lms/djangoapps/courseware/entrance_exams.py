@@ -5,11 +5,11 @@ This file contains all entrance exam related utils/logic.
 
 from opaque_keys.edx.keys import UsageKey
 
-from lms.djangoapps.courseware.access import has_access
 from common.djangoapps.student.models import EntranceExamConfiguration
 from common.djangoapps.util.milestones_helpers import get_required_content
+from lms.djangoapps.courseware.access import has_access
 from openedx.core.toggles import ENTRANCE_EXAMS
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 
 def course_has_entrance_exam(course):
@@ -58,15 +58,15 @@ def user_has_passed_entrance_exam(user, course):
 
 def get_entrance_exam_content(user, course):
     """
-    Get the entrance exam content information (ie, chapter module)
+    Get the entrance exam content information (ie, chapter block)
     """
     required_content = get_required_content(course.id, user)
 
-    exam_module = None
+    exam_block = None
     for content in required_content:
         usage_key = UsageKey.from_string(content).map_into_course(course.id)
-        module_item = modulestore().get_item(usage_key)
-        if not module_item.hide_from_toc and module_item.is_entrance_exam:
-            exam_module = module_item
+        block = modulestore().get_item(usage_key)
+        if not block.hide_from_toc and block.is_entrance_exam:
+            exam_block = block
             break
-    return exam_module
+    return exam_block

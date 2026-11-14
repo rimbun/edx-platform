@@ -4,14 +4,16 @@ Enrollment operations for use by instructor APIs.
 Does not include any access control, be sure to check access before calling.
 """
 
-
 import json
 import logging
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 
 import pytz
+from crum import get_current_request
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.contrib.sites.models import Site
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.translation import override as override_language
@@ -19,20 +21,22 @@ from edx_ace import ace
 from edx_ace.recipient import Recipient
 from eventtracking import tracker
 from submissions import api as sub_api  # installed from the edx-submissions repository
-from submissions.models import score_set
+from submissions.models import score_reset, score_set
 
 from common.djangoapps.course_modes.models import CourseMode
-from common.djangoapps.student.models import (  # lint-amnesty, pylint: disable=line-too-long
+from common.djangoapps.student.models import (  # pylint: disable=line-too-long
     CourseEnrollment,
     CourseEnrollmentAllowed,
     anonymous_id_for_user,
-    is_email_retired
+    is_email_retired,
 )
 from common.djangoapps.track.event_transaction_utils import (
     create_new_event_transaction_id,
     get_event_transaction_id,
-    set_event_transaction_type
+    set_event_transaction_type,
 )
+from common.djangoapps.util.course import get_link_for_about_page
+from lms.djangoapps.branding.api import get_logo_url_for_email
 from lms.djangoapps.courseware.models import StudentModule
 from lms.djangoapps.grades.api import constants as grades_constants
 from lms.djangoapps.grades.api import disconnect_submissions_signal_receiver
@@ -45,27 +49,31 @@ from lms.djangoapps.instructor.message_types import (
     AllowedUnenroll,
     EnrolledUnenroll,
     EnrollEnrolled,
-    RemoveBetaTester
+    RemoveBetaTester,
 )
 from openedx.core.djangoapps.lang_pref import LANGUAGE_KEY
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from openedx.core.djangoapps.theming.helpers import get_current_site
 from openedx.core.djangoapps.user_api.models import UserPreference
-from openedx.core.djangolib.markup import Text
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from openedx.core.lib.celery.task_utils import emulate_http_request
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
 
 log = logging.getLogger(__name__)
 
 
 class EmailEnrollmentState:
     """ Store the complete enrollment state of an email in a class """
+
     def __init__(self, course_id, email):
         # N.B. retired users are not a concern here because they should be
         # handled at a higher level (i.e. in enroll_email).  Besides, this
         # class creates readonly objects.
-        exists_user = User.objects.filter(email=email).exists()
-        if exists_user:
+        try:
             user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            user = None
+        if user is not None:
             mode, is_active = CourseEnrollment.enrollment_mode_for_user(user, course_id)
             # is_active is `None` if the user is not enrolled in the course
             exists_ce = is_active is not None and is_active
@@ -79,7 +87,7 @@ class EmailEnrollmentState:
         exists_allowed = ceas.exists()
         state_auto_enroll = exists_allowed and ceas[0].auto_enroll
 
-        self.user = exists_user
+        self.user = user
         self.enrollment = exists_ce
         self.allowed = exists_allowed
         self.auto_enroll = bool(state_auto_enroll)
@@ -87,9 +95,9 @@ class EmailEnrollmentState:
         self.mode = mode
 
     def __repr__(self):
-        return "{}(user={}, enrollment={}, allowed={}, auto_enroll={})".format(
+        return "{}(user={}, enrollment={}, allowed={}, auto_enroll={})".format(  # noqa: UP032
             self.__class__.__name__,
-            self.user,
+            bool(self.user),
             self.enrollment,
             self.allowed,
             self.auto_enroll,
@@ -105,7 +113,7 @@ class EmailEnrollmentState:
         }
         """
         return {
-            'user': self.user,
+            'user': bool(self.user),
             'enrollment': self.enrollment,
             'allowed': self.allowed,
             'auto_enroll': self.auto_enroll,
@@ -122,7 +130,14 @@ def get_user_email_language(user):
     return UserPreference.get_value(user, LANGUAGE_KEY)
 
 
-def enroll_email(course_id, student_email, auto_enroll=False, email_students=False, email_params=None, language=None):
+def enroll_email(
+    course_id,
+    student_email,
+    auto_enroll=False,
+    message_students=False,
+    message_params=None,
+    language=None
+):
     """
     Enroll a student by email.
 
@@ -130,8 +145,8 @@ def enroll_email(course_id, student_email, auto_enroll=False, email_students=Fal
     `auto_enroll` determines what is put in CourseEnrollmentAllowed.auto_enroll
         if auto_enroll is set, then when the email registers, they will be
         enrolled in the course automatically.
-    `email_students` determines if student should be notified of action by email.
-    `email_params` parameters used while parsing email templates (a `dict`).
+    `message_students` determines if student should be notified of action by email or push message.
+    `message_params` parameters used while parsing message templates (a `dict`).
     `language` is the language used to render the email.
 
     returns two EmailEnrollmentState's
@@ -139,7 +154,17 @@ def enroll_email(course_id, student_email, auto_enroll=False, email_students=Fal
     """
     previous_state = EmailEnrollmentState(course_id, student_email)
     enrollment_obj = None
-    if previous_state.user and User.objects.get(email=student_email).is_active:
+    if message_params:
+        message_params.update({
+            'app_label': 'instructor',
+            'push_notification_extra_context': {
+                'notification_type': 'enroll',
+                'course_id': str(course_id),
+            },
+        })
+    else:
+        message_params = {}
+    if previous_state.user and previous_state.user.is_active:
         # if the student is currently unenrolled, don't enroll them in their
         # previous mode
 
@@ -156,80 +181,123 @@ def enroll_email(course_id, student_email, auto_enroll=False, email_students=Fal
             course_mode = previous_state.mode
 
         enrollment_obj = CourseEnrollment.enroll_by_email(student_email, course_id, course_mode)
-        if email_students:
-            email_params['message_type'] = 'enrolled_enroll'
-            email_params['email_address'] = student_email
-            email_params['full_name'] = previous_state.full_name
-            send_mail_to_student(student_email, email_params, language=language)
+        if message_students:
+            message_params['message_type'] = 'enrolled_enroll'
+            message_params['email_address'] = student_email
+            message_params['user_id'] = previous_state.user.id
+            message_params['full_name'] = previous_state.full_name
+            send_mail_to_student(student_email, message_params, language=language)
 
     elif not is_email_retired(student_email):
         cea, _ = CourseEnrollmentAllowed.objects.get_or_create(course_id=course_id, email=student_email)
         cea.auto_enroll = auto_enroll
         cea.save()
-        if email_students:
-            email_params['message_type'] = 'allowed_enroll'
-            email_params['email_address'] = student_email
-            send_mail_to_student(student_email, email_params, language=language)
+        if message_students:
+            message_params['message_type'] = 'allowed_enroll'
+            message_params['email_address'] = student_email
+            if previous_state.user:
+                message_params['user_id'] = previous_state.user.id
+            send_mail_to_student(student_email, message_params, language=language)
 
     after_state = EmailEnrollmentState(course_id, student_email)
 
     return previous_state, after_state, enrollment_obj
 
 
-def unenroll_email(course_id, student_email, email_students=False, email_params=None, language=None):
+def unenroll_email(course_id, student_email, message_students=False, message_params=None, language=None):
     """
     Unenroll a student by email.
 
     `student_email` is student's emails e.g. "foo@bar.com"
-    `email_students` determines if student should be notified of action by email.
-    `email_params` parameters used while parsing email templates (a `dict`).
+    `message_students` determines if student should be notified of action by email or push message.
+    `message_params` parameters used while parsing email templates (a `dict`).
     `language` is the language used to render the email.
 
     returns two EmailEnrollmentState's
         representing state before and after the action.
     """
     previous_state = EmailEnrollmentState(course_id, student_email)
+    if message_params:
+        message_params.update({
+            'app_label': 'instructor',
+            'push_notification_extra_context': {
+                'notification_type': 'unenroll',
+            },
+        })
+    else:
+        message_params = {}
     if previous_state.enrollment:
         CourseEnrollment.unenroll_by_email(student_email, course_id)
-        if email_students:
-            email_params['message_type'] = 'enrolled_unenroll'
-            email_params['email_address'] = student_email
-            email_params['full_name'] = previous_state.full_name
-            send_mail_to_student(student_email, email_params, language=language)
+        if message_students:
+            message_params['message_type'] = 'enrolled_unenroll'
+            message_params['email_address'] = student_email
+            if previous_state.user:
+                message_params['user_id'] = previous_state.user.id
+            message_params['full_name'] = previous_state.full_name
+            send_mail_to_student(student_email, message_params, language=language)
 
     if previous_state.allowed:
         CourseEnrollmentAllowed.objects.get(course_id=course_id, email=student_email).delete()
-        if email_students:
-            email_params['message_type'] = 'allowed_unenroll'
-            email_params['email_address'] = student_email
+        if message_students:
+            message_params['message_type'] = 'allowed_unenroll'
+            message_params['email_address'] = student_email
+            if previous_state.user:
+                message_params['user_id'] = previous_state.user.id
             # Since no User object exists for this student there is no "full_name" available.
-            send_mail_to_student(student_email, email_params, language=language)
+            send_mail_to_student(student_email, message_params, language=language)
 
     after_state = EmailEnrollmentState(course_id, student_email)
 
     return previous_state, after_state
 
 
-def send_beta_role_email(action, user, email_params):
+def send_beta_role_email(action, user, message_params):
     """
     Send an email to a user added or removed as a beta tester.
 
     `action` is one of 'add' or 'remove'
     `user` is the User affected
-    `email_params` parameters used while parsing email templates (a `dict`).
+    `message_params` parameters used while parsing email templates (a `dict`).
     """
     if action in ('add', 'remove'):
-        email_params['message_type'] = '%s_beta_tester' % action
-        email_params['email_address'] = user.email
-        email_params['full_name'] = user.profile.name
+        message_params['message_type'] = '%s_beta_tester' % action  # noqa: UP031
+        message_params['email_address'] = user.email
+        message_params['user_id'] = user.id
+        message_params['full_name'] = user.profile.name
+        message_params['app_label'] = 'instructor'
+        message_params['push_notification_extra_context'] = {
+            'notification_type': message_params['message_type'],
+            'course_id': str(getattr(message_params.get('course'), 'id', '')),
+        }
     else:
         raise ValueError(f"Unexpected action received '{action}' - expected 'add' or 'remove'")
     trying_to_add_inactive_user = not user.is_active and action == 'add'
     if not trying_to_add_inactive_user:
-        send_mail_to_student(user.email, email_params, language=get_user_email_language(user))
+        send_mail_to_student(user.email, message_params, language=get_user_email_language(user))
 
 
-def reset_student_attempts(course_id, student, module_state_key, requesting_user, delete_module=False):
+@contextmanager
+def _conditionally_disconnect_submissions_signal_recievers(emit_score_reset):
+    """
+    Context manager helper.
+    - Disconnects the score_set signal on enter, reconnects on exit
+    - If emit_score_reset, disconnects score_reset signal on enter, reconnects on exit
+    """
+    with ExitStack() as context_stack:
+        context_stack.enter_context(disconnect_submissions_signal_receiver(score_set))
+        if not emit_score_reset:
+            context_stack.enter_context(disconnect_submissions_signal_receiver(score_reset))
+        yield
+
+
+def reset_student_attempts(
+    course_id,
+    student,
+    module_state_key,
+    requesting_user,
+    delete_module=False,
+    emit_signals_and_events=True,
+):
     """
     Reset student attempts for a problem. Optionally deletes all student state for the specified problem.
 
@@ -239,6 +307,10 @@ def reset_student_attempts(course_id, student, module_state_key, requesting_user
     `student` is a User
     `problem_to_reset` is the name of a problem e.g. 'L2Node1'.
     To build the module_state_key 'problem/' and course information will be appended to `problem_to_reset`.
+    `delete_module`: Instead of resetting attempts, delete the learner's StudentModule
+    `emit_signals_and_events`: If this is False, don't fire django signals or emit events. This is intended for
+                               the case where we are calling this function many times, and want to handle the signalling
+                               and eventing at a bulk level rather than firing every individual call to this function
 
     Raises:
         ValueError: `problem_state` is invalid JSON.
@@ -266,7 +338,7 @@ def reset_student_attempts(course_id, student, module_state_key, requesting_user
             # Inform these blocks of the reset and allow them to handle their data.
             clear_student_state = getattr(block, "clear_student_state", None)
             if callable(clear_student_state):
-                with disconnect_submissions_signal_receiver(score_set):
+                with _conditionally_disconnect_submissions_signal_recievers(emit_signals_and_events):
                     clear_student_state(
                         user_id=user_id,
                         course_id=str(course_id),
@@ -291,11 +363,15 @@ def reset_student_attempts(course_id, student, module_state_key, requesting_user
             user_id,
             str(course_id),
             str(module_state_key),
+            emit_signal=emit_signals_and_events,
         )
 
     def _reset_or_delete_module(studentmodule):
         if delete_module:
             studentmodule.delete()
+            if not emit_signals_and_events:
+                return
+
             create_new_event_transaction_id()
             set_event_transaction_type(grades_events.STATE_DELETED_EVENT_TYPE)
             tracker.emit(
@@ -352,6 +428,9 @@ def _reset_module_attempts(studentmodule):
     problem_state = json.loads(studentmodule.state)
     # old_number_of_attempts = problem_state["attempts"]
     problem_state["attempts"] = 0
+    problem_state["score_history"] = []
+    problem_state["correct_map_history"] = []
+    problem_state["student_answers_history"] = []
 
     # save
     studentmodule.state = json.dumps(problem_state)
@@ -359,10 +438,10 @@ def _reset_module_attempts(studentmodule):
 
 
 def _fire_score_changed_for_block(
-        course_id,
-        student,
-        block,
-        module_state_key,
+    course_id,
+    student,
+    block,
+    module_state_key,
 ):
     """
     Fires a PROBLEM_RAW_SCORE_CHANGED event for the given module.
@@ -397,7 +476,7 @@ def get_email_params(course, auto_enroll, secure=True, course_key=None, display_
 
     protocol = 'https' if secure else 'http'
     course_key = course_key or str(course.id)
-    display_name = display_name or Text(course.display_name_with_default)
+    display_name = display_name or course.display_name_with_default
 
     stripped_site_name = configuration_helpers.get_value(
         'SITE_NAME',
@@ -416,14 +495,7 @@ def get_email_params(course, auto_enroll, secure=True, course_key=None, display_
         path=reverse('course_root', kwargs={'course_id': course_key})
     )
 
-    # We can't get the url to the course's About page if the marketing site is enabled.
-    course_about_url = None
-    if not settings.FEATURES.get('ENABLE_MKTG_SITE', False):
-        course_about_url = '{proto}://{site}{path}'.format(
-            proto=protocol,
-            site=stripped_site_name,
-            path=reverse('about_course', kwargs={'course_id': course_key})
-        )
+    course_about_url = get_link_for_about_page(course)
 
     is_shib_course = uses_shib(course)
 
@@ -447,6 +519,7 @@ def get_email_params(course, auto_enroll, secure=True, course_key=None, display_
         'contact_mailing_address': contact_mailing_address,
         'platform_name': platform_name,
         'site_configuration_values': configuration_helpers.get_current_site_configuration_values(),
+        'logo_url': get_logo_url_for_email(),
     }
     return email_params
 
@@ -464,6 +537,7 @@ def send_mail_to_student(student, param_dict, language=None):
         `course_id`: id of course (a `str`)
         `auto_enroll`: user input option (a `str`)
         `course_url`: url of course (a `str`)
+        `user_id`: LMS user ID of student (an `int`) - None if unknown
         `email_address`: email of student (a `str`)
         `full_name`: student full name (a `str`)
         `message_type`: type of email to send and template to use (a `str`)
@@ -481,12 +555,19 @@ def send_mail_to_student(student, param_dict, language=None):
     if 'display_name' in param_dict:
         param_dict['course_name'] = param_dict['display_name']
     elif 'course' in param_dict:
-        param_dict['course_name'] = Text(param_dict['course'].display_name_with_default)
+        param_dict['course_name'] = param_dict['course'].display_name_with_default
 
     param_dict['site_name'] = configuration_helpers.get_value(
         'SITE_NAME',
         param_dict['site_name']
     )
+
+    # Extract an LMS user ID for the student, if possible.
+    # ACE needs the user ID to be able to send email via Braze.
+    try:
+        lms_user_id = User.objects.get(email=student).id
+    except User.DoesNotExist:
+        lms_user_id = 0
 
     # see if there is an activation email template definition available as configuration,
     # if so, then render that
@@ -504,12 +585,41 @@ def send_mail_to_student(student, param_dict, language=None):
 
     message_class = ace_emails_dict[message_type]
     message = message_class().personalize(
-        recipient=Recipient(lms_user_id=0, email_address=student),
+        recipient=Recipient(lms_user_id=lms_user_id, email_address=student),
         language=language,
         user_context=param_dict,
     )
 
-    ace.send(message)
+    current_request = get_current_request()
+
+    if current_request is None:
+        # We're in a Celery task context, need to emulate HTTP request
+        site = get_current_site()
+        if not site:
+            try:
+                site = Site.objects.get(id=settings.SITE_ID)
+            except Site.DoesNotExist:
+                try:
+                    site = Site.objects.first()
+                except Exception:  # pylint: disable=broad-except
+                    site = None
+
+        # Get the recipient user for tracking purposes
+        user = None
+        if lms_user_id and lms_user_id > 0:
+            try:
+                user = User.objects.get(id=lms_user_id)
+            except User.DoesNotExist:
+                pass
+
+        # Use emulate_http_request to provide the necessary context for template tags
+        # that require a request object, such as google_analytics_tracking_pixel
+        with emulate_http_request(site=site, user=user):
+            ace.send(message)
+    else:
+        # We're in a web context, just send the message directly
+        # The current request already provides the necessary context
+        ace.send(message)
 
 
 def render_message_to_string(subject_template, message_template, param_dict, language=None):
@@ -541,4 +651,4 @@ def uses_shib(course):
 
     Returns a boolean indicating if Shibboleth authentication is set for this course.
     """
-    return course.enrollment_domain and course.enrollment_domain.startswith(settings.SHIBBOLETH_DOMAIN_PREFIX)
+    return bool(course.enrollment_domain and course.enrollment_domain.startswith(settings.SHIBBOLETH_DOMAIN_PREFIX))

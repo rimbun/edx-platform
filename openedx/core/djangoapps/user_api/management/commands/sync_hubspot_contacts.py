@@ -8,18 +8,18 @@ Management command to sync platform users with hubspot
 import json
 import time
 import traceback
+import urllib.parse  # pylint: disable=import-error
 from datetime import datetime, timedelta
 from textwrap import dedent
 
-import urllib.parse  # pylint: disable=import-error
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+import requests
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.management.base import BaseCommand, CommandError
-from edx_rest_api_client.client import EdxRestApiClient
-from slumber.exceptions import HttpClientError, HttpServerError
+from requests.exceptions import HTTPError
 
-from openedx.core.djangoapps.site_configuration.models import SiteConfiguration
 from common.djangoapps.student.models import UserAttribute
 from common.djangoapps.util.query import use_read_replica_if_available
+from openedx.core.djangoapps.site_configuration.models import SiteConfiguration
 
 HUBSPOT_API_BASE_URL = 'https://api.hubapi.com'
 
@@ -68,7 +68,7 @@ class Command(BaseCommand):
         """
 
         self.stdout.write(
-            'Fetching Users for site {site} from {start} to {end}'.format(
+            'Fetching Users for site {site} from {start} to {end}'.format(  # noqa: UP032
                 site=site_domain, start=offset, end=offset + users_query_batch_size
             )
         )
@@ -139,13 +139,14 @@ class Command(BaseCommand):
             contacts.append(contact)
 
         api_key = site_conf.get_value('HUBSPOT_API_KEY')
-        client = EdxRestApiClient(urllib.parse.urljoin(HUBSPOT_API_BASE_URL, 'contacts/v1/contact'))
+        api_url = urllib.parse.urljoin(f"{HUBSPOT_API_BASE_URL}/", 'contacts/v1/contact/batch/')
         try:
-            client.batch.post(contacts, hapikey=api_key)
+            response = requests.post(api_url, json=contacts, params={"hapikey": api_key})
+            response.raise_for_status()
             return len(contacts)
-        except (HttpClientError, HttpServerError) as ex:
-            message = 'An error occurred while syncing batch of contacts for site {domain}, {message}'.format(
-                domain=site_conf.site.domain, message=ex.message  # lint-amnesty, pylint: disable=no-member, exception-message-attribute
+        except HTTPError as ex:
+            message = 'An error occurred while syncing batch of contacts for site {domain}, {message}'.format(  # noqa: UP032  # pylint: disable=line-too-long
+                domain=site_conf.site.domain, message=str(ex)
             )
             self.stderr.write(message)
             return 0
@@ -165,7 +166,7 @@ class Command(BaseCommand):
         while offset < users_count:
             is_last_iteration = (offset + users_query_batch_size) >= users_count
             self.stdout.write(
-                'Syncing users batch from {start} to {end} for site {site}'.format(
+                'Syncing users batch from {start} to {end} for site {site}'.format(  # noqa: UP032
                     start=offset, end=offset + users_query_batch_size, site=site_domain
                 )
             )
@@ -177,14 +178,14 @@ class Command(BaseCommand):
                 successfully_synced_contacts += self._sync_with_hubspot(users_batch, site_conf)
                 time.sleep(0.1)  # to make sure request per second could not exceed by 10
             self.stdout.write(
-                'Successfully synced users batch from {start} to {end} for site {site}'.format(
+                'Successfully synced users batch from {start} to {end} for site {site}'.format(  # noqa: UP032
                     start=offset, end=offset + users_query_batch_size, site=site_domain
                 )
             )
             offset += users_query_batch_size
 
         self.stdout.write(
-            '{count} contacts found and sycned for site {site}'.format(
+            '{count} contacts found and sycned for site {site}'.format(  # noqa: UP032
                 count=successfully_synced_contacts, site=site_domain
             )
         )
@@ -226,4 +227,4 @@ class Command(BaseCommand):
 
         except Exception as ex:
             traceback.print_exc()
-            raise CommandError('Command failed with traceback %s' % str(ex))  # lint-amnesty, pylint: disable=raise-missing-from
+            raise CommandError('Command failed with traceback %s' % str(ex))  # pylint: disable=raise-missing-from  # noqa: B904, UP031

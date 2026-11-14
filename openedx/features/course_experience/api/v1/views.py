@@ -3,34 +3,24 @@ Views for Course Experience API.
 """
 import logging
 
-from django.conf import settings
-from django.urls import reverse
 from django.utils.html import format_html
-from django.utils.translation import ugettext as _
-from eventtracking import tracker
-
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
-from rest_framework.exceptions import APIException, ParseError
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.generics import RetrieveAPIView
-
+from django.utils.translation import gettext as _
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from edx_rest_framework_extensions.auth.session.authentication import SessionAuthenticationAllowInactiveUser
 from opaque_keys.edx.keys import CourseKey
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.exceptions import APIException, ParseError
+from rest_framework.generics import RetrieveAPIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
-from lms.djangoapps.course_api.api import course_detail
+from common.djangoapps.student.models import CourseEnrollment
 from lms.djangoapps.course_goals.models import UserActivity
-from lms.djangoapps.course_home_api.toggles import course_home_legacy_is_active
-from lms.djangoapps.courseware.access import has_access
 from lms.djangoapps.courseware.courses import get_course_with_access
-from lms.djangoapps.courseware.masquerade import is_masquerading, setup_masquerade
-
-from openedx.core.djangoapps.schedules.utils import reset_self_paced_schedule
 from openedx.core.lib.api.authentication import BearerAuthenticationAllowInactiveUser
 from openedx.features.course_experience.api.v1.serializers import CourseDeadlinesMobileSerializer
+from openedx.features.course_experience.api.v1.utils import reset_bulk_course_deadlines, reset_deadlines_for_course
 from openedx.features.course_experience.url_helpers import get_learning_mfe_home_url
-from openedx.features.course_experience.utils import dates_banner_should_display
 
 log = logging.getLogger(__name__)
 
@@ -68,37 +58,9 @@ def reset_course_deadlines(request):
 
     try:
         course_key = CourseKey.from_string(course_key)
-        course_masquerade, user = setup_masquerade(
-            request,
-            course_key,
-            has_access(request.user, 'staff', course_key)
-        )
+        reset_deadlines_for_course(request, course_key, research_event_data)
 
-        # We ignore the missed_deadlines because this endpoint is used in the Learning MFE for
-        # learners who have remaining attempts on a problem and reset their due dates in order to
-        # submit additional attempts. This can apply for 'completed' (submitted) content that would
-        # not be marked as past_due
-        _missed_deadlines, missed_gated_content = dates_banner_should_display(course_key, user)
-        if not missed_gated_content:
-            reset_self_paced_schedule(user, course_key)
-
-            course_overview = course_detail(request, user.username, course_key)
-            # For context here, research_event_data should already contain `location` indicating
-            # the page/location dates were reset from and could also contain `block_id` if reset
-            # within courseware.
-            research_event_data.update({
-                'courserun_key': str(course_key),
-                'is_masquerading': is_masquerading(user, course_key, course_masquerade),
-                'is_staff': has_access(user, 'staff', course_key).has_access,
-                'org_key': course_overview.display_org_with_default,
-                'user_id': user.id,
-            })
-            tracker.emit('edx.ui.lms.reset_deadlines.clicked', research_event_data)
-
-        if course_home_legacy_is_active(course_key):
-            body_link = '{}{}'.format(settings.LMS_ROOT_URL, reverse('dates', args=[str(course_key)]))
-        else:
-            body_link = get_learning_mfe_home_url(course_key=str(course_key), view_name='dates')
+        body_link = get_learning_mfe_home_url(course_key=course_key, url_fragment='dates')
 
         return Response({
             'body': format_html('<a href="{}">{}</a>', body_link, _('View all dates')),
@@ -110,6 +72,44 @@ def reset_course_deadlines(request):
     except Exception as reset_deadlines_exception:
         log.exception('Error occurred while trying to reset deadlines!')
         raise UnableToResetDeadlines from reset_deadlines_exception
+
+
+@api_view(["POST"])
+@authentication_classes(
+    (
+        JwtAuthentication,
+        BearerAuthenticationAllowInactiveUser,
+        SessionAuthenticationAllowInactiveUser,
+    )
+)
+@permission_classes((IsAuthenticated,))
+def reset_all_course_deadlines(request):
+    """
+    Set the start_date of a schedule to today for all enrolled courses
+
+    Request Parameters:
+        research_event_data: any data that should be included in the research tracking event
+            Example: sending the location of where the reset deadlines banner (i.e. outline-tab)
+
+    Returns:
+        success_course_keys: list of course keys for which deadlines were successfully reset
+        failed_course_keys: list of course keys for which deadlines could not be reset
+    """
+    research_event_data = request.data.get("research_event_data", {})
+    course_keys = list(
+        CourseEnrollment.enrollments_for_user(request.user).select_related("course").values_list("course_id", flat=True)
+    )
+
+    success_course_keys, failed_course_keys = reset_bulk_course_deadlines(
+        request, course_keys, research_event_data
+    )
+
+    return Response(
+        {
+            "success_course_keys": [str(key) for key in success_course_keys],
+            "failed_course_keys": [str(key) for key in failed_course_keys],
+        }
+    )
 
 
 class CourseDeadlinesMobileView(RetrieveAPIView):

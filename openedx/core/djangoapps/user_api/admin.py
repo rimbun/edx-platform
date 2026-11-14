@@ -1,20 +1,23 @@
 """
 Django admin configuration pages for the user_api app
 """
-
-
-from django.conf.urls import url
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.http import HttpResponseForbidden, HttpResponseRedirect
 from django.template.response import TemplateResponse
-from django.urls import reverse
+from django.urls import path, reverse
 from django.utils.html import format_html
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from openedx.core.djangoapps.user_api.accounts.forms import RetirementQueueDeletionForm
 
-from .models import RetirementState, UserRetirementPartnerReportingStatus, UserRetirementRequest, UserRetirementStatus
+from .models import (
+    BulkUserRetirementConfig,
+    RetirementState,
+    UserRetirementPartnerReportingStatus,
+    UserRetirementRequest,
+    UserRetirementStatus,
+)
 
 
 @admin.register(RetirementState)
@@ -89,11 +92,9 @@ class UserRetirementStatusAdmin(admin.ModelAdmin):
         """
         urls = super().get_urls()
         custom_urls = [
-            url(
-                r'^(?P<retirement_id>.+)/cancel_retirement/$',
-                self.admin_site.admin_view(self.cancel_retirement),
-                name='cancel-retirement',
-            ),
+            path('<path:retirement_id>/cancel_retirement/', self.admin_site.admin_view(self.cancel_retirement),
+                 name='cancel-retirement',
+                 ),
         ]
         return custom_urls + urls
 
@@ -169,7 +170,8 @@ class UserRetirementPartnerReportingStatusAdmin(admin.ModelAdmin):
     raw_id_fields = ('user',)
     search_fields = ('user__id', 'original_username', 'original_email', 'original_name')
     actions = [
-        'reset_state',  # See reset_state() below.
+        'reset_state_false',
+        'reset_state_true',
     ]
 
     class Meta:
@@ -184,7 +186,7 @@ class UserRetirementPartnerReportingStatusAdmin(admin.ModelAdmin):
         """
         return obj.user.id
 
-    def reset_state(self, request, queryset):
+    def reset_state_false(self, request, queryset):
         """
         Action callback for bulk resetting is_being_processed to False (0).
         """
@@ -192,7 +194,28 @@ class UserRetirementPartnerReportingStatusAdmin(admin.ModelAdmin):
         if rows_updated == 1:
             message_bit = "one user was"
         else:
-            message_bit = "%s users were" % rows_updated
-        self.message_user(request, "%s successfully reset." % message_bit)
+            message_bit = "%s users were" % rows_updated  # noqa: UP031
+        self.message_user(request, "%s successfully reset to False." % message_bit)  # noqa: UP031
 
-    reset_state.short_description = 'Reset is_being_processed to False'
+    reset_state_false.short_description = "Reset is_being_processed to False"
+
+    def reset_state_true(self, request, queryset):
+        """
+        Action callback for bulk resetting is_being_processed to True (1).
+        """
+        rows_updated = queryset.update(is_being_processed=1)
+        if rows_updated == 1:
+            message_bit = "one user was"
+        else:
+            message_bit = "%s users were" % rows_updated  # noqa: UP031
+        self.message_user(request, "%s successfully reset to True." % message_bit)  # noqa: UP031
+
+    reset_state_true.short_description = "Reset is_being_processed to True"
+
+
+@admin.register(BulkUserRetirementConfig)
+class BulkUserRetirementConfigurationAdmin(admin.ModelAdmin):
+    """
+    Admin for BulkUserRetirementConfig model.
+    """
+    list_display = ('id', 'enabled', 'changed_by', 'change_date')

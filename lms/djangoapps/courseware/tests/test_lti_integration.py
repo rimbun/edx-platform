@@ -1,24 +1,36 @@
 """LTI integration tests"""
 
 
+import importlib
 import json
-from collections import OrderedDict
-
-from unittest import mock
+import re
 import urllib
+from collections import OrderedDict
+from unittest import mock
+from unittest.mock import patch
+
 import oauthlib
 from django.conf import settings
+from django.test import override_settings
 from django.urls import reverse
+from xblock import plugin
 
+from common.djangoapps.xblock_django.constants import ATTR_KEY_ANONYMOUS_USER_ID
 from lms.djangoapps.courseware.tests.helpers import BaseTestXmodule
 from lms.djangoapps.courseware.views.views import get_course_lti_endpoints
 from openedx.core.lib.url_utils import quote_slashes
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
-from xmodule.x_module import STUDENT_VIEW
+from xmodule import lti_block
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
+from xmodule.tests.helpers import mock_render_template
 
 
-class TestLTI(BaseTestXmodule):
+class _TestLTIBase(BaseTestXmodule):
     """
     Integration test for lti xmodule.
 
@@ -26,7 +38,14 @@ class TestLTI(BaseTestXmodule):
     As part of that, checks oauth signature generation by mocking signing function
     of `oauthlib` library.
     """
+    __test__ = False
     CATEGORY = "lti"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        plugin.PLUGIN_CACHE = {}
+        importlib.reload(lti_block)
 
     def setUp(self):
         """
@@ -39,12 +58,13 @@ class TestLTI(BaseTestXmodule):
         mocked_decoded_signature = 'my_signature='
 
         # Note: this course_id is actually a course_key
-        context_id = str(self.item_descriptor.course_id)
-        user_id = str(self.item_descriptor.xmodule_runtime.anonymous_student_id)
-        hostname = self.item_descriptor.xmodule_runtime.hostname
-        resource_link_id = str(urllib.parse.quote(f'{hostname}-{self.item_descriptor.location.html_id()}'))
+        context_id = str(self.block.course_id)
+        user_service = self.block.runtime.service(self.block, 'user')
+        user_id = str(user_service.get_current_user().opt_attrs.get(ATTR_KEY_ANONYMOUS_USER_ID))
+        hostname = settings.LMS_BASE
+        resource_link_id = str(urllib.parse.quote(f'{hostname}-{self.block.location.html_id()}'))
 
-        sourcedId = "{context}:{resource_link}:{user_id}".format(
+        sourcedId = "{context}:{resource_link}:{user_id}".format(  # noqa: UP032
             context=urllib.parse.quote(context_id),
             resource_link=resource_link_id,
             user_id=user_id
@@ -73,24 +93,26 @@ class TestLTI(BaseTestXmodule):
         saved_sign = oauthlib.oauth1.Client.sign
 
         self.expected_context = {
-            'display_name': self.item_descriptor.display_name,
+            'display_name': self.block.display_name,
             'input_fields': self.correct_headers,
-            'element_class': self.item_descriptor.category,
-            'element_id': self.item_descriptor.location.html_id(),
+            'element_class': self.block.category,
+            'element_id': self.block.location.html_id(),
             'launch_url': 'http://www.example.com',  # default value
             'open_in_a_new_page': True,
-            'form_url': self.item_descriptor.xmodule_runtime.handler_url(self.item_descriptor,
-                                                                         'preview_handler').rstrip('/?'),
+            'form_url': self.block.runtime.handler_url(
+                self.block,
+                'preview_handler'
+            ).rstrip('/?'),
             'hide_launch': False,
             'has_score': False,
             'module_score': None,
             'comment': '',
             'weight': 1.0,
-            'ask_to_send_username': self.item_descriptor.ask_to_send_username,
-            'ask_to_send_email': self.item_descriptor.ask_to_send_email,
-            'description': self.item_descriptor.description,
-            'button_text': self.item_descriptor.button_text,
-            'accept_grades_past_due': self.item_descriptor.accept_grades_past_due,
+            'ask_to_send_username': self.block.ask_to_send_username,
+            'ask_to_send_email': self.block.ask_to_send_email,
+            'description': self.block.description,
+            'button_text': self.block.button_text,
+            'accept_grades_past_due': self.block.accept_grades_past_due,
         }
 
         def mocked_sign(self, *args, **kwargs):
@@ -112,21 +134,37 @@ class TestLTI(BaseTestXmodule):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_lti_constructor(self):
-        generated_content = self.item_descriptor.render(STUDENT_VIEW).content
-        expected_content = self.runtime.render_template('lti.html', self.expected_context)
+    @patch('xblock.utils.resources.ResourceLoader.render_django_template', side_effect=mock_render_template)
+    def test_lti_constructor(self, mock_render_django_template):
+        generated_content = self.block.student_view(None).content
+
+        if settings.USE_EXTRACTED_LTI_BLOCK:
+            # Remove i18n service from the extracted LTI Block's rendered `student_view` content
+            generated_content = re.sub(r"\{.*?}", "{}", generated_content)
+            expected_content = self.runtime.render_template('templates/lti.html', self.expected_context)
+            mock_render_django_template.assert_called_once()
+        else:
+            expected_content = self.runtime.render_template('lti.html', self.expected_context)
         assert generated_content == expected_content
 
-    def test_lti_preview_handler(self):
-        generated_content = self.item_descriptor.preview_handler(None, None).body
-        expected_content = self.runtime.render_template('lti_form.html', self.expected_context)
+    @patch('xblock.utils.resources.ResourceLoader.render_django_template', side_effect=mock_render_template)
+    def test_lti_preview_handler(self, mock_render_django_template):
+        generated_content = self.block.preview_handler(None, None).body
+
+        if settings.USE_EXTRACTED_LTI_BLOCK:
+            expected_content = self.runtime.render_template('templates/lti_form.html', self.expected_context)
+            mock_render_django_template.assert_called_once()
+        else:
+            expected_content = self.runtime.render_template('lti_form.html', self.expected_context)
         assert generated_content.decode('utf-8') == expected_content
 
 
-class TestLTIBlockListing(SharedModuleStoreTestCase):
+class _TestLTIBlockListingBase(SharedModuleStoreTestCase):
     """
-    a test for the rest endpoint that lists LTI modules in a course
+    a test for the rest endpoint that lists LTI blocks in a course
     """
+
+    __test__ = False
     # arbitrary constant
     COURSE_SLUG = "100"
     COURSE_NAME = "test_course"
@@ -135,31 +173,31 @@ class TestLTIBlockListing(SharedModuleStoreTestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.course = CourseFactory.create(display_name=cls.COURSE_NAME, number=cls.COURSE_SLUG)
-        cls.chapter1 = ItemFactory.create(
+        cls.chapter1 = BlockFactory.create(
             parent_location=cls.course.location,
             display_name="chapter1",
             category='chapter')
-        cls.section1 = ItemFactory.create(
+        cls.section1 = BlockFactory.create(
             parent_location=cls.chapter1.location,
             display_name="section1",
             category='sequential')
-        cls.chapter2 = ItemFactory.create(
+        cls.chapter2 = BlockFactory.create(
             parent_location=cls.course.location,
             display_name="chapter2",
             category='chapter')
-        cls.section2 = ItemFactory.create(
+        cls.section2 = BlockFactory.create(
             parent_location=cls.chapter2.location,
             display_name="section2",
             category='sequential')
 
-        # creates one draft and one published lti module, in different sections
-        cls.lti_published = ItemFactory.create(
+        # creates one draft and one published lti block, in different sections
+        cls.lti_published = BlockFactory.create(
             parent_location=cls.section1.location,
             display_name="lti published",
             category="lti",
             location=cls.course.id.make_usage_key('lti', 'lti_published'),
         )
-        cls.lti_draft = ItemFactory.create(
+        cls.lti_draft = BlockFactory.create(
             parent_location=cls.section2.location,
             display_name="lti draft",
             category="lti",
@@ -187,7 +225,7 @@ class TestLTIBlockListing(SharedModuleStoreTestCase):
             assert 404 == response.status_code
 
     def test_lti_rest_listing(self):
-        """tests that the draft lti module is part of the endpoint response"""
+        """tests that the draft lti block is part of the endpoint response"""
         request = mock.Mock()
         request.method = 'GET'
         response = get_course_lti_endpoints(request, course_id=str(self.course.id))
@@ -211,3 +249,23 @@ class TestLTIBlockListing(SharedModuleStoreTestCase):
             request.method = method
             response = get_course_lti_endpoints(request, str(self.course.id))
             assert 405 == response.status_code
+
+
+@override_settings(USE_EXTRACTED_LTI_BLOCK=True)
+class TestLTIExtracted(_TestLTIBase):
+    __test__ = True
+
+
+@override_settings(USE_EXTRACTED_LTI_BLOCK=False)
+class TestLTIBuiltIn(_TestLTIBase):
+    __test__ = True
+
+
+@override_settings(USE_EXTRACTED_LTI_BLOCK=True)
+class TestLTIBlockListingExtracted(_TestLTIBlockListingBase):
+    __test__ = True
+
+
+@override_settings(USE_EXTRACTED_LTI_BLOCK=False)
+class TestLTIBlockListingBuiltIn(_TestLTIBlockListingBase):
+    __test__ = True

@@ -6,7 +6,7 @@ Tests for the teams API at the HTTP request level.
 import itertools
 from contextlib import contextmanager
 from datetime import datetime
-from unittest.mock import Mock
+from unittest.mock import MagicMock, patch
 
 import ddt
 import pytest
@@ -29,11 +29,13 @@ from openedx.core.djangoapps.django_comment_common.signals import (
     thread_created,
     thread_deleted,
     thread_edited,
-    thread_voted
+    thread_voted,
 )
 from openedx.core.lib.teams_config import TeamsConfig
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 COURSE_KEY1 = CourseKey.from_string('edx/history/1')
 COURSE_KEY2 = CourseKey.from_string('edx/math/1')
@@ -96,7 +98,7 @@ class TestModelStrings(SharedModuleStoreTestCase):
             "<CourseTeamMembership id=1 user_id=1 team_id=1>"
         )
 
-    def test_team_membership_text_type(self):
+    def test_team_membership_str(self):
         assert str(self.team_membership) == (
             "the-user is member of The Team in edx/the-course/1"
         )
@@ -270,7 +272,7 @@ class TeamSignalsTest(EventTestMixin, SharedModuleStoreTestCase):
         """Create a mock comment service object with the given context."""
         if user is None:
             user = self.user
-        return Mock(
+        return MagicMock(
             user_id=user.id,
             commentable_id=self.DISCUSSION_TOPIC_ID,
             context=context,
@@ -318,8 +320,13 @@ class TeamSignalsTest(EventTestMixin, SharedModuleStoreTestCase):
         (user, should_update) = user_should_update
         with self.assert_last_activity_updated(should_update):
             user = getattr(self, user)
-            signal = self.SIGNALS[signal_name]
-            signal.send(sender=None, user=user, post=self.mock_comment())
+            with patch('lms.djangoapps.discussion.rest_api.tasks.send_response_notifications.apply_async'):
+                with patch('lms.djangoapps.discussion.rest_api.tasks.send_thread_created_notification.apply_async'):
+                    with patch(
+                        'lms.djangoapps.discussion.rest_api.tasks.send_response_endorsed_notifications.apply_async'
+                    ):
+                        signal = self.SIGNALS[signal_name]
+                        signal.send(sender=None, user=user, post=self.mock_comment())
 
     @ddt.data('thread_voted', 'comment_voted')
     def test_vote_others_post(self, signal_name):
@@ -335,5 +342,10 @@ class TeamSignalsTest(EventTestMixin, SharedModuleStoreTestCase):
         place in discussions outside of a team.
         """
         with self.assert_last_activity_updated(False):
-            signal = self.SIGNALS[signal_name]
-            signal.send(sender=None, user=self.user, post=self.mock_comment(context='course'))
+            with patch('lms.djangoapps.discussion.rest_api.tasks.send_response_notifications.apply_async'):
+                with patch('lms.djangoapps.discussion.rest_api.tasks.send_thread_created_notification.apply_async'):
+                    with patch(
+                        'lms.djangoapps.discussion.rest_api.tasks.send_response_endorsed_notifications.apply_async'
+                    ):
+                        signal = self.SIGNALS[signal_name]
+                        signal.send(sender=None, user=self.user, post=self.mock_comment(context='course'))

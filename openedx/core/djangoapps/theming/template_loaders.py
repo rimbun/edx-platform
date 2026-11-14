@@ -17,7 +17,7 @@ class ThemeTemplateLoader(MakoLoader):
     _accepts_engine_in_init = True
 
     def __init__(self, *args):
-        MakoLoader.__init__(self, ThemeFilesystemLoader(*args))  # lint-amnesty, pylint: disable=no-value-for-parameter
+        MakoLoader.__init__(self, ThemeFilesystemLoader(*args))  # pylint: disable=no-value-for-parameter
 
 
 class ThemeFilesystemLoader(FilesystemLoader):
@@ -27,13 +27,17 @@ class ThemeFilesystemLoader(FilesystemLoader):
     is_usable = True
     _accepts_engine_in_init = True
 
-    def __init__(self, engine, dirs=None):
-        if not dirs:
-            self.dirs = engine.dirs
+    def get_dirs(self):
+        """
+        Override get_dirs method.
+
+        Make the theme templates a priority, avoiding cashing templates for django ones.
+        """
+        dirs = super().get_dirs()
         theme_dirs = self.get_theme_template_sources()
-        if isinstance(theme_dirs, list):
-            self.dirs = theme_dirs + self.dirs
-        super().__init__(engine, self.dirs)
+        if theme_dirs:
+            dirs = theme_dirs + dirs
+        return dirs
 
     @staticmethod
     def get_theme_template_sources():

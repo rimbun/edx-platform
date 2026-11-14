@@ -3,51 +3,53 @@ Unit tests for behavior that is specific to the api methods (vs. the view method
 Most of the functionality is covered in test_views.py.
 """
 
-
-import itertools
+import datetime
 import unicodedata
 from unittest.mock import Mock, patch
-import pytest
+from zoneinfo import ZoneInfo
+
 import ddt
-from django.conf import settings
+import pytest
 from django.contrib.auth.hashers import make_password
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.core.exceptions import ValidationError
+from django.db import DatabaseError, IntegrityError
 from django.http import HttpResponse
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
-from edx_name_affirmation.toggles import VERIFIED_NAME_FLAG
-from edx_toggles.toggles.testutils import override_waffle_flag
-from social_django.models import UserSocialAuth
+
 from common.djangoapps.student.models import (
     AccountRecovery,
     PendingEmailChange,
     PendingSecondaryEmailChange,
-    UserProfile
+    UserProfile,
 )
 from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.student.tests.tests import UserSettingsEventTestMixin
 from common.djangoapps.student.views.management import activate_secondary_email
-
+from lms.djangoapps.certificates.data import CertificateStatuses
 from openedx.core.djangoapps.ace_common.tests.mixins import EmailTemplateTagMixin
+from openedx.core.djangoapps.embargo.models import Country, GlobalRestrictedCountry
+from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration
 from openedx.core.djangoapps.user_api.accounts import PRIVATE_VISIBILITY
 from openedx.core.djangoapps.user_api.accounts.api import (
     get_account_settings,
-    update_account_settings
+    get_name_validation_error,
+    update_account_settings,
 )
 from openedx.core.djangoapps.user_api.accounts.tests.retirement_helpers import (  # pylint: disable=unused-import
     RetirementTestCase,
     fake_requested_retirement,
-    setup_retirement_states
+    setup_retirement_states,  # noqa: F401
 )
 from openedx.core.djangoapps.user_api.errors import (
     AccountUpdateError,
     AccountValidationError,
     UserNotAuthorized,
-    UserNotFound
+    UserNotFound,
 )
 from openedx.core.djangolib.testing.utils import skip_unless_lms
-from openedx.features.enterprise_support.tests.factories import EnterpriseCustomerUserFactory
 
 
 def mock_render_to_string(template_name, context):
@@ -64,7 +66,7 @@ def mock_render_to_response(template_name):
     return HttpResponse(template_name)
 
 
-class CreateAccountMixin:  # lint-amnesty, pylint: disable=missing-class-docstring
+class CreateAccountMixin:  # pylint: disable=missing-class-docstring
     def create_account(self, username, password, email):
         # pylint: disable=missing-docstring
         registration_url = reverse('user_api_registration')
@@ -80,14 +82,15 @@ class CreateAccountMixin:  # lint-amnesty, pylint: disable=missing-class-docstri
 
 @skip_unless_lms
 @ddt.ddt
-@patch('common.djangoapps.student.views.management.render_to_response', Mock(side_effect=mock_render_to_response, autospec=True))  # lint-amnesty, pylint: disable=line-too-long
+@patch('common.djangoapps.student.views.management.render_to_response',
+       Mock(side_effect=mock_render_to_response, autospec=True))  # pylint: disable=line-too-long
 class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAccountMixin, RetirementTestCase):
     """
     These tests specifically cover the parts of the API methods that are not covered by test_views.py.
     This includes the specific types of error raised, and default behavior when optional arguments
     are not specified.
     """
-    password = "test"
+    password = 'Password1234'
 
     def setUp(self):
         super().setUp()
@@ -100,10 +103,12 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         self.staff_user = UserFactory(is_staff=True, password=self.password)
         self.reset_tracker()
 
-        enterprise_patcher = patch('openedx.features.enterprise_support.api.enterprise_customer_for_request')
-        enterprise_learner_patcher = enterprise_patcher.start()
-        enterprise_learner_patcher.return_value = {}
-        self.addCleanup(enterprise_learner_patcher.stop)
+        filter_patcher = patch(
+            'openedx.core.djangoapps.user_api.accounts.api.AccountSettingsReadOnlyFieldsRequested.run_filter',
+            return_value=(set(), None),
+        )
+        filter_patcher.start()
+        self.addCleanup(filter_patcher.stop)
 
     def test_get_username_provided(self):
         """Test the difference in behavior when a username is supplied to get_account_settings."""
@@ -160,6 +165,30 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         with pytest.raises(UserNotAuthorized):
             update_account_settings(self.different_user, {"name": "Pluto"}, username=self.user.username)
 
+    @with_site_configuration(configuration={"extended_profile_fields": ["department"]})
+    def test_update_username_provided_with_extended_profile(self):
+        """Test that extended profile is saved when username is provided to update_account_settings."""
+        extended_profile_data = [{"field_name": "department", "field_value": "Engineering"}]
+
+        update_account_settings(self.user, {"extended_profile": extended_profile_data, "name": "Donald Duck"})
+        account_settings = get_account_settings(self.default_request)[0]
+        self.assertEqual(extended_profile_data, account_settings["extended_profile"])  # noqa: PT009
+        self.assertEqual("Donald Duck", account_settings["name"])  # noqa: PT009
+
+        update_account_settings(
+            self.user, {"extended_profile": extended_profile_data, "name": "Mickey Mouse"}, username=self.user.username
+        )
+        account_settings = get_account_settings(self.default_request)[0]
+        self.assertEqual(extended_profile_data, account_settings["extended_profile"])  # noqa: PT009
+        self.assertEqual("Mickey Mouse", account_settings["name"])  # noqa: PT009
+
+        with pytest.raises(UserNotAuthorized):
+            update_account_settings(
+                self.different_user,
+                {"extended_profile": extended_profile_data, "name": "Pluto"},
+                username=self.user.username,
+            )
+
     def test_update_non_existent_user(self):
         with pytest.raises(UserNotAuthorized):
             update_account_settings(self.user, {}, username="does_not_exist")
@@ -183,7 +212,7 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
     def test_set_multiple_social_links(self):
         social_links = [
             dict(platform="facebook", social_link=f"https://www.facebook.com/{self.user.username}"),
-            dict(platform="twitter", social_link=f"https://www.twitter.com/{self.user.username}"),
+            dict(platform="x", social_link=f"https://www.x.com/{self.user.username}"),
         ]
         update_account_settings(self.user, {"social_links": social_links})
         account_settings = get_account_settings(self.default_request)[0]
@@ -196,36 +225,36 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         update_account_settings(self.user, {"social_links": original_social_links})
 
         extra_social_links = [
-            dict(platform="twitter", social_link=f"https://www.twitter.com/{self.user.username}"),
+            dict(platform="x", social_link=f"https://www.x.com/{self.user.username}"),
             dict(platform="linkedin", social_link=f"https://www.linkedin.com/in/{self.user.username}"),
         ]
         update_account_settings(self.user, {"social_links": extra_social_links})
 
         account_settings = get_account_settings(self.default_request)[0]
         assert account_settings['social_links'] == \
-            sorted((original_social_links + extra_social_links), key=(lambda s: s['platform']))
+               sorted((original_social_links + extra_social_links), key=(lambda s: s['platform']))
 
     def test_replace_social_links(self):
         original_facebook_link = dict(platform="facebook", social_link="https://www.facebook.com/myself")
-        original_twitter_link = dict(platform="twitter", social_link="https://www.twitter.com/myself")
-        update_account_settings(self.user, {"social_links": [original_facebook_link, original_twitter_link]})
+        original_x_link = dict(platform="x", social_link="https://www.x.com/myself")
+        update_account_settings(self.user, {"social_links": [original_facebook_link, original_x_link]})
 
         modified_facebook_link = dict(platform="facebook", social_link="https://www.facebook.com/new_me")
         update_account_settings(self.user, {"social_links": [modified_facebook_link]})
 
         account_settings = get_account_settings(self.default_request)[0]
-        assert account_settings['social_links'] == [modified_facebook_link, original_twitter_link]
+        assert account_settings['social_links'] == [modified_facebook_link, original_x_link]
 
     def test_remove_social_link(self):
         original_facebook_link = dict(platform="facebook", social_link="https://www.facebook.com/myself")
-        original_twitter_link = dict(platform="twitter", social_link="https://www.twitter.com/myself")
-        update_account_settings(self.user, {"social_links": [original_facebook_link, original_twitter_link]})
+        original_x_link = dict(platform="x", social_link="https://www.x.com/myself")
+        update_account_settings(self.user, {"social_links": [original_facebook_link, original_x_link]})
 
         removed_facebook_link = dict(platform="facebook", social_link="")
         update_account_settings(self.user, {"social_links": [removed_facebook_link]})
 
         account_settings = get_account_settings(self.default_request)[0]
-        assert account_settings['social_links'] == [original_twitter_link]
+        assert account_settings['social_links'] == [original_x_link]
 
     def test_unsupported_social_link_platform(self):
         social_links = [
@@ -234,83 +263,19 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         with pytest.raises(AccountValidationError):
             update_account_settings(self.user, {"social_links": social_links})
 
-    def test_update_success_for_enterprise(self):
-        EnterpriseCustomerUserFactory(user_id=self.user.id)
-        level_of_education = "m"
-        successful_update = {
-            "level_of_education": level_of_education,
-        }
-        update_account_settings(self.user, successful_update)
-        account_settings = get_account_settings(self.default_request)[0]
-        assert level_of_education == account_settings['level_of_education']
-
-    @patch('openedx.features.enterprise_support.api.enterprise_customer_for_request')
-    @patch('openedx.features.enterprise_support.utils.third_party_auth.provider.Registry.get')
-    @ddt.data(
-        *itertools.product(
-            # field_name_value values
-            (("email", "new_email@example.com"), ("name", "new name"), ("country", "IN")),
-            # is_enterprise_user
-            (True, False),
-            # is_synch_learner_profile_data
-            (True, False),
-            # has `UserSocialAuth` record
-            (True, False),
-        )
+    @patch(
+        'openedx.core.djangoapps.user_api.accounts.api.AccountSettingsReadOnlyFieldsRequested.run_filter',
+        return_value=({'country'}, None),
     )
-    @ddt.unpack
-    def test_update_validation_error_for_enterprise(
-        self,
-        field_name_value,
-        is_enterprise_user,
-        is_synch_learner_profile_data,
-        has_user_social_auth_record,
-        mock_auth_provider,
-        mock_customer,
-    ):
-        idp_backend_name = 'tpa-saml'
-        mock_customer.return_value = {}
-        if is_enterprise_user:
-            mock_customer.return_value.update({
-                'uuid': 'real-ent-uuid',
-                'name': 'Dummy Enterprise',
-                'identity_provider': 'saml-ubc',
-                'identity_providers': [
-                    {
-                        "provider_id": "saml-ubc",
-                    }
-                ],
-            })
-        mock_auth_provider.return_value.sync_learner_profile_data = is_synch_learner_profile_data
-        mock_auth_provider.return_value.backend_name = idp_backend_name
-
-        update_data = {field_name_value[0]: field_name_value[1]}
-
-        user_fullname_editable = False
-        if has_user_social_auth_record:
-            UserSocialAuth.objects.create(
-                provider=idp_backend_name,
-                user=self.user
-            )
-        else:
-            UserSocialAuth.objects.all().delete()
-            # user's fullname is editable if no `UserSocialAuth` record exists
-            user_fullname_editable = field_name_value[0] == 'name'
-
-        # prevent actual email change requests
-        with patch('openedx.core.djangoapps.user_api.accounts.api.student_views.do_email_change_request'):
-            # expect field un-editability only when all of the following conditions are met
-            if is_enterprise_user and is_synch_learner_profile_data and not user_fullname_editable:
-                with pytest.raises(AccountValidationError) as validation_error:
-                    update_account_settings(self.user, update_data)
-                    field_errors = validation_error.value.field_errors
-                    assert 'This field is not editable via this API' ==\
-                           field_errors[field_name_value[0]]['developer_message']
-            else:
-                update_account_settings(self.user, update_data)
-                account_settings = get_account_settings(self.default_request)[0]
-                if field_name_value[0] != "email":
-                    assert field_name_value[1] == account_settings[field_name_value[0]]
+    def test_readonly_field_from_filter_is_rejected(self, mock_run_filter):  # pylint: disable=unused-argument
+        """
+        When AccountSettingsReadOnlyFieldsRequested.run_filter returns a field as read-only,
+        update_account_settings should raise AccountValidationError for that field.
+        """
+        with pytest.raises(AccountValidationError) as exc_info:
+            update_account_settings(self.user, {"country": "IN"})
+        field_errors = exc_info.value.field_errors
+        assert 'This field is not editable via this API' == field_errors['country']['developer_message']
 
     def test_update_error_validating(self):
         """Test that AccountValidationError is thrown if incorrect values are supplied."""
@@ -363,9 +328,40 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         assert 'Valid e-mail address required.' in field_errors['email']['developer_message']
         assert 'Full Name cannot contain the following characters: < >' in field_errors['name']['user_message']
 
-    @patch('edx_name_affirmation.name_change_validator.NameChangeValidator', Mock())
-    @patch('edx_name_affirmation.name_change_validator.NameChangeValidator.validate', Mock(return_value=False))
-    @override_waffle_flag(VERIFIED_NAME_FLAG, active=True)
+    def test_validate_name_change_same_name(self):
+        """
+        Test that saving the user's profile name without changing it should not raise an error.
+        """
+        account_settings = get_account_settings(self.default_request)[0]
+
+        # Add name change history to the profile metadeta; if the user has at least one certificate,
+        # too many name changes will trigger the verification requirement, but this should only happen
+        # if the name has actually been changed
+        user_profile = UserProfile.objects.get(user=self.user)
+        meta = user_profile.get_meta()
+        meta['old_names'] = []
+        for num in range(3):
+            meta['old_names'].append(
+                [f'old_name_{num}', 'test', datetime.datetime.now(ZoneInfo("UTC")).isoformat()]
+            )
+        user_profile.set_meta(meta)
+        user_profile.save()
+
+        with patch(
+            'openedx.core.djangoapps.user_api.accounts.api.get_certificates_for_user',
+            return_value=[{'status': CertificateStatuses.downloadable}]
+        ):
+            update_account_settings(self.user, {'name': account_settings['name']})
+            # The name should not be added to profile metadata
+            updated_meta = user_profile.get_meta()
+            self.assertEqual(meta, updated_meta)  # noqa: PT009
+
+    @patch('openedx.core.djangoapps.user_api.accounts.api._does_name_change_require_verification',
+           Mock(return_value=True))
+    @patch('openedx.core.djangoapps.user_api.accounts.api.get_certificates_for_user',
+           Mock(return_value=[{'status': CertificateStatuses.downloadable}]))
+    @patch('openedx.core.djangoapps.user_api.accounts.api.get_verified_enrollments',
+           Mock(return_value=[{'name': 'Bob'}]))
     def test_name_update_requires_idv(self):
         """
         Test that a name change is blocked through this API if it requires ID verification.
@@ -380,20 +376,33 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         account_settings = get_account_settings(self.default_request)[0]
         assert account_settings['name'] != 'New Name'
 
-    @patch('edx_name_affirmation.name_change_validator.NameChangeValidator', Mock())
-    @patch('edx_name_affirmation.name_change_validator.NameChangeValidator.validate', Mock(return_value=True))
-    @override_waffle_flag(VERIFIED_NAME_FLAG, active=True)
-    def test_name_update_does_not_require_idv(self):
+    @ddt.data(
+        (True, False),
+        (False, True),
+        (False, False)
+    )
+    @ddt.unpack
+    def test_name_update_does_not_require_idv(self, has_passable_cert, enrolled_in_verified_mode):
         """
         Test that the user can change their name if change does not require IDV.
         """
-        update_account_settings(self.user, {'name': 'New Name'})
+        with patch('openedx.core.djangoapps.user_api.accounts.api.get_certificates_for_user') as mock_get_certs, \
+            patch('openedx.core.djangoapps.user_api.accounts.api.get_verified_enrollments') as \
+                mock_get_verified_enrollments:
+            mock_get_certs.return_value = (
+                [{'status': CertificateStatuses.downloadable}] if
+                has_passable_cert else
+                [{'status': CertificateStatuses.unverified}]
+            )
+            mock_get_verified_enrollments.return_value = [{'name': 'Bob'}] if enrolled_in_verified_mode else []
+            update_account_settings(self.user, {'name': 'New Name'})
 
         account_settings = get_account_settings(self.default_request)[0]
         assert account_settings['name'] == 'New Name'
 
     @patch('django.core.mail.EmailMultiAlternatives.send')
-    @patch('common.djangoapps.student.views.management.render_to_string', Mock(side_effect=mock_render_to_string, autospec=True))  # lint-amnesty, pylint: disable=line-too-long
+    @patch('common.djangoapps.student.views.management.render_to_string',
+           Mock(side_effect=mock_render_to_string, autospec=True))
     def test_update_sending_email_fails(self, send_mail):
         """Test what happens if all validation checks pass, but sending the email for email change fails."""
         send_mail.side_effect = [Exception, None]
@@ -411,7 +420,7 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         account_settings = get_account_settings(self.default_request)[0]
         assert 'Mickey Mouse' == account_settings['name']
 
-    @patch.dict(settings.FEATURES, dict(ALLOW_EMAIL_ADDRESS_CHANGE=False))
+    @override_settings(ALLOW_EMAIL_ADDRESS_CHANGE=False)
     def test_email_changes_disabled(self):
         """
         Test that email address changes are rejected when ALLOW_EMAIL_ADDRESS_CHANGE is not set.
@@ -422,7 +431,7 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
             update_account_settings(self.user, disabled_update)
         assert 'Email address changes have been disabled' in context_manager.value.developer_message
 
-    @patch.dict(settings.FEATURES, dict(ALLOW_EMAIL_ADDRESS_CHANGE=True))
+    @override_settings(ALLOW_EMAIL_ADDRESS_CHANGE=True)
     def test_email_changes_blocked_on_retired_email(self):
         """
         Test that email address changes are rejected when an email associated with a *partially* retired account is
@@ -468,6 +477,7 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         """
         Test that eventing of language proficiencies, which happens update_account_settings method, behaves correctly.
         """
+
         def verify_event_emitted(new_value, old_value):
             """
             Confirm that the user setting event was properly emitted
@@ -509,10 +519,10 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         assert account_recovery.secondary_email == test_email
 
     def test_change_country_removes_state(self):
-        '''
+        """
         Test that changing the country (to something other than a country with
         states) removes the state
-        '''
+        """
         # First set the country and state
         update_account_settings(self.user, {"country": UserProfile.COUNTRY_WITH_STATES, "state": "MA"})
         account_settings = get_account_settings(self.default_request)[0]
@@ -524,6 +534,124 @@ class TestAccountApi(UserSettingsEventTestMixin, EmailTemplateTagMixin, CreateAc
         account_settings = get_account_settings(self.default_request)[0]
         assert account_settings['country'] is None
         assert account_settings['state'] is None
+
+    def test_change_to_disabled_country(self):
+        """
+        Test that changing the country to a disabled country is not allowed
+        """
+        # First set the country and state
+        country = Country.objects.create(country="KP")
+        GlobalRestrictedCountry.objects.create(country=country)
+
+        update_account_settings(self.user, {"country": UserProfile.COUNTRY_WITH_STATES, "state": "MA"})
+        account_settings = get_account_settings(self.default_request)[0]
+        assert account_settings['country'] == UserProfile.COUNTRY_WITH_STATES
+        assert account_settings['state'] == 'MA'
+
+        with self.assertRaises(AccountValidationError):  # noqa: PT027
+            update_account_settings(self.user, {"country": "KP"})
+
+    def test_get_name_validation_error_too_long(self):
+        """
+        Test validation error when the name is too long.
+        """
+        result = get_name_validation_error("A" * 256)
+        assert result == "Full name can't be longer than 255 symbols"
+
+    def test_update_extended_profile_with_meta_only(self):
+        """
+        Test updating extended profile using only the meta field (legacy behavior)
+        """
+        update_data = {
+            "extended_profile": [
+                {"field_name": "department", "field_value": "Engineering"},
+                {"field_name": "title", "field_value": "Software Engineer"},
+            ],
+            "bio": "Updated bio",
+        }
+
+        update_account_settings(self.user, update_data)
+
+        user_profile = UserProfile.objects.get(user=self.user)
+        meta = user_profile.get_meta()
+        self.assertEqual(meta["department"], "Engineering")  # noqa: PT009
+        self.assertEqual(meta["title"], "Software Engineer")  # noqa: PT009
+        self.assertEqual(user_profile.bio, "Updated bio")  # noqa: PT009
+
+    @patch("openedx.core.djangoapps.user_api.accounts.api.validate_and_get_extended_profile_form")
+    def test_update_extended_profile_with_form(self, mock_validate_and_get_form):
+        """
+        Test updating extended profile with a validated form
+        """
+        extended_profile_data = [{"field_name": "department", "field_value": "Engineering"}]
+        mock_form = Mock(save=Mock(return_value=Mock(user=self.user)))
+        mock_validate_and_get_form.return_value = (mock_form, {})
+
+        update_account_settings(self.user, {"extended_profile": extended_profile_data})
+
+        mock_validate_and_get_form.assert_called_once_with(extended_profile_data, self.user)
+        mock_form.save.assert_called_once_with(commit=False)
+        mock_form.save.return_value.save.assert_called_once()
+        meta = UserProfile.objects.get(user=self.user).get_meta()
+        self.assertEqual(meta["department"], "Engineering")  # noqa: PT009
+
+    @patch("openedx.core.djangoapps.user_api.accounts.api.validate_and_get_extended_profile_form")
+    def test_update_extended_profile_with_form_new_instance(self, mock_validate_and_get_form):
+        """
+        Test updating extended profile with a form for a new instance
+        """
+        extended_profile_data = [{"field_name": "department", "field_value": "Engineering"}]
+        mock_instance = Mock(user=None)
+        mock_form = Mock(save=Mock(return_value=mock_instance))
+        mock_validate_and_get_form.return_value = (mock_form, {})
+
+        update_account_settings(self.user, {"extended_profile": extended_profile_data})
+
+        mock_validate_and_get_form.assert_called_once_with(extended_profile_data, self.user)
+        mock_form.save.assert_called_once_with(commit=False)
+        self.assertEqual(mock_instance.user, self.user)  # noqa: PT009
+        mock_instance.save.assert_called_once()
+
+    @patch("openedx.core.djangoapps.user_api.accounts.api.validate_and_get_extended_profile_form")
+    @ddt.data(
+        (ValidationError("Invalid field value"), "Extended profile validation failed"),
+        (IntegrityError("Duplicate entry"), "Extended profile integrity error"),
+        (DatabaseError("Connection lost"), "Database error saving extended profile"),
+    )
+    @ddt.unpack
+    def test_update_extended_profile_form_save_error(self, exception, expected_dev_msg, mock_validate_and_get_form):
+        """
+        Test that errors during form save cause an AccountUpdateError with appropriate messages,
+        and do not leave partial updates.
+        """
+        extended_profile_data = [{"field_name": "department", "field_value": "Engineering"}]
+        mock_form = Mock()
+        mock_form.save.side_effect = exception
+        mock_validate_and_get_form.return_value = (mock_form, {})
+
+        with pytest.raises(AccountUpdateError) as context_manager:
+            update_account_settings(self.user, {"extended_profile": extended_profile_data})
+
+        self.assertIn(expected_dev_msg, context_manager.value.developer_message)  # noqa: PT009
+        self.assertIsNotNone(context_manager.value.user_message)  # noqa: PT009
+
+        mock_validate_and_get_form.assert_called_once_with(extended_profile_data, self.user)
+        mock_form.save.assert_called_once_with(commit=False)
+
+        # The meta update is in the same transaction, it should be rolled back.
+        meta = UserProfile.objects.get(user=self.user).get_meta()
+        self.assertNotIn("department", meta)  # noqa: PT009
+
+    def test_update_extended_profile_without_extended_profile_data(self):
+        """
+        Test that update_account_settings works when no extended_profile is provided
+        """
+        update_data = {"bio": "Updated bio"}
+
+        update_account_settings(self.user, update_data)
+
+        user_profile = UserProfile.objects.get(user=self.user)
+        self.assertEqual(user_profile.bio, "Updated bio")  # noqa: PT009
 
 
 @patch('openedx.core.djangoapps.user_api.accounts.image_helpers._PROFILE_IMAGE_SIZES', [50, 10])
@@ -561,7 +689,7 @@ class AccountSettingsOnCreationTest(CreateAccountMixin, TestCase):
             'email': self.EMAIL,
             'id': user.id,
             'name': self.USERNAME,
-            'activation_key': user.registration.activation_key,
+            'verified_name': None,
             'gender': None, 'goals': '',
             'is_active': False,
             'level_of_education': None,
@@ -579,7 +707,6 @@ class AccountSettingsOnCreationTest(CreateAccountMixin, TestCase):
             'requires_parental_consent': True,
             'language_proficiencies': [],
             'account_privacy': PRIVATE_VISIBILITY,
-            'accomplishments_shared': False,
             'extended_profile': [],
             'secondary_email': None,
             'secondary_email_enabled': None,
@@ -587,7 +714,6 @@ class AccountSettingsOnCreationTest(CreateAccountMixin, TestCase):
             'course_certificates': None,
             'phone_number': None,
             'pending_name_change': None,
-            'is_verified_name_enabled': False,
         }
 
     def test_normalize_password(self):

@@ -5,7 +5,7 @@
 # List of valid templates is explicitly managed for (short-term)
 # security reasons.
 
-
+import logging
 import mimetypes
 
 from django.conf import settings
@@ -15,13 +15,15 @@ from django.template import TemplateDoesNotExist
 from django.utils.safestring import mark_safe
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.defaults import permission_denied
+from django_ratelimit.exceptions import Ratelimited
 from mako.exceptions import TopLevelLookupException
-from ratelimit.exceptions import Ratelimited
 
 from common.djangoapps.edxmako.shortcuts import render_to_response, render_to_string
 from common.djangoapps.util.cache import cache_if_anonymous
 from common.djangoapps.util.views import fix_crum_request
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+
+log = logging.getLogger(__name__)
 
 valid_templates = []
 
@@ -56,9 +58,6 @@ def render(request, template):
 
     try:
         context = {}
-        # This is necessary for the dialog presented with the TOS in /register
-        if template == 'honor.html':
-            context['allow_iframing'] = True
         # Format Examples: static_template_about_header
         configuration_base = 'static_template_' + template.replace('.html', '').replace('-', '_')
         page_header = configuration_helpers.get_value(configuration_base + '_header')
@@ -70,9 +69,9 @@ def render(request, template):
         result = render_to_response('static_templates/' + template, context, content_type=content_type)
         return result
     except TopLevelLookupException:
-        raise Http404  # lint-amnesty, pylint: disable=raise-missing-from
+        raise Http404  # pylint: disable=raise-missing-from  # noqa: B904
     except TemplateDoesNotExist:
-        raise Http404  # lint-amnesty, pylint: disable=raise-missing-from
+        raise Http404  # pylint: disable=raise-missing-from  # noqa: B904
 
 
 @ensure_csrf_cookie
@@ -89,9 +88,8 @@ def render_press_release(request, slug):
     try:
         resp = render_to_response('static_templates/press_releases/' + template, {})
     except TemplateDoesNotExist:
-        raise Http404  # lint-amnesty, pylint: disable=raise-missing-from
-    else:
-        return resp
+        raise Http404  # pylint: disable=raise-missing-from  # noqa: B904
+    return resp
 
 
 @fix_crum_request
@@ -106,13 +104,13 @@ def render_403(request, exception=None):
 
 
 @fix_crum_request
-def render_404(request, exception):  # lint-amnesty, pylint: disable=unused-argument
+def render_404(request, exception=None):  # pylint: disable=unused-argument
     request.view_name = '404'
     return HttpResponseNotFound(render_to_string('static_templates/404.html', {}, request=request))
 
 
 @fix_crum_request
-def render_429(request, exception=None):  # lint-amnesty, pylint: disable=unused-argument
+def render_429(request, exception=None):  # pylint: disable=unused-argument
     """
     Render the rate limit template as an HttpResponse.
     """
@@ -122,4 +120,21 @@ def render_429(request, exception=None):  # lint-amnesty, pylint: disable=unused
 
 @fix_crum_request
 def render_500(request):
-    return HttpResponseServerError(render_to_string('static_templates/server-error.html', {}, request=request))
+    """
+    Render the generic error page when we have an uncaught error.
+    """
+    try:
+        return HttpResponseServerError(render_to_string('static_templates/server-error.html', {}, request=request))
+    except BaseException as e:  # noqa: F841
+        # If we can't render the error page, ensure we don't raise another
+        # exception -- because if we do, we'll probably just end up back
+        # at the same rendering error.
+        #
+        # This is an attempt at working around the recursive error handling issues
+        # observed in <https://github.com/openedx/edx-platform/issues/35151>, which
+        # were triggered by Mako and translation errors.
+
+        log.error("Encountered error while rendering error page.", exc_info=True)
+        # This message is intentionally hardcoded and does not involve
+        # any translation, templating, etc. Do not translate.
+        return HttpResponseServerError("Encountered error while rendering error page.")

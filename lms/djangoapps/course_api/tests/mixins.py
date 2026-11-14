@@ -5,10 +5,10 @@ Common mixins for Course API Tests
 
 from datetime import datetime
 
-from common.djangoapps.student.tests.factories import UserFactory, CourseEnrollmentFactory, CourseAccessRoleFactory
-from xmodule.modulestore.tests.factories import ToyCourseFactory
+from common.djangoapps.student.tests.factories import CourseAccessRoleFactory, CourseEnrollmentFactory, UserFactory
+from xmodule.modulestore.tests.factories import ToyCourseFactory  # pylint: disable=wrong-import-order
 
-TEST_PASSWORD = 'edx'
+TEST_PASSWORD = 'Password1234'
 
 
 class CourseApiFactoryMixin:
@@ -17,15 +17,15 @@ class CourseApiFactoryMixin:
     """
 
     @staticmethod
-    def create_course(**kwargs):
+    def create_course(end=datetime(2015, 9, 19, 18, 0, 0), **kwargs):
         """
         Create a course for use in test cases
         """
-
         return ToyCourseFactory.create(
-            end=datetime(2015, 9, 19, 18, 0, 0),
+            end=end,
             enrollment_start=datetime(2015, 6, 15, 0, 0, 0),
             enrollment_end=datetime(2015, 7, 15, 0, 0, 0),
+            certificate_available_date=datetime(2015, 8, 14, 0, 0, 0),
             emit_signals=True,
             **kwargs
         )

@@ -3,16 +3,18 @@ Milestone related tests for the mobile_api
 """
 
 
-from unittest.mock import patch
 
 from crum import set_current_request
-from django.conf import settings
+from django.test import override_settings
 
 from common.djangoapps.util.milestones_helpers import add_prerequisite_course, fulfill_course_milestone
 from lms.djangoapps.courseware.access_response import MilestoneAccessError
 from lms.djangoapps.courseware.tests.test_entrance_exam import add_entrance_exam_milestone, answer_entrance_exam_problem
 from openedx.core.djangolib.testing.utils import get_mock_request
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 
 class MobileAPIMilestonesMixin:
@@ -27,17 +29,14 @@ class MobileAPIMilestonesMixin:
 
     ALLOW_ACCESS_TO_MILESTONE_COURSE = False
 
-    @patch.dict(settings.FEATURES, {
-        'ENABLE_PREREQUISITE_COURSES': True,
-        'ENABLE_MKTG_SITE': True,
-    })
+    @override_settings(ENABLE_PREREQUISITE_COURSES=True)
     def test_unfulfilled_prerequisite_course(self):
         """ Tests the case for an unfulfilled pre-requisite course """
         self._add_prerequisite_course()
         self.init_course_access()
         self._verify_unfulfilled_milestone_response()
 
-    @patch.dict(settings.FEATURES, {'ENABLE_PREREQUISITE_COURSES': True, 'ENABLE_MKTG_SITE': True})
+    @override_settings(ENABLE_PREREQUISITE_COURSES=True)
     def test_unfulfilled_prerequisite_course_for_staff(self):
         self._add_prerequisite_course()
         self.user.is_staff = True
@@ -45,7 +44,7 @@ class MobileAPIMilestonesMixin:
         self.init_course_access()
         self.api_response()
 
-    @patch.dict(settings.FEATURES, {'ENABLE_PREREQUISITE_COURSES': True, 'ENABLE_MKTG_SITE': True})
+    @override_settings(ENABLE_PREREQUISITE_COURSES=True)
     def test_fulfilled_prerequisite_course(self):
         """
         Tests the case when a user fulfills existing pre-requisite course
@@ -56,7 +55,7 @@ class MobileAPIMilestonesMixin:
         self.init_course_access()
         self.api_response()
 
-    @patch.dict(settings.FEATURES, {'ENTRANCE_EXAMS': True, 'ENABLE_MKTG_SITE': True})
+    @override_settings(ENTRANCE_EXAMS=True)
     def test_unpassed_entrance_exam(self):
         """
         Tests the case where the user has not passed the entrance exam
@@ -65,7 +64,7 @@ class MobileAPIMilestonesMixin:
         self.init_course_access()
         self._verify_unfulfilled_milestone_response()
 
-    @patch.dict(settings.FEATURES, {'ENTRANCE_EXAMS': True, 'ENABLE_MKTG_SITE': True})
+    @override_settings(ENTRANCE_EXAMS=True)
     def test_unpassed_entrance_exam_for_staff(self):
         self._add_entrance_exam()
         self.user.is_staff = True
@@ -73,7 +72,7 @@ class MobileAPIMilestonesMixin:
         self.init_course_access()
         self.api_response()
 
-    @patch.dict(settings.FEATURES, {'ENTRANCE_EXAMS': True, 'ENABLE_MKTG_SITE': True})
+    @override_settings(ENTRANCE_EXAMS=True)
     def test_passed_entrance_exam(self):
         """
         Tests access when user has passed the entrance exam
@@ -89,21 +88,21 @@ class MobileAPIMilestonesMixin:
         with self.store.bulk_operations(self.course.id):
             self.course.entrance_exam_enabled = True
 
-            self.entrance_exam = ItemFactory.create(
+            self.entrance_exam = BlockFactory.create(
                 parent=self.course,
                 category="chapter",
                 display_name="Entrance Exam Chapter",
                 is_entrance_exam=True,
                 in_entrance_exam=True,
             )
-            self.subsection_1 = ItemFactory.create(
+            self.subsection_1 = BlockFactory.create(
                 parent=self.entrance_exam,
                 category='sequential',
                 display_name="The Only Exam Sequential",
                 graded=True,
                 in_entrance_exam=True,
             )
-            self.problem_1 = ItemFactory.create(
+            self.problem_1 = BlockFactory.create(
                 parent=self.subsection_1,
                 category='problem',
                 display_name="The Only Exam Problem",

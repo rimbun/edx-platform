@@ -1,11 +1,19 @@
 <%page args="section_data" expression_filter="h"/>
 <%!
-from django.utils.translation import ugettext as _
-from openedx.core.djangolib.markup import HTML
+from django.utils.translation import gettext as _
+from openedx.core.djangolib.markup import HTML, Text
 %>
+
 
 <div class="vert-left send-email" id="section-send-email">
     <div class="request-response msg msg-confirm copy" id="request-response"></div>
+    %if 'communications_mfe_url' in section_data:
+    <p>
+        <em>
+            ${_("To use the email tool, visit the")} <a href="${section_data['communications_mfe_url']}" target="_blank" rel="noopener">${_("new experience")}<span class="sr-only">${Text(_("Opens in a new tab"))}</span></a>.
+        </em>
+    </p>
+    %else:
     <ul class="list-fields">
         <li class="field">
             <div class="send_to_list">${_("Send to:")}</div>
@@ -83,7 +91,16 @@ from openedx.core.djangolib.markup import HTML
         </li>
     </ul>
     <div class="submit-email-action">
-        <p class="copy">${_("We recommend sending learners no more than one email message per week. Before you send your email, review the text carefully and send it to yourself first, so that you can preview the formatting and make sure embedded images and links work correctly.")}</p>
+        <p class="copy">
+            ${_("We recommend sending learners no more than one email message per week. Before you send your email, review the text carefully and send it to yourself first, so that you can preview the formatting and make sure embedded images and links work correctly.")}
+            ${Text(
+                _("You can include keywords in your messages. For list of available keywords see the {start_link}documentation{end_link}."
+                )).format(
+                    start_link=HTML('<a href="{}">').format(settings.COURSE_BULK_EMAIL_HELP_URL),
+                    end_link=HTML('</a>')
+                )
+            }
+        </p>
     </div>
     <div class="submit-email-warning">
         <p class="copy"><span style="color: red;"><b>${_("CAUTION!")}</b></span>
@@ -134,5 +151,5 @@ from openedx.core.djangolib.markup import HTML
         </div>
     </div>
     %endif
-
+    %endif
 </div> <!-- end section send-email -->

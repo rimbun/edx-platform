@@ -9,7 +9,9 @@ from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangoapps.enrollments.services import EnrollmentsService
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
 
 
 @ddt.ddt
@@ -28,6 +30,7 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
             CourseMode.PROFESSIONAL,
             CourseMode.VERIFIED
         ]
+        self.users = []
         self.course = CourseOverviewFactory.create(enable_proctored_exams=True)
 
         for index in range(len(self.course_modes)):
@@ -39,10 +42,50 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
                 username=f'user{index}',
                 email=f'LEARNER{index}@example.com'
             )
+            self.users.append(user)
             CourseEnrollment.enroll(user, course_id, mode=course_mode)
 
     def enrollment_to_dict(self, enrollment):
         return {'username': enrollment.username, 'mode': enrollment.mode}
+
+    def test_get_active_enrollments_by_course(self):
+        """
+        Test that it returns a list of active enrollments for a course
+        """
+        enrollments = self.service.get_active_enrollments_by_course(course_id=str(self.course.id))
+        self.assertEqual(len(self.course_modes), len(enrollments))  # noqa: PT009
+
+    def test_get_active_enrollments_by_course_and_user(self):
+        """
+        Test that it returns a list of active enrollments for a course and user
+        """
+        enrollment = self.service.get_active_enrollments_by_course_and_user(
+            str(self.course.id),
+            self.users[0].id,
+        )
+        expected_values = {'username': 'user0', 'mode': 'audit'}
+        self.assertDictEqual(self.enrollment_to_dict(enrollment), expected_values)  # noqa: PT009
+
+    def test_get_active_enrollments_by_course_and_user_none_course(self):
+        """
+        Test that it returns a list of active enrollments for a course and user
+        for a non existing enrollment
+        """
+        enrollments = self.service.get_active_enrollments_by_course_and_user(
+            'course-v1:testx+none+123',
+            self.users[0].id,
+        )
+        self.assertIsNone(enrollments)  # noqa: PT009
+
+    def test_get_active_enrollments_by_course_and_user_none_user(self):
+        """
+        Test getting enrollments for a course and non existing user raise error
+        """
+        with self.assertRaises(AssertionError):  # noqa: PT027
+            self.service.get_active_enrollments_by_course_and_user(
+                str(self.course.id),
+                0000,
+            )
 
     def test_get_enrollments_can_take_proctored_exams_by_course(self):
         """
@@ -56,7 +99,8 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
             {'username': 'user4', 'mode': 'professional'},
             {'username': 'user5', 'mode': 'verified'}
         ]
-        self.assertQuerysetEqual(enrollments, expected_values, self.enrollment_to_dict)
+        actual_values = [self.enrollment_to_dict(e) for e in enrollments]
+        self.assertEqual(actual_values, expected_values)  # noqa: PT009
 
     def test_get_enrollments_can_take_proctored_exams_by_course_ignore_inactive(self):
         """
@@ -100,7 +144,8 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
             {'username': 'user5', 'mode': 'verified'}
 
         ]
-        self.assertQuerysetEqual(enrollments, expected_values, self.enrollment_to_dict)
+        actual_values = [self.enrollment_to_dict(e) for e in enrollments]
+        self.assertEqual(actual_values, expected_values)  # noqa: PT009
 
     def test_get_enrollments_can_take_proctored_exams_not_enable_proctored_exams(self):
         self.course.enable_proctored_exams = False
@@ -128,7 +173,8 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
             {'username': 'user4', 'mode': 'professional'},
             {'username': 'user5', 'mode': 'verified'}
         ]
-        self.assertQuerysetEqual(enrollments, expected_values, self.enrollment_to_dict)
+        actual_values = [self.enrollment_to_dict(e) for e in enrollments]
+        self.assertEqual(actual_values, expected_values)  # noqa: PT009
 
     def test_text_search_partial_return_some(self):
         enrollments = self.service.get_enrollments_can_take_proctored_exams(
@@ -139,7 +185,8 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
         expected_values = [
             {'username': 'user3', 'mode': 'masters'}
         ]
-        self.assertQuerysetEqual(enrollments, expected_values, self.enrollment_to_dict)
+        actual_values = [self.enrollment_to_dict(e) for e in enrollments]
+        self.assertEqual(actual_values, expected_values)  # noqa: PT009
 
     @ddt.data('user1', 'USER1', 'LEARNER1@example.com', 'lEarNer1@eXAMPLE.com')
     def test_text_search_exact_return_one(self, text_search):
@@ -151,7 +198,8 @@ class EnrollmentsServiceTests(ModuleStoreTestCase):
         expected_values = [
             {'username': 'user1', 'mode': 'executive-education'}
         ]
-        self.assertQuerysetEqual(enrollments, expected_values, self.enrollment_to_dict)
+        actual_values = [self.enrollment_to_dict(e) for e in enrollments]
+        self.assertEqual(actual_values, expected_values)  # noqa: PT009
 
     def test_text_search_return_none(self):
         enrollments = self.service.get_enrollments_can_take_proctored_exams(

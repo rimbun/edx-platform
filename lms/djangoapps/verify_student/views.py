@@ -6,6 +6,7 @@ import decimal
 import json
 import logging
 import urllib
+from urllib.parse import urljoin
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
@@ -16,15 +17,13 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.utils.timezone import now
-from django.utils.translation import ugettext as _
-from django.utils.translation import ugettext_lazy
+from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from django.views.generic.base import View
-from edx_name_affirmation.toggles import is_verified_name_enabled
-from edx_rest_api_client.exceptions import SlumberBaseException
-from ipware.ip import get_client_ip
 from opaque_keys.edx.keys import CourseKey
+from requests.exceptions import RequestException
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -36,19 +35,17 @@ from common.djangoapps.util.db import outer_atomic
 from common.djangoapps.util.json_request import JsonResponse
 from common.djangoapps.util.views import require_global_staff
 from lms.djangoapps.commerce.utils import EcommerceService, is_account_activation_requirement_disabled
-from lms.djangoapps.verify_student.emails import send_verification_approved_email, send_verification_confirmation_email
+from lms.djangoapps.verify_student.api import send_approval_email
+from lms.djangoapps.verify_student.emails import send_verification_confirmation_email
 from lms.djangoapps.verify_student.image import InvalidImageData, decode_image_data
 from lms.djangoapps.verify_student.models import SoftwareSecurePhotoVerification, VerificationDeadline
 from lms.djangoapps.verify_student.tasks import send_verification_status_email
 from lms.djangoapps.verify_student.utils import can_verify_now
-from openedx.core.djangoapps.commerce.utils import ecommerce_api_client
+from openedx.core.djangoapps.commerce.utils import get_ecommerce_api_base_url, get_ecommerce_api_client
 from openedx.core.djangoapps.embargo import api as embargo_api
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
-from openedx.core.djangoapps.user_api.accounts import NAME_MIN_LENGTH
-from openedx.core.djangoapps.user_api.accounts.api import update_account_settings
-from openedx.core.djangoapps.user_api.errors import AccountValidationError, UserNotFound
 from openedx.core.lib.log_utils import audit_log
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 from .services import IDVerificationService
 
@@ -143,12 +140,12 @@ class PayAndVerifyView(View):
     ]
 
     STEP_TITLES = {
-        INTRO_STEP: ugettext_lazy("Intro"),
-        MAKE_PAYMENT_STEP: ugettext_lazy("Make payment"),
-        FACE_PHOTO_STEP: ugettext_lazy("Take photo"),
-        ID_PHOTO_STEP: ugettext_lazy("Take a photo of your ID"),
-        REVIEW_PHOTOS_STEP: ugettext_lazy("Review your info"),
-        ENROLLMENT_CONFIRMATION_STEP: ugettext_lazy("Enrollment confirmation"),
+        INTRO_STEP: gettext_lazy("Intro"),
+        MAKE_PAYMENT_STEP: gettext_lazy("Make payment"),
+        FACE_PHOTO_STEP: gettext_lazy("Take photo"),
+        ID_PHOTO_STEP: gettext_lazy("Take a photo of your ID"),
+        REVIEW_PHOTOS_STEP: gettext_lazy("Review your info"),
+        ENROLLMENT_CONFIRMATION_STEP: gettext_lazy("Enrollment confirmation"),
     }
 
     # Messages
@@ -198,7 +195,7 @@ class PayAndVerifyView(View):
         return user.is_active or is_account_activation_requirement_disabled()
 
     @method_decorator(login_required)
-    def get(  # lint-amnesty, pylint: disable=too-many-statements
+    def get(  # pylint: disable=too-many-statements
         self, request, course_id,
         always_show_payment=False,
         current_step=None,
@@ -239,12 +236,7 @@ class PayAndVerifyView(View):
 
         # Check whether the user has access to this course
         # based on country access rules.
-        redirect_url = embargo_api.redirect_if_blocked(
-            course_key,
-            user=request.user,
-            ip_address=get_client_ip(request)[0],
-            url=request.path
-        )
+        redirect_url = embargo_api.redirect_if_blocked(request, course_key)
         if redirect_url:
             return redirect(redirect_url)
 
@@ -396,7 +388,10 @@ class PayAndVerifyView(View):
         verification_good_until = self._verification_valid_until(request.user)
 
         # get available payment processors
-        processors = ecommerce_api_client(request.user).payment.processors.get()
+        api_url = urljoin(f"{get_ecommerce_api_base_url()}/", "payment/processors/")
+        response = get_ecommerce_api_client(request.user).get(api_url)
+        response.raise_for_status()
+        processors = response.json()
 
         # Render the top-level page
         context = {
@@ -426,7 +421,7 @@ class PayAndVerifyView(View):
 
         return render_to_response("verify_student/pay_and_verify.html", context)
 
-    def add_utm_params_to_url(self, url):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def add_utm_params_to_url(self, url):  # pylint: disable=missing-function-docstring
         # utm_params is [(u'utm_content', u'course-v1:IDBx IDB20.1x 1T2017'),...
         utm_params = [item for item in self.request.GET.items() if 'utm_' in item[0]]
         # utm_params is utm_content=course-v1%3AIDBx+IDB20.1x+1T2017&...
@@ -508,7 +503,8 @@ class PayAndVerifyView(View):
             if ecommerce_service.is_enabled(user):
                 url = ecommerce_service.get_checkout_page_url(
                     sku,
-                    catalog=self.request.GET.get('catalog')
+                    catalog=self.request.GET.get('catalog'),
+                    course_run_keys=[str(course_key)]
                 )
 
         # Redirect if necessary, otherwise implicitly return None
@@ -716,20 +712,28 @@ class PayAndVerifyView(View):
 
 
 def checkout_with_ecommerce_service(user, course_key, course_mode, processor):
-    """ Create a new basket and trigger immediate checkout, using the E-Commerce API. """
+    """
+    Create a new basket and trigger immediate checkout, using the E-Commerce API.
+    """
     course_id = str(course_key)
     try:
-        api = ecommerce_api_client(user)
+        api_client = get_ecommerce_api_client(user)
+        api_url = urljoin(f"{get_ecommerce_api_base_url()}/", "baskets/")
         # Make an API call to create the order and retrieve the results
-        result = api.baskets.post({
-            'products': [{'sku': course_mode.sku}],
-            'checkout': True,
-            'payment_processor_name': processor
-        })
+        response = api_client.post(
+            api_url,
+            json={
+                'products': [{'sku': course_mode.sku}],
+                'checkout': True,
+                'payment_processor_name': processor
+            }
+        )
+        response.raise_for_status()
+        result = response.json()
 
         # Pass the payment parameters directly from the API response.
         return result.get('payment_data')
-    except SlumberBaseException:
+    except RequestException:
         params = {'username': user.username, 'mode': course_mode.slug, 'course_id': course_id}
         log.exception('Failed to create order for %(username)s %(mode)s mode of %(course_id)s', params)
         raise
@@ -832,9 +836,6 @@ class SubmitPhotosView(View):
             face_image (str): base64-encoded image data of the user's face.
             photo_id_image (str): base64-encoded image data of the user's photo ID.
             full_name (str): The user's full name, if the user is requesting a name change as well.
-            experiment_name (str): The name of an A/B experiment associated with this attempt
-            portrait_photo_mode (str): The mode in which the portrait photo was taken
-            id_photo_mode (str): The mode in which the id photo was taken
 
         """
         # If the user already has an initial verification attempt, we can re-use the photo ID
@@ -849,12 +850,6 @@ class SubmitPhotosView(View):
         full_name = None
         if "full_name" in params:
             full_name = params["full_name"]
-
-        # If necessary, update the user's full name
-        if full_name is not None and not is_verified_name_enabled():
-            response = self._update_full_name(request, full_name)
-            if response is not None:
-                return response
 
         # Retrieve the image data
         # Validation ensures that we'll have a face image, but we may not have
@@ -871,22 +866,7 @@ class SubmitPhotosView(View):
             return response
 
         # Submit the attempt
-        attempt = self._submit_attempt(request.user, face_image, photo_id_image, initial_verification, full_name)
-
-        # Send event to segment for analyzing A/B testing data
-        data = {
-            "attempt_id": attempt.id,
-            "experiment_name": params.get("experiment_name", "original")
-        }
-        self._fire_event(request.user, "edx.bi.experiment.verification.attempt", data)
-
-        if params.get("portrait_photo_mode"):
-            mode_data = {
-                "attempt_id": attempt.id,
-                "portrait_photo_mode": params.get("portrait_photo_mode"),
-                "id_photo_mode": params.get("id_photo_mode")
-            }
-            self._fire_event(request.user, "edx.bi.experiment.verification.attempt.photo.mode", mode_data)
+        self._submit_attempt(request.user, face_image, photo_id_image, initial_verification, full_name)
 
         self._fire_event(request.user, "edx.bi.verify.submitted", {"category": "verification"})
         self._send_confirmation_email(request.user)
@@ -911,9 +891,6 @@ class SubmitPhotosView(View):
                 "face_image",
                 "photo_id_image",
                 "full_name",
-                "experiment_name",
-                "portrait_photo_mode",
-                "id_photo_mode"
             ]
             if param_name in request.POST
         }
@@ -939,40 +916,10 @@ class SubmitPhotosView(View):
         # The face image is always required.
         if "face_image" not in params:
             msg = _("Missing required parameter face_image")
-            log.error(("User {user_id} missing required parameter face_image").format(user_id=request.user.id))
+            log.error(("User {user_id} missing required parameter face_image").format(user_id=request.user.id))  # noqa: UP032  # pylint: disable=line-too-long
             return None, HttpResponseBadRequest(msg)
 
         return params, None
-
-    def _update_full_name(self, request, full_name):
-        """
-        Update the user's full name.
-
-        Arguments:
-            user (User): The user to update.
-            full_name (unicode): The user's updated full name.
-
-        Returns:
-            error encoded as an HttpResponse or None indicating success
-
-        """
-        try:
-            update_account_settings(request.user, {"name": full_name})
-        except UserNotFound:
-            log.error(("No profile found for user {user_id}").format(user_id=request.user.id))
-            return HttpResponseBadRequest(_("No profile found for user"))
-        except AccountValidationError:
-            msg = _(
-                "Name must be at least {min_length} character long."
-            ).format(min_length=NAME_MIN_LENGTH)
-            log.error(
-                (
-                    "User {user_id} suffered ID verification error while submitting a full_name change"
-                ).format(
-                    user_id=request.user.id
-                )
-            )
-            return HttpResponseBadRequest(msg)
 
     def _validate_and_decode_image_data(self, request, face_data, photo_id_data=None):
         """
@@ -995,12 +942,12 @@ class SubmitPhotosView(View):
                 data_type = image_data.split(',')[0]
                 if data_type:
                     log.error(
-                        "Image data for user_id={user_id} was uploaded in an unsupported "
+                        "Image data for user_id={user_id} was uploaded in an unsupported "  # noqa: UP032
                         "format: {data_type}".format(user_id=request.user.id, data_type=data_type)
                     )
                 else:
                     log.error(
-                        "Image data type for user_id={user_id} could not be identified.".format(
+                        "Image data type for user_id={user_id} could not be identified.".format(  # noqa: UP032
                             user_id=request.user.id
                         )
                     )
@@ -1020,7 +967,7 @@ class SubmitPhotosView(View):
 
         except InvalidImageData:
             msg = _("Image data is not valid.")
-            log.error(("Image data for user {user_id} is not valid").format(user_id=request.user.id))
+            log.error(("Image data for user {user_id} is not valid").format(user_id=request.user.id))  # noqa: UP032
             return None, None, HttpResponseBadRequest(msg)
 
     def _submit_attempt(self, user, face_image, photo_id_image=None, initial_verification=None, provided_name=None):
@@ -1089,7 +1036,7 @@ class SubmitPhotosView(View):
 
 @require_POST
 @csrf_exempt  # SS does its own message signing, and their API won't have a cookie value
-def results_callback(request):  # lint-amnesty, pylint: disable=too-many-statements
+def results_callback(request):  # pylint: disable=too-many-statements
     """
     Software Secure will call this callback to tell us whether a user is
     verified to be who they said they are.
@@ -1127,6 +1074,18 @@ def results_callback(request):  # lint-amnesty, pylint: disable=too-many-stateme
     reason = body_dict.get("Reason", "")
     error_code = body_dict.get("MessageType", "")
 
+    # TODO: These logs must be removed once the investigation in COSMO-184 is complete.
+    #       COSMO-196 was created to track the cleanup of these logs.
+    log.info(
+        "[COSMO-184] Software Secure review received for receipt_id={receipt_id}, "  # noqa: UP032
+        "with result={result} and reason={reason}."
+        .format(
+            receipt_id=receipt_id,
+            result=result,
+            reason=reason,
+        )
+    )
+
     try:
         attempt = SoftwareSecurePhotoVerification.objects.get(receipt_id=receipt_id)
     except SoftwareSecurePhotoVerification.DoesNotExist:
@@ -1138,13 +1097,13 @@ def results_callback(request):  # lint-amnesty, pylint: disable=too-many-stateme
         'platform_name': settings.PLATFORM_NAME,
     }
     if result == "PASS":
-        # If this verification is not an outdated version then make expiry email date of previous approved verification NULL  # lint-amnesty, pylint: disable=line-too-long
+        # If this verification is not an outdated version then make expiry email date of previous approved verification NULL  # pylint: disable=line-too-long
         # Setting expiry email date to NULL is important so that it does not get filtered in the management command
         # that sends email when verification expires : verify_student/send_verification_expiry_email
         if attempt.status != 'approved':
             verification = SoftwareSecurePhotoVerification.objects.filter(status='approved', user_id=attempt.user_id)
             if verification:
-                log.info(f'Making expiry email date of previous approved verification NULL for {attempt.user_id}')  # lint-amnesty, pylint: disable=line-too-long
+                log.info(f'Making expiry email date of previous approved verification NULL for {attempt.user_id}')  # pylint: disable=line-too-long
                 # The updated_at field in sspv model has auto_now set to True, which means any time save() is called on
                 # the model instance, `updated_at` will change. Some of the existing functionality of verification
                 # (showing your verification has expired on dashboard) relies on updated_at.
@@ -1154,30 +1113,29 @@ def results_callback(request):  # lint-amnesty, pylint: disable=too-many-stateme
                 SoftwareSecurePhotoVerification.objects.filter(pk=previous_verification.pk
                                                                ).update(expiry_email_date=None)
         log.debug(f'Approving verification for {receipt_id}')
+
+        # TODO: These logs must be removed once the investigation in COSMO-184 is complete.
+        #       COSMO-196 was created to track the cleanup of these logs.
+        log.info("[COSMO-184] Approved verification for receipt_id={receipt_id}.".format(receipt_id=receipt_id))  # noqa: UP032
         attempt.approve()
 
-        expiration_datetime = attempt.expiration_datetime.date()
-        if settings.VERIFY_STUDENT.get('USE_DJANGO_MAIL'):
-            verification_status_email_vars['expiration_datetime'] = expiration_datetime.strftime("%m/%d/%Y")
-            verification_status_email_vars['full_name'] = user.profile.name
-            subject = _("Your {platform_name} ID verification was approved!").format(
-                platform_name=settings.PLATFORM_NAME
-            )
-            context = {
-                'subject': subject,
-                'template': 'emails/passed_verification_email.txt',
-                'email': user.email,
-                'email_vars': verification_status_email_vars
-            }
-            send_verification_status_email.delay(context)
-        else:
-            email_context = {'user': user, 'expiration_datetime': expiration_datetime.strftime("%m/%d/%Y")}
-            send_verification_approved_email(context=email_context)
-
+        send_approval_email(attempt)
     elif result == "FAIL":
         log.debug("Denying verification for %s", receipt_id)
+
+        # TODO: These logs must be removed once the investigation in COSMO-184 is complete.
+        #       COSMO-196 was created to track the cleanup of these logs.
+        log.info("[COSMO-184] Denied verification for receipt_id={receipt_id}.".format(receipt_id=receipt_id))  # noqa: UP032
+
         attempt.deny(json.dumps(reason), error_code=error_code)
-        reverify_url = f'{settings.ACCOUNT_MICROFRONTEND_URL}/id-verification'
+        account_base_url = (
+            configuration_helpers.get_value(
+                'ACCOUNT_MICROFRONTEND_URL',
+                settings.ACCOUNT_MICROFRONTEND_URL,
+            ) or
+            ""
+        ).rstrip('/')
+        reverify_url = f'{account_base_url}/id-verification'
         verification_status_email_vars['reasons'] = reason
         verification_status_email_vars['reverify_url'] = reverify_url
         verification_status_email_vars['faq_url'] = settings.ID_VERIFICATION_SUPPORT_LINK
@@ -1201,13 +1159,6 @@ def results_callback(request):  # lint-amnesty, pylint: disable=too-many-stateme
         return HttpResponseBadRequest(
             f"Result {result} not understood. Known results: PASS, FAIL, SYSTEM FAIL"
         )
-
-    # Send event to segment for analyzing A/B testing data
-    data = {
-        "attempt_id": attempt.id,
-        "result": result
-    }
-    segment.track(attempt.user.id, "edx.bi.experiment.verification.attempt.result", data)
 
     return HttpResponse("OK!")
 

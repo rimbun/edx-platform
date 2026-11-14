@@ -2,61 +2,67 @@
 
 # Core
 common/djangoapps/student/
+common/djangoapps/student/models/__init__.py
+common/djangoapps/student/models/course_enrollment.py
 common/djangoapps/third_party_auth/
-common/lib/xmodule/xmodule/
 lms/djangoapps/course_api/blocks
 lms/djangoapps/courseware/
 lms/djangoapps/grades/
 lms/djangoapps/instructor/
 lms/djangoapps/instructor_task/
 lms/djangoapps/mobile_api/
+openedx/core/djangoapps/commerce/
+openedx/core/djangoapps/credentials
+openedx/core/djangoapps/credit
+openedx/core/djangoapps/enrollments/
 openedx/core/djangoapps/heartbeat/
 openedx/core/djangoapps/oauth_dispatch
 openedx/core/djangoapps/user_api/
 openedx/core/djangoapps/user_authn/
+openedx/core/djangoapps/verified_track_content/
 openedx/features/course_experience/
+# The Aximprovements team is working on extracting all built-in XBlocks
+# to the external repository (xblocks-core). They need to be notified
+# about any changes within xmodule to stay aligned with this effort.
+# Ticket: https://github.com/openedx/edx-platform/issues/34827
+xmodule/                                                            @farhan @irtazaakram @salman2013
 
 # Core Extensions
-common/lib/xmodule/xmodule/capa_module.py
-common/lib/xmodule/xmodule/html_module.py
-common/lib/xmodule/xmodule/video_module
 lms/djangoapps/discussion/
 lms/djangoapps/edxnotes
 
 # Analytics
-common/djangoapps/track/                   @edx/edx-data-engineering
+common/djangoapps/track/
 
 # Credentials
-lms/djangoapps/certificates/               @edx/platform-credentials
+lms/djangoapps/certificates/
 
 # Discovery
-common/djangoapps/course_modes/            @edx/platform-discovery
-common/djangoapps/enrollment/              @edx/platform-discovery
-lms/djangoapps/commerce/                   @edx/rev-team
-lms/djangoapps/experiments/                @edx/rev-team
-lms/djangoapps/learner_dashboard/          @edx/platform-discovery
-openedx/features/content_type_gating/      @edx/rev-team
-openedx/features/course_duration_limits/   @edx/rev-team
-openedx/features/discounts/                @edx/rev-team
+common/djangoapps/course_modes/
+common/djangoapps/enrollment/
+common/djangoapps/entitlements/
+lms/djangoapps/branding/
+lms/djangoapps/commerce/
+lms/djangoapps/experiments/
+lms/djangoapps/gating/
+lms/djangoapps/learner_dashboard/
+lms/djangoapps/learner_home/
+openedx/features/content_type_gating/
+openedx/features/course_duration_limits/
+openedx/features/discounts/
 
-# Community Engineering Squad
-# Commented-out sections are officially owned by community-engineering,
-# but reviews aren't expected unless explicitly tagged by users.
-common/djangoapps/edxmako                  @edx/community-engineering
-common/djangoapps/pipeline_mako            @edx/community-engineering
-# common/static                              @edx/community-engineering
-common/templates                           @edx/community-engineering
-lms/djangoapps/ccx                         @edx/community-engineering
-lms/djangoapps/dashboard                   @edx/community-engineering
-lms/djangoapps/lti_provider                @edx/community-engineering
-lms/djangoapps/static_template_view        @edx/community-engineering
-# lms/static                                 @edx/community-engineering
-lms/templates                              @edx/community-engineering
-openedx/core/djangoapps/ccxcon             @edx/community-engineering
-openedx/core/djangoapps/contentserver      @edx/community-engineering
-openedx/core/djangoapps/profile_images     @edx/community-engineering
-openedx/core/djangoapps/theming            @edx/community-engineering
-openedx/features/lti_course_tab            @edx/community-engineering
-openedx/features/learner_profile           @edx/community-engineering
-vendor_extra                               @edx/community-engineering
-webpack-config                             @edx/community-engineering
+# Ping Axim On-call if someone uses the QuickStart
+# https://docs.openedx.org/en/latest/developers/quickstarts/first_openedx_pr.html
+lms/templates/dashboard.html                                         @openedx/axim-oncall
+
+# Ensure minimal.yml stays minimal, this could be a team in the future
+# but it's just me for now, others can sign up if they care as well.
+lms/envs/minimal.yml                                                 @feanil
+
+# Ensure that un-necessary changes don't happen to the settings files as we're cleaning them up.
+lms/envs/production.py                                               @feanil @kdmccormick
+cms/envs/production.py                                               @feanil @kdmccormick
+
+# Review GitHub Actions workflow changes (incl. Dependabot PRs).
+# Replaces the deprecated `reviewers:` key in dependabot.yml.
+/.github/workflows/                                                  @openedx/wg-maintenance-openedx-platform-oncall

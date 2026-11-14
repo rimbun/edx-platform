@@ -9,7 +9,7 @@ base on membership of a student in a cohort, or similar.  The use of an
 extensible, modular architecture allows for overrides being done in ways not
 envisioned by the authors.
 
-Currently, this module is used in the `module_render` module in this same
+Currently, this module is used in the `block_render` module in this same
 package and is used to wrap the `authored_data` when constructing an
 `LmsFieldData`.  This means overrides will be in effect for all scopes covered
 by `authored_data`, e.g. course content and settings stored in Mongo.
@@ -27,8 +27,9 @@ from xblock.field_data import FieldData
 from xmodule.modulestore.inheritance import InheritanceMixin
 
 NOTSET = object()
-ENABLED_OVERRIDE_PROVIDERS_KEY = 'courseware.field_overrides.enabled_providers.{course_id}'
-ENABLED_MODULESTORE_OVERRIDE_PROVIDERS_KEY = 'courseware.modulestore_field_overrides.enabled_providers.{course_id}'
+ENABLED_OVERRIDE_PROVIDERS_KEY = 'lms.djangoapps.courseware.field_overrides.enabled_providers.{course_id}'
+ENABLED_MODULESTORE_OVERRIDE_PROVIDERS_KEY = 'lms.djangoapps.courseware.modulestore_field_overrides.\
+    enabled_providers.{course_id}'
 
 
 def resolve_dotted(name):
@@ -190,7 +191,7 @@ class OverrideFieldData(FieldData):
         enabled_providers = request_cache.data.get(cache_key, NOTSET)
         if enabled_providers == NOTSET:
             enabled_providers = tuple(
-                provider_class for provider_class in cls.provider_classes if provider_class.enabled_for(course)  # lint-amnesty, pylint: disable=not-an-iterable
+                provider_class for provider_class in cls.provider_classes if provider_class.enabled_for(course)  # pylint: disable=not-an-iterable
             )
             request_cache.data[cache_key] = enabled_providers
 
@@ -301,7 +302,7 @@ class OverrideModulestoreFieldData(OverrideFieldData):
 
         if enabled_providers is None:
             enabled_providers = [
-                provider_class for provider_class in cls.provider_classes if provider_class.enabled_for(block)  # lint-amnesty, pylint: disable=not-an-iterable
+                provider_class for provider_class in cls.provider_classes if provider_class.enabled_for(block)  # pylint: disable=not-an-iterable
             ]
             request_cache.data[cache_key] = enabled_providers
 

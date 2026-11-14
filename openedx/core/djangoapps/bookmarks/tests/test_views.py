@@ -4,8 +4,8 @@ Tests for bookmark views.
 
 
 import json
-from urllib.parse import quote
 from unittest.mock import patch
+from urllib.parse import quote
 
 import ddt
 from django.conf import settings
@@ -13,7 +13,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from openedx.core.djangolib.testing.utils import skip_unless_lms
-from xmodule.modulestore import ModuleStoreEnum
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE
 
 from .test_api import BookmarkApiEventTestMixin
 from .test_models import BookmarksTestsBase
@@ -71,6 +71,7 @@ class BookmarksListViewTests(BookmarksViewsTestsBase):
     GET /api/bookmarks/v1/bookmarks/?course_id={course_id1}
     POST /api/bookmarks/v1/bookmarks
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     @ddt.data(
         (1, False),
@@ -88,11 +89,9 @@ class BookmarksListViewTests(BookmarksViewsTestsBase):
         expected order without optional fields.
         """
 
-        course, __, bookmarks = self.create_course_with_bookmarks_count(
-            bookmarks_count, store_type=ModuleStoreEnum.Type.mongo
-        )
+        course, __, bookmarks = self.create_course_with_bookmarks_count(bookmarks_count)
 
-        query_parameters = 'course_id={}&page_size={}'.format(
+        query_parameters = 'course_id={}&page_size={}'.format(  # noqa: UP032
             quote(str(course.id)), 100)
         if check_all_fields:
             query_parameters += '&fields=path,display_name'
@@ -131,12 +130,10 @@ class BookmarksListViewTests(BookmarksViewsTestsBase):
         Test that requesting bookmarks for a course return results with pagination 200 code.
         """
 
-        course, __, bookmarks = self.create_course_with_bookmarks_count(
-            bookmarks_count, store_type=ModuleStoreEnum.Type.mongo
-        )
+        course, __, bookmarks = self.create_course_with_bookmarks_count(bookmarks_count)
 
         page_size = 5
-        query_parameters = 'course_id={}&page_size={}'.format(
+        query_parameters = 'course_id={}&page_size={}'.format(  # noqa: UP032
             quote(str(course.id)), page_size)
 
         response = self.send_get(
@@ -311,10 +308,10 @@ class BookmarksListViewTests(BookmarksViewsTestsBase):
         )
         assert response.data['user_message'] == 'You can create up to {} bookmarks.' \
                                                 ' You must remove some bookmarks before you can add new ones.'\
-            .format(max_bookmarks)
+            .format(max_bookmarks)  # noqa: UP032
         assert response.data['developer_message'] == 'You can create up to {} bookmarks.' \
                                                      ' You must remove some bookmarks before you can add new ones.'\
-            .format(max_bookmarks)
+            .format(max_bookmarks)  # noqa: UP032
 
     def test_unsupported_methods(self):
         """

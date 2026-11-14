@@ -1,5 +1,6 @@
 (function(define) {
     'use strict';
+
     define(['jquery', 'js/student_account/utils', 'jquery.cookie'], function($, Utils) {
         var MultipleEnterpriseInterface = {
 
@@ -19,10 +20,10 @@
              * @param  {string} nextUrl The URL to redirect to after multiple enterprise selection or incase
              * the selection page is bypassed e.g. when dealing with direct enrolment urls.
              */
-            check: function(nextUrl) {
+            check: function(nextUrl, edxUserInfoCookieName) {
                 var view = this;
                 var selectionPageUrl = this.urls.multipleEnterpriseUrl + encodeURIComponent(nextUrl);
-                var username = Utils.userFromEdxUserCookie().username;
+                var username = Utils.userFromEdxUserCookie(edxUserInfoCookieName).username;
                 var next = nextUrl || '/';
                 var enterpriseInUrl = this.getEnterpriseFromUrl(nextUrl);
                 var userInEnterprise = false;
@@ -73,9 +74,11 @@
 
             getEnterpriseFromUrl: function(url) {
                 var regex;
+                // eslint-disable-next-line prefer-regex-literals
                 regex = RegExp('/enterprise/.*/course/.*/enroll');
                 if (typeof url !== 'string' || !regex.test(url)) {
-                    return void(0);
+                    // eslint-disable-next-line no-void
+                    return void 0;
                 }
                 return url.split('/')[2];
             },

@@ -1,19 +1,21 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 import logging
 from datetime import datetime
-from typing import Dict
+from typing import Dict  # noqa: UP035
 
 from opaque_keys.edx.keys import CourseKey
-from openedx.core import types
 
-from xmodule.partitions.enrollment_track_partition_generator import (
-    create_enrollment_track_partition_with_course_id
+from openedx.core import types
+from xmodule.partitions.enrollment_track_partition_generator import (  # pylint: disable=wrong-import-order
+    create_enrollment_track_partition_with_course_id,
 )
-from xmodule.partitions.partitions import (
+from xmodule.partitions.partitions import (  # pylint: disable=wrong-import-order
     ENROLLMENT_TRACK_PARTITION_ID,
+    Group,  # pylint: disable=wrong-import-order
 )
-from xmodule.partitions.partitions_service import get_user_partition_groups
-from xmodule.partitions.partitions import Group
+from xmodule.partitions.partitions_service import (
+    get_user_partition_groups,  # pylint: disable=wrong-import-order
+)
 
 from .base import OutlineProcessor
 
@@ -30,7 +32,7 @@ class EnrollmentTrackPartitionGroupsOutlineProcessor(OutlineProcessor):
     """
     def __init__(self, course_key: CourseKey, user: types.User, at_time: datetime):
         super().__init__(course_key, user, at_time)
-        self.enrollment_track_groups: Dict[str, Group] = {}
+        self.enrollment_track_groups: Dict[str, Group] = {}  # noqa: UP006
         self.user_group = None
 
     def load_data(self, full_course_outline) -> None:
@@ -44,7 +46,8 @@ class EnrollmentTrackPartitionGroupsOutlineProcessor(OutlineProcessor):
             self.user,
             partition_dict_key='id'
         )
-        self.user_group = self.enrollment_track_groups.get(ENROLLMENT_TRACK_PARTITION_ID)
+        # TODO: fix type annotation: https://github.com/openedx/tcril-engineering/issues/313
+        self.user_group = self.enrollment_track_groups.get(ENROLLMENT_TRACK_PARTITION_ID)  # type: ignore
 
     def _is_user_excluded_by_partition_group(self, user_partition_groups):
         """

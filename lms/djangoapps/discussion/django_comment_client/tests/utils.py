@@ -3,13 +3,12 @@ Utilities for tests within the django_comment_client module.
 """
 
 
-from unittest.mock import patch
+from django.test import override_settings
 
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
 from common.djangoapps.util.testing import UrlResetMixin
 from openedx.core.djangoapps.course_groups.tests.helpers import CohortFactory
-from openedx.core.djangoapps.django_comment_common.models import CourseDiscussionSettings
-from openedx.core.djangoapps.django_comment_common.models import ForumsConfig, Role
+from openedx.core.djangoapps.django_comment_common.models import CourseDiscussionSettings, Role
 from openedx.core.djangoapps.django_comment_common.utils import seed_permissions_roles
 from openedx.core.lib.teams_config import TeamsConfig
 from xmodule.modulestore import ModuleStoreEnum
@@ -18,24 +17,12 @@ from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
 from xmodule.modulestore.tests.factories import CourseFactory
 
 
-class ForumsEnableMixin:
-    """
-    Ensures that the forums are enabled for a given test class.
-    """
-    def setUp(self):
-        super().setUp()
-
-        config = ForumsConfig.current()
-        config.enabled = True
-        config.save()
-
-
-class CohortedTestCase(ForumsEnableMixin, UrlResetMixin, SharedModuleStoreTestCase):
+@override_settings(ENABLE_DISCUSSION_SERVICE=True)
+class CohortedTestCase(UrlResetMixin, SharedModuleStoreTestCase):
     """
     Sets up a course with a student, a moderator and their cohorts.
     """
     @classmethod
-    @patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True})
     def setUpClass(cls):
         super().setUpClass()
         cls.course = CourseFactory.create(
@@ -56,7 +43,6 @@ class CohortedTestCase(ForumsEnableMixin, UrlResetMixin, SharedModuleStoreTestCa
         fake_user_id = 1
         cls.store.update_item(cls.course, fake_user_id)
 
-    @patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True})
     def setUp(self):
         super().setUp()
 
@@ -81,9 +67,10 @@ class CohortedTestCase(ForumsEnableMixin, UrlResetMixin, SharedModuleStoreTestCa
 # pylint: disable=dangerous-default-value
 def config_course_discussions(
         course,
-        discussion_topics={},
-        divided_discussions=[],
-        always_divide_inline_discussions=False
+        discussion_topics={},  # noqa: B006
+        divided_discussions=[],  # noqa: B006
+        always_divide_inline_discussions=False,
+        reported_content_email_notifications=False,
 ):
     """
     Set discussions and configure divided discussions for a course.
@@ -96,6 +83,8 @@ def config_course_discussions(
             list to use the same ids as discussion topic names.
         always_divide_inline_discussions (bool): Whether inline discussions
             should be divided by default.
+        reported_content_email_notifications (bool): Whether email notifications
+            are enabled for reported content for moderators.
 
     Returns:
         Nothing -- modifies course in place.
@@ -113,6 +102,7 @@ def config_course_discussions(
         ],
         'always_divide_inline_discussions': always_divide_inline_discussions,
         'division_scheme': CourseDiscussionSettings.COHORT,
+        'reported_content_email_notifications': reported_content_email_notifications,
     })
 
     course.discussion_topics = {name: {"sort_key": "A", "id": to_id(name)}
@@ -129,7 +119,7 @@ def topic_name_to_id(course, name):
     Given a discussion topic name, return an id for that name (includes
     course and url_name).
     """
-    return "{course}_{run}_{name}".format(
+    return "{course}_{run}_{name}".format(  # noqa: UP032
         course=course.location.course,
         run=course.url_name,
         name=name

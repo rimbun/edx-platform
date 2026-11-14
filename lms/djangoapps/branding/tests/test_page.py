@@ -6,7 +6,6 @@ Tests for branding page
 import datetime
 from unittest.mock import Mock, patch
 
-from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.http import HttpResponseRedirect
 from django.test.client import RequestFactory
@@ -20,13 +19,11 @@ from common.djangoapps.util.milestones_helpers import set_prerequisite_courses
 from lms.djangoapps.branding.views import index
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from openedx.core.djangoapps.site_configuration.tests.mixins import SiteMixin
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
-
-FEATURES_WITH_STARTDATE = settings.FEATURES.copy()
-FEATURES_WITH_STARTDATE['DISABLE_START_DATES'] = False
-FEATURES_WO_STARTDATE = settings.FEATURES.copy()
-FEATURES_WO_STARTDATE['DISABLE_START_DATES'] = True
+from xmodule.course_block import CATALOG_VISIBILITY_ABOUT, CATALOG_VISIBILITY_NONE
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 def mock_render_to_response(*args, **kwargs):
@@ -64,7 +61,7 @@ class AnonymousIndexPageTest(ModuleStoreTestCase):
 
         return headers
 
-    @override_settings(FEATURES=FEATURES_WITH_STARTDATE)
+    @override_settings(DISABLE_START_DATES=False)
     def test_none_user_index_access_with_startdate_fails(self):
         """
         This is a regression test for a bug where the incoming user is
@@ -75,12 +72,12 @@ class AnonymousIndexPageTest(ModuleStoreTestCase):
         response = self.client.get(reverse('root'))
         assert response.status_code == 200
 
-    @override_settings(FEATURES=FEATURES_WITH_STARTDATE)
+    @override_settings(DISABLE_START_DATES=False)
     def test_anon_user_with_startdate_index(self):
         response = self.client.get('/')
         assert response.status_code == 200
 
-    @override_settings(FEATURES=FEATURES_WO_STARTDATE)
+    @override_settings(DISABLE_START_DATES=True)
     def test_anon_user_no_startdate_index(self):
         response = self.client.get('/')
         assert response.status_code == 200
@@ -130,7 +127,7 @@ class PreRequisiteCourseCatalog(ModuleStoreTestCase, LoginEnrollmentTestCase, Mi
     """
     ENABLED_SIGNALS = ['course_published']
 
-    @patch.dict(settings.FEATURES, {'ENABLE_PREREQUISITE_COURSES': True})
+    @override_settings(ENABLE_PREREQUISITE_COURSES=True)
     def test_course_with_prereq(self):
         """
         Simulate having a course which has closed enrollments that has
@@ -201,11 +198,25 @@ class IndexPageCourseCardsSortingTests(ModuleStoreTestCase):
             display_name='Tech Beta Course',
             emit_signals=True,
         )
+        self.course_with_none_visibility = CourseFactory.create(
+            org='MITx',
+            number='1003',
+            catalog_visibility=CATALOG_VISIBILITY_NONE,
+            display_name='Course with "none" catalog visibility',
+            emit_signals=True,
+        )
+        self.course_with_about_visibility = CourseFactory.create(
+            org='MITx',
+            number='1003',
+            catalog_visibility=CATALOG_VISIBILITY_ABOUT,
+            display_name='Course with "about" catalog visibility',
+            emit_signals=True,
+        )
         self.factory = RequestFactory()
 
     @patch('common.djangoapps.student.views.management.render_to_response', RENDER_MOCK)
     @patch('lms.djangoapps.courseware.views.views.render_to_response', RENDER_MOCK)
-    @patch.dict('django.conf.settings.FEATURES', {'ENABLE_COURSE_DISCOVERY': False})
+    @override_settings(ENABLE_COURSE_DISCOVERY=False)
     def test_course_discovery_off(self):
         """
         Asserts that the Course Discovery UI elements follow the
@@ -229,7 +240,7 @@ class IndexPageCourseCardsSortingTests(ModuleStoreTestCase):
 
     @patch('common.djangoapps.student.views.management.render_to_response', RENDER_MOCK)
     @patch('lms.djangoapps.courseware.views.views.render_to_response', RENDER_MOCK)
-    @patch.dict('django.conf.settings.FEATURES', {'ENABLE_COURSE_DISCOVERY': True})
+    @override_settings(ENABLE_COURSE_DISCOVERY=True)
     def test_course_discovery_on(self):
         """
         Asserts that the Course Discovery UI elements follow the
@@ -251,7 +262,7 @@ class IndexPageCourseCardsSortingTests(ModuleStoreTestCase):
 
     @patch('common.djangoapps.student.views.management.render_to_response', RENDER_MOCK)
     @patch('lms.djangoapps.courseware.views.views.render_to_response', RENDER_MOCK)
-    @patch.dict('django.conf.settings.FEATURES', {'ENABLE_COURSE_DISCOVERY': False})
+    @override_settings(ENABLE_COURSE_DISCOVERY=False)
     def test_course_cards_sorted_by_default_sorting(self):
         response = self.client.get('/')
         assert response.status_code == 200
@@ -276,8 +287,7 @@ class IndexPageCourseCardsSortingTests(ModuleStoreTestCase):
 
     @patch('common.djangoapps.student.views.management.render_to_response', RENDER_MOCK)
     @patch('lms.djangoapps.courseware.views.views.render_to_response', RENDER_MOCK)
-    @patch.dict('django.conf.settings.FEATURES', {'ENABLE_COURSE_SORTING_BY_START_DATE': False})
-    @patch.dict('django.conf.settings.FEATURES', {'ENABLE_COURSE_DISCOVERY': False})
+    @override_settings(ENABLE_COURSE_SORTING_BY_START_DATE=False, ENABLE_COURSE_DISCOVERY=False)
     def test_course_cards_sorted_by_start_date_disabled(self):
         response = self.client.get('/')
         assert response.status_code == 200
@@ -299,6 +309,15 @@ class IndexPageCourseCardsSortingTests(ModuleStoreTestCase):
         assert context['courses'][0].id == self.starting_later.id
         assert context['courses'][1].id == self.starting_earlier.id
         assert context['courses'][2].id == self.course_with_default_start_date.id
+
+    @patch('lms.djangoapps.courseware.views.views.render_to_response', RENDER_MOCK)
+    def test_invisible_courses_are_not_displayed(self):
+        response = self.client.get(reverse('courses'))  # noqa: F841
+        ((_template, context), _) = RENDER_MOCK.call_args  # pylint: disable=unpacking-non-sequence
+
+        rendered_ids = [course.id for course in context["courses"]]
+        assert self.course_with_none_visibility.id not in rendered_ids
+        assert self.course_with_about_visibility.id not in rendered_ids
 
 
 class IndexPageProgramsTests(SiteMixin, ModuleStoreTestCase):

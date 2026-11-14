@@ -4,32 +4,19 @@
 import datetime
 from uuid import uuid4
 
-from django.conf import settings
 from django.test.client import Client
 from django.test.utils import override_settings
 
 from common.djangoapps.student.tests.factories import UserFactory
-from lms.djangoapps.certificates.models import (
-    CertificateHtmlViewConfiguration,
-    CertificateStatuses,
-)
+from lms.djangoapps.certificates.models import CertificateHtmlViewConfiguration, CertificateStatuses
 from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFactory
 from lms.djangoapps.certificates.utils import get_certificate_url
 from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration
-from xmodule.data import CertificatesDisplayBehaviors
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
-
-FEATURES_WITH_CERTS_ENABLED = settings.FEATURES.copy()
-FEATURES_WITH_CERTS_ENABLED['CERTIFICATES_HTML_VIEW'] = True
-
-FEATURES_WITH_CERTS_DISABLED = settings.FEATURES.copy()
-FEATURES_WITH_CERTS_DISABLED['CERTIFICATES_HTML_VIEW'] = False
-
-FEATURES_WITH_CUSTOM_CERTS_ENABLED = {
-    "CUSTOM_CERTIFICATE_TEMPLATES_ENABLED": True
-}
-FEATURES_WITH_CUSTOM_CERTS_ENABLED.update(FEATURES_WITH_CERTS_ENABLED)
+from xmodule.data import CertificatesDisplayBehaviors  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 class CertificatesViewsSiteTests(ModuleStoreTestCase):
@@ -130,7 +117,7 @@ class CertificatesViewsSiteTests(ModuleStoreTestCase):
         self.course.save()
         self.store.update_item(self.course, self.user.id)
 
-    @override_settings(FEATURES=FEATURES_WITH_CERTS_ENABLED)
+    @override_settings(CERTIFICATES_HTML_VIEW=True)
     @with_site_configuration(configuration={'platform_name': 'My Platform Site'})
     def test_html_view_for_site(self):
         test_url = get_certificate_url(
@@ -150,7 +137,7 @@ class CertificatesViewsSiteTests(ModuleStoreTestCase):
         )
         self.assertContains(response, 'About My Platform Site')
 
-    @override_settings(FEATURES=FEATURES_WITH_CERTS_ENABLED)
+    @override_settings(CERTIFICATES_HTML_VIEW=True)
     def test_html_view_site_configuration_missing(self):
         test_url = get_certificate_url(
             user_id=self.user.id,
@@ -165,3 +152,19 @@ class CertificatesViewsSiteTests(ModuleStoreTestCase):
             response,
             'This should not survive being overwritten by static content',
         )
+
+    @override_settings(CERTIFICATES_HTML_VIEW=True, GOOGLE_ANALYTICS_4_ID='GA-abc')
+    @with_site_configuration(configuration={'platform_name': 'My Platform Site'})
+    def test_html_view_with_g4(self):
+        test_url = get_certificate_url(
+            user_id=self.user.id,
+            course_id=str(self.course.id),
+            uuid=self.cert.verify_uuid
+        )
+        self._add_course_certificates(count=1, signatory_count=2)
+        response = self.client.get(test_url)
+        self.assertContains(
+            response,
+            'awarded this My Platform Site Honor Code Certificate of Completion',
+        )
+        self.assertContains(response, 'googletagmanager')

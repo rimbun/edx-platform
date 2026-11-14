@@ -15,17 +15,19 @@ file and check it in at the same time as your model changes. To do that,
 import ipaddress
 import json
 import logging
+from typing import List, Optional  # noqa: UP035
 
 from config_models.models import ConfigurationModel
 from django.core.cache import cache
 from django.db import models
 from django.db.models.signals import post_delete, post_save
 from django.urls import reverse
-from django.utils.translation import ugettext as _
-from django.utils.translation import ugettext_lazy
+from django.utils.translation import gettext as _
+from django.utils.translation import gettext_lazy
 from django_countries import countries
 from django_countries.fields import CountryField
 from opaque_keys.edx.django.models import CourseKeyField
+from opaque_keys.edx.keys import CourseKey
 
 from openedx.core.djangoapps.xmodule_django.models import NoneToEmptyManager
 
@@ -49,7 +51,7 @@ class EmbargoedCourse(models.Model):
     course_id = CourseKeyField(max_length=255, db_index=True, unique=True)
 
     # Whether or not to embargo
-    embargoed = models.BooleanField(default=False)
+    embargoed = models.BooleanField(default=False)  # noqa: DJ012
 
     @classmethod
     def is_embargoed(cls, course_id):
@@ -64,7 +66,7 @@ class EmbargoedCourse(models.Model):
         except cls.DoesNotExist:
             return False
 
-    def __str__(self):
+    def __str__(self):  # noqa: DJ012
         not_em = "Not "
         if self.embargoed:
             not_em = ""
@@ -132,63 +134,61 @@ class RestrictedCourse(models.Model):
 
     course_key = CourseKeyField(
         max_length=255, db_index=True, unique=True,
-        help_text=ugettext_lazy("The course key for the restricted course.")
+        help_text=gettext_lazy("The course key for the restricted course.")
     )
 
     enroll_msg_key = models.CharField(
         max_length=255,
         choices=ENROLL_MSG_KEY_CHOICES,
         default='default',
-        help_text=ugettext_lazy("The message to show when a user is blocked from enrollment.")
+        help_text=gettext_lazy("The message to show when a user is blocked from enrollment.")
     )
 
     access_msg_key = models.CharField(
         max_length=255,
         choices=COURSEWARE_MSG_KEY_CHOICES,
         default='default',
-        help_text=ugettext_lazy("The message to show when a user is blocked from accessing a course.")
+        help_text=gettext_lazy("The message to show when a user is blocked from accessing a course.")
     )
 
     disable_access_check = models.BooleanField(
         default=False,
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Allow users who enrolled in an allowed country "
             "to access restricted courses from excluded countries."
         )
     )
 
     @classmethod
-    def is_restricted_course(cls, course_id):
+    def is_restricted_course(cls, course_key: CourseKey) -> bool:
         """
         Check if the course is in restricted list
 
         Args:
-            course_id (str): course_id to look for
+            course_key: course to look for
 
         Returns:
-            Boolean
-            True if course is in restricted course list.
+            True if the course is in the restricted course list.
         """
-        return str(course_id) in cls._get_restricted_courses_from_cache()
+        return str(course_key) in cls._get_restricted_courses_from_cache()
 
     @classmethod
-    def is_disabled_access_check(cls, course_id):
+    def is_disabled_access_check(cls, course_key: CourseKey) -> bool:
         """
         Check if the course is in restricted list has disabled_access_check
 
         Args:
-            course_id (str): course_id to look for
+            course_key: course to look for
 
         Returns:
-            Boolean
             disabled_access_check attribute of restricted course
         """
 
         # checking is_restricted_course method also here to make sure course exists in the list otherwise in case of
         # no course found it will throw the key not found error on 'disable_access_check'
         return (
-            cls.is_restricted_course(str(course_id))
-            and cls._get_restricted_courses_from_cache().get(str(course_id))["disable_access_check"]
+            cls.is_restricted_course(course_key)
+            and cls._get_restricted_courses_from_cache().get(str(course_key))["disable_access_check"]
         )
 
     @classmethod
@@ -244,7 +244,7 @@ class RestrictedCourse(models.Model):
             ]
         }
 
-    def message_key_for_access_point(self, access_point):
+    def message_key_for_access_point(self, access_point: str) -> Optional[str]:  # noqa: UP045
         """Determine which message to show the user.
 
         The message can be configured per-course and depends
@@ -252,11 +252,10 @@ class RestrictedCourse(models.Model):
         (trying to enroll or accessing courseware).
 
         Arguments:
-            access_point (str): Either "courseware" or "enrollment"
+            access_point: Either "courseware" or "enrollment"
 
         Returns:
-            str: The message key.  If the access point is not valid,
-                returns None instead.
+            The message key. If the access point is not valid, returns None instead.
 
         """
         if access_point == 'enrollment':
@@ -264,23 +263,22 @@ class RestrictedCourse(models.Model):
         elif access_point == 'courseware':
             return self.access_msg_key
 
-    def __str__(self):
+    def __str__(self):  # noqa: DJ012
         return str(self.course_key)
 
     @classmethod
-    def message_url_path(cls, course_key, access_point):
+    def message_url_path(cls, course_key: CourseKey, access_point: str) -> str:
         """Determine the URL path for the message explaining why the user was blocked.
 
         This is configured per-course.  See `RestrictedCourse` in the `embargo.models`
         module for more details.
 
         Arguments:
-            course_key (CourseKey): The location of the course.
-            access_point (str): How the user was trying to access the course.
-                Can be either "enrollment" or "courseware".
+            course_key: The location of the course.
+            access_point: How the user was trying to access the course. Can be either "enrollment" or "courseware".
 
         Returns:
-            unicode: The URL path to a page explaining why the user was blocked.
+            The URL path to a page explaining why the user was blocked.
 
         Raises:
             InvalidAccessPoint: Raised if access_point is not a supported value.
@@ -306,16 +304,15 @@ class RestrictedCourse(models.Model):
         return url
 
     @classmethod
-    def _get_message_url_path_from_db(cls, course_key, access_point):
+    def _get_message_url_path_from_db(cls, course_key: CourseKey, access_point: str) -> str:
         """Retrieve the "blocked" message from the database.
 
         Arguments:
-            course_key (CourseKey): The location of the course.
-            access_point (str): How the user was trying to access the course.
-                Can be either "enrollment" or "courseware".
+            course_key: The location of the course.
+            access_point: How the user was trying to access the course. Can be either "enrollment" or "courseware".
 
         Returns:
-            unicode: The URL path to a page explaining why the user was blocked.
+            The URL path to a page explaining why the user was blocked.
 
         """
         # Fallback in case we're not able to find a message path
@@ -355,7 +352,7 @@ class RestrictedCourse(models.Model):
             return default_path
 
     @classmethod
-    def invalidate_cache_for_course(cls, course_key):
+    def invalidate_cache_for_course(cls, course_key: CourseKey) -> None:
         """Invalidate the caches for the restricted course. """
         cache.delete(cls.COURSE_LIST_CACHE_KEY)
         log.info("Invalidated cached list of restricted courses.")
@@ -380,16 +377,16 @@ class Country(models.Model):
     """
     country = CountryField(
         db_index=True, unique=True,
-        help_text=ugettext_lazy("Two character ISO country code.")
+        help_text=gettext_lazy("Two character ISO country code.")
     )
 
     def __str__(self):
-        return "{name} ({code})".format(
+        return "{name} ({code})".format(  # noqa: UP032
             name=str(self.country.name),
             code=str(self.country)
         )
 
-    class Meta:
+    class Meta:  # noqa: DJ012
         """Default ordering is ascending by country code """
         ordering = ['country']
 
@@ -425,7 +422,7 @@ class CountryAccessRule(models.Model):
         max_length=255,
         choices=RULE_TYPE_CHOICES,
         default=BLACKLIST_RULE,
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Whether to include or exclude the given course. "
             "If whitelist countries are specified, then ONLY users from whitelisted countries "
             "will be able to access the course.  If blacklist countries are specified, then "
@@ -435,13 +432,13 @@ class CountryAccessRule(models.Model):
 
     restricted_course = models.ForeignKey(
         "RestrictedCourse",
-        help_text=ugettext_lazy("The course to which this rule applies."),
+        help_text=gettext_lazy("The course to which this rule applies."),
         on_delete=models.CASCADE,
     )
 
     country = models.ForeignKey(
         "Country",
-        help_text=ugettext_lazy("The country to which this rule applies."),
+        help_text=gettext_lazy("The country to which this rule applies."),
         on_delete=models.CASCADE,
     )
 
@@ -450,18 +447,16 @@ class CountryAccessRule(models.Model):
     ALL_COUNTRIES = {code[0] for code in list(countries)}
 
     @classmethod
-    def check_country_access(cls, course_id, country):
+    def check_country_access(cls, course_key: CourseKey, country: str) -> bool:
         """
         Check if the country is either in whitelist or blacklist of countries for the course_id
 
         Args:
-            course_id (str): course_id to look for
-            country (str): A 2 characters code of country
+            course_key: course to look for
+            country: A 2 characters code of country
 
         Returns:
-            Boolean
-            True if country found in allowed country
-            otherwise check given country exists in list
+            True if country found in allowed country, otherwise check given country exists in list
         """
         # If the country code is not in the list of all countries,
         # we don't want to automatically exclude the user.
@@ -471,25 +466,24 @@ class CountryAccessRule(models.Model):
         if country not in cls.ALL_COUNTRIES:
             return True
 
-        cache_key = cls.CACHE_KEY.format(course_key=course_id)
+        cache_key = cls.CACHE_KEY.format(course_key=course_key)
         allowed_countries = cache.get(cache_key)
         if allowed_countries is None:
-            allowed_countries = cls._get_country_access_list(course_id)
+            allowed_countries = cls._get_country_access_list(course_key)
             cache.set(cache_key, allowed_countries)
 
         return country == '' or country in allowed_countries
 
     @classmethod
-    def _get_country_access_list(cls, course_id):
+    def _get_country_access_list(cls, course_key: CourseKey) -> List[str]:  # noqa: UP006
         """
         if a course is blacklist for two countries then course can be accessible from
         any where except these two countries.
         if a course is whitelist for two countries then course can be accessible from
         these countries only.
         Args:
-            course_id (str): course_id to look for
+            course_key: course to look for
         Returns:
-            List
             Consolidated list of accessible countries for given course
         """
 
@@ -498,7 +492,7 @@ class CountryAccessRule(models.Model):
 
         # Retrieve all rules in one database query, performing the "join" with the Country table
         rules_for_course = CountryAccessRule.objects.select_related('country').filter(
-            restricted_course__course_key=course_id
+            restricted_course__course_key=course_key
         )
 
         # Filter the rules into a whitelist and blacklist in one pass
@@ -516,7 +510,7 @@ class CountryAccessRule(models.Model):
         # that have access to the course.
         return list(whitelist_countries - blacklist_countries)
 
-    def __str__(self):
+    def __str__(self):  # noqa: DJ012
         if self.rule_type == self.WHITELIST_RULE:
             return _("Whitelist {country} for {course}").format(
                 course=str(self.restricted_course.course_key),
@@ -529,13 +523,13 @@ class CountryAccessRule(models.Model):
             )
 
     @classmethod
-    def invalidate_cache_for_course(cls, course_key):
+    def invalidate_cache_for_course(cls, course_key: CourseKey) -> None:
         """Invalidate the cache. """
         cache_key = cls.CACHE_KEY.format(course_key=course_key)
         cache.delete(cache_key)
         log.info("Invalidated country access list for course %s", course_key)
 
-    class Meta:
+    class Meta:  # noqa: DJ012
         """a course can be added with either black or white list.  """
         unique_together = (
             # This restriction ensures that a country is on
@@ -586,7 +580,7 @@ post_delete.connect(invalidate_country_rule_cache, sender=CountryAccessRule)
 post_delete.connect(invalidate_country_rule_cache, sender=RestrictedCourse)
 
 
-class CourseAccessRuleHistory(models.Model):
+class CourseAccessRuleHistory(models.Model):  # noqa: DJ008
     """
     History of course access rule changes.
 
@@ -596,7 +590,7 @@ class CourseAccessRuleHistory(models.Model):
 
     timestamp = models.DateTimeField(db_index=True, auto_now_add=True)
     course_key = CourseKeyField(max_length=255, db_index=True)
-    snapshot = models.TextField(null=True, blank=True)
+    snapshot = models.TextField(null=True, blank=True)  # noqa: DJ001
 
     DELETED_PLACEHOLDER = "DELETED"
 
@@ -664,8 +658,85 @@ class CourseAccessRuleHistory(models.Model):
             else:
                 CourseAccessRuleHistory.save_snapshot(restricted_course)
 
-    class Meta:
+    class Meta:  # noqa: DJ012
         get_latest_by = 'timestamp'
+
+
+class GlobalRestrictedCountry(models.Model):
+    """
+    Model to restrict access to specific countries globally.
+
+    .. no_pii:
+    """
+    country = models.ForeignKey(
+        "Country",
+        help_text="The country to be restricted.",
+        on_delete=models.CASCADE,
+        unique=True
+    )
+
+    CACHE_KEY = "embargo.global.restricted_countries"
+
+    @classmethod
+    def get_countries(cls):
+        """
+        Retrieve the set of restricted country codes from the cache or refresh it if not available.
+
+        Returns:
+            set: A set of restricted country codes.
+        """
+        return cache.get_or_set(cls.CACHE_KEY, cls._fetch_restricted_countries)
+
+    @classmethod
+    def is_country_restricted(cls, country_code):
+        """
+        Check if the given country code is restricted.
+
+        Args:
+            country_code (str): The country code to check.
+
+        Returns:
+            bool: True if the country is restricted, False otherwise.
+        """
+        return country_code in cls.get_countries()
+
+    @classmethod
+    def _fetch_restricted_countries(cls):
+        """
+        Fetch the set of restricted country codes from the database.
+
+        Returns:
+            set: A set of restricted country codes.
+        """
+        return set(cls.objects.values_list("country__country", flat=True))
+
+    @classmethod
+    def update_cache(cls):
+        """
+        Update the cache with the latest restricted country codes.
+        """
+        cache.set(cls.CACHE_KEY, cls._fetch_restricted_countries())
+
+    def save(self, *args, **kwargs):  # noqa: DJ012
+        """
+        Override save method to update cache on insert/update.
+        """
+        super().save(*args, **kwargs)
+        self.update_cache()
+
+    def delete(self, *args, **kwargs):
+        """
+        Override delete method to update cache on deletion.
+        """
+        super().delete(*args, **kwargs)
+        self.update_cache()
+
+    def __str__(self):  # noqa: DJ012
+        return f"{self.country.country.name} ({self.country.country})"
+
+    class Meta:  # noqa: DJ012
+        verbose_name = "Global Restricted Country"
+        verbose_name_plural = "Global Restricted Countries"
 
 
 # Connect the signals to the receivers so we record a history

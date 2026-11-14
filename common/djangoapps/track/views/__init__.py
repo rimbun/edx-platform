@@ -1,14 +1,15 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 
 import json
-import six
 
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+import six  # noqa: F401
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.http import HttpResponse
 from eventtracking import tracker as eventtracker
 from ipware.ip import get_client_ip
 
-from common.djangoapps.track import contexts, shim, tracker
+from common.djangoapps.track import contexts, shim, tracker  # noqa: F401
+from lms.djangoapps.utils import OptimizelyClient
 
 
 def _get_request_header(request, header_name, default=''):
@@ -74,7 +75,7 @@ def user_track(request):
     """
     try:
         username = request.user.username
-    except:  # lint-amnesty, pylint: disable=bare-except
+    except:  # pylint: disable=bare-except
         username = "anonymous"
 
     name = _get_request_value(request, 'event_type')
@@ -97,6 +98,17 @@ def user_track(request):
     with eventtracker.get_tracker().context('edx.course.browser', context_override):
         eventtracker.emit(name=name, data=data)
 
+    # TODO: VAN-1052: This event is added to track the KPIs for A/B experiment.
+    #  Remove it after the experiment has been paused.
+    if (
+        name == 'edx.course.home.resume_course.clicked' and
+        data.get('event_type') == 'start' and
+        request.user
+    ):
+        optimizely_client = OptimizelyClient.get_optimizely_client()
+        if optimizely_client:
+            optimizely_client.track('course_started', str(request.user.id))
+
     return HttpResponse('success')
 
 
@@ -111,7 +123,7 @@ def server_track(request, event_type, event, page=None):
 
     try:
         username = request.user.username
-    except:  # lint-amnesty, pylint: disable=bare-except
+    except:  # pylint: disable=bare-except
         username = "anonymous"
 
     context_override = _get_course_context(page)

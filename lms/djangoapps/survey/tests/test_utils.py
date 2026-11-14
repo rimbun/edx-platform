@@ -10,8 +10,10 @@ from django.test.client import Client
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.survey.models import SurveyForm
 from lms.djangoapps.survey.utils import check_survey_required_and_unanswered, is_survey_required_for_course
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 class SurveyModelsTests(ModuleStoreTestCase):
@@ -28,7 +30,7 @@ class SurveyModelsTests(ModuleStoreTestCase):
         self.client = Client()
 
         # Create two accounts
-        self.password = 'abc'
+        self.password = self.TEST_PASSWORD
         self.student = UserFactory.create(
             username='student', email='student@test.com', password=self.password,
         )
@@ -64,7 +66,7 @@ class SurveyModelsTests(ModuleStoreTestCase):
     def test_is_survey_required_for_course(self):
         """
         Assert the a requried course survey is when both the flags is set and a survey name
-        is set on the course descriptor
+        is set on the course block
         """
         assert is_survey_required_for_course(self.course)
 

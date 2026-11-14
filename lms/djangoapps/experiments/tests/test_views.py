@@ -2,12 +2,11 @@
 Tests for experimentation views
 """
 
-
-import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
+import django
 import six.moves.urllib.parse
-from datetime import timedelta
 from django.conf import settings
 from django.core.handlers.wsgi import WSGIRequest
 from django.test.utils import override_settings
@@ -16,25 +15,27 @@ from django.utils.timezone import now
 from rest_framework.test import APITestCase
 
 from common.djangoapps.student.tests.factories import UserFactory
+from common.test.utils import assert_dict_contains_subset
 from lms.djangoapps.course_blocks.transformers.tests.helpers import ModuleStoreTestCase
 from lms.djangoapps.experiments.factories import ExperimentDataFactory, ExperimentKeyValueFactory
-from lms.djangoapps.experiments.models import ExperimentData  # lint-amnesty, pylint: disable=unused-import
+from lms.djangoapps.experiments.models import ExperimentData  # pylint: disable=unused-import
 from lms.djangoapps.experiments.serializers import ExperimentDataSerializer
-from xmodule.modulestore.tests.factories import CourseFactory
+from openedx.core.djangolib.testing.utils import skip_unless_lms
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 CROSS_DOMAIN_REFERER = 'https://ecommerce.edx.org'
 
 
-class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
+class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # pylint: disable=missing-class-docstring
 
-    def assert_data_created_for_user(self, user, method='post', status=201):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def assert_data_created_for_user(self, user, method='post', status=201):  # pylint: disable=missing-function-docstring
         url = reverse('api_experiments:v0:data-list')
         data = {
             'experiment_id': 1,
             'key': 'foo',
             'value': 'bar',
         }
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
         response = getattr(self.client, method)(url, data)
         assert response.status_code == status
 
@@ -42,7 +43,7 @@ class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amne
         ExperimentData.objects.get(user=user)
 
         data['user'] = user.username
-        self.assertDictContainsSubset(data, response.data)
+        assert_dict_contains_subset(self, data, response.data)
 
     def test_list_permissions(self):
         """ Users should only be able to list their own data. """
@@ -54,7 +55,7 @@ class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amne
 
         ExperimentDataFactory()
         datum = ExperimentDataFactory(user=user)
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
 
         response = self.client.get(url)
         assert response.status_code == 200
@@ -64,7 +65,7 @@ class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amne
         """ Users should be able to filter by the experiment_id and key fields. """
         url = reverse('api_experiments:v0:data-list')
         user = UserFactory()
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
 
         experiment_id = 1
         ExperimentDataFactory()
@@ -96,12 +97,12 @@ class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amne
         response = self.client.get(url)
         assert response.status_code == 401
 
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
         response = self.client.get(url)
         assert response.status_code == 200
 
         other_user = UserFactory()
-        self.client.login(username=other_user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=other_user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
         response = self.client.get(url)
         assert response.status_code == 404
 
@@ -119,7 +120,7 @@ class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amne
             'key': 'foo',
             'value': 'bar',
         }
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
 
         # Users can create data for themselves
         response = self.client.post(url, data)
@@ -159,22 +160,27 @@ class ExperimentDataViewSetTests(APITestCase, ModuleStoreTestCase):  # lint-amne
         response = self.client.patch(url, data)
         assert response.status_code == 401
 
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
         response = self.client.patch(url, data)
         assert response.status_code == 200
 
-        self.client.login(username=other_user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=other_user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
         response = self.client.patch(url, data)
         assert response.status_code == 404
+
+    def test_loads_valid_csrf_trusted_origins_list(self):
+        """checking CSRF_TRUSTED_ORIGINS here. in django4.2 they will require schemes"""
+        if django.VERSION[0] < 4:  # for greater than django 3.2 use schemes.
+            assert settings.CSRF_TRUSTED_ORIGINS == ['.example.com']
+        else:
+            assert settings.CSRF_TRUSTED_ORIGINS == ['https://*.example.com']
 
 
 def cross_domain_config(func):
     """Decorator for configuring a cross-domain request. """
-    feature_flag_decorator = patch.dict(settings.FEATURES, {
-        'ENABLE_CORS_HEADERS': True,
-        'ENABLE_CROSS_DOMAIN_CSRF_COOKIE': True
-    })
     settings_decorator = override_settings(
+        ENABLE_CORS_HEADERS=True,
+        ENABLE_CROSS_DOMAIN_CSRF_COOKIE=True,
         CORS_ORIGIN_WHITELIST=['https://ecommerce.edx.org'],
         CSRF_COOKIE_NAME="prod-edx-csrftoken",
         CROSS_DOMAIN_CSRF_COOKIE_NAME="prod-edx-csrftoken",
@@ -182,14 +188,12 @@ def cross_domain_config(func):
     )
     is_secure_decorator = patch.object(WSGIRequest, 'is_secure', return_value=True)
 
-    return feature_flag_decorator(
-        settings_decorator(
-            is_secure_decorator(func)
-        )
+    return settings_decorator(
+        is_secure_decorator(func)
     )
 
 
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 class ExperimentCrossDomainTests(APITestCase):
     """Tests for handling cross-domain requests"""
 
@@ -261,7 +265,7 @@ class ExperimentCrossDomainTests(APITestCase):
         )
 
 
-class ExperimentKeyValueViewSetTests(APITestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
+class ExperimentKeyValueViewSetTests(APITestCase):  # pylint: disable=missing-class-docstring
 
     def test_permissions(self):
         """ Staff access is required for write operations. """
@@ -280,7 +284,7 @@ class ExperimentKeyValueViewSetTests(APITestCase):  # lint-amnesty, pylint: disa
         assert response.status_code == 200
 
         user = UserFactory(is_staff=False)
-        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
 
         response = self.client.put(url, {})
         assert response.status_code == 403
@@ -300,7 +304,7 @@ class ExperimentUserMetaDataViewTests(APITestCase, ModuleStoreTestCase):
         lookup_user = UserFactory()
         lookup_course = CourseFactory.create(start=now() - timedelta(days=30))
         call_args = [lookup_user.username, lookup_course.id]
-        self.client.login(username=lookup_user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=lookup_user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
 
         response = self.client.get(reverse('api_experiments:user_metadata', args=call_args))
         assert response.status_code == 200
@@ -312,7 +316,7 @@ class ExperimentUserMetaDataViewTests(APITestCase, ModuleStoreTestCase):
         call_args = [lookup_user.username, lookup_course.id]
         staff_user = UserFactory(is_staff=True)
 
-        self.client.login(username=staff_user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        self.client.login(username=staff_user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
 
         response = self.client.get(reverse('api_experiments:user_metadata', args=call_args))
         assert response.status_code == 200
@@ -334,8 +338,8 @@ class ExperimentUserMetaDataViewTests(APITestCase, ModuleStoreTestCase):
         """ Request fails when not course not found  """
         lookup_user = UserFactory()
         lookup_course = CourseFactory.create(start=now() - timedelta(days=30))
-        call_args = [lookup_user.username, lookup_course.id]  # lint-amnesty, pylint: disable=unused-variable
-        self.client.login(username=lookup_user.username, password=UserFactory._DEFAULT_PASSWORD)  # lint-amnesty, pylint: disable=protected-access
+        call_args = [lookup_user.username, lookup_course.id]  # pylint: disable=unused-variable  # noqa: F841
+        self.client.login(username=lookup_user.username, password=UserFactory._DEFAULT_PASSWORD)  # pylint: disable=protected-access
         bogus_course_name = str(lookup_course.id) + '_FOOBAR'
 
         call_args_with_bogus_course = [lookup_user.username, bogus_course_name]

@@ -91,7 +91,7 @@ class AppVersionUpgrade(MiddlewareMixin):
         Returns:
             dict: Containing app version info
         """
-        user_agent = request.META.get('HTTP_USER_AGENT')
+        user_agent = request.headers.get('User-Agent')
         if user_agent:
             platform = self._get_platform(request, user_agent)
             if platform:
@@ -99,7 +99,7 @@ class AppVersionUpgrade(MiddlewareMixin):
                 request_cache_dict[self.USER_APP_VERSION] = platform.version
                 last_supported_date_cache_key = self._get_cache_key_name(
                     self.LAST_SUPPORTED_DATE_HEADER,
-                    platform.version
+                    platform.NAME + platform.version
                 )
                 latest_version_cache_key = self._get_cache_key_name(self.LATEST_VERSION_HEADER, platform.NAME)
                 cached_data = cache.get_many([last_supported_date_cache_key, latest_version_cache_key])

@@ -34,13 +34,13 @@ Decisions
    part of the app's domain API), then test-relevant Python APIs should be
    defined/exported in an intentional Python module called "api_for_tests.py".
 
-Exmaples
+Examples
 ~~~~~~~~
 
 As a reference example, see the Python APIs exposed by the grades app in the
 `grades/api.py module`_.
 
-.. _`grades/api.py module`: https://github.com/edx/edx-platform/blob/master/lms/djangoapps/grades/api.py
+.. _`grades/api.py module`: https://github.com/openedx/edx-platform/blob/master/lms/djangoapps/grades/api.py
 
 
 Consequences

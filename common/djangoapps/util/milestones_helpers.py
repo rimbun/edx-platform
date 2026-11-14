@@ -2,8 +2,8 @@
 Utility library for working with the edx-milestones app
 """
 from django.conf import settings
-from django.utils.translation import ugettext as _
-from edx_toggles.toggles import SettingDictToggle
+from django.utils.translation import gettext as _
+from edx_toggles.toggles import SettingToggle
 from milestones import api as milestones_api
 from milestones.exceptions import InvalidMilestoneRelationshipTypeException, InvalidUserException
 from milestones.models import MilestoneRelationshipType
@@ -13,8 +13,7 @@ from opaque_keys.edx.keys import CourseKey
 
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.lib.cache_utils import get_cache
-from xmodule.modulestore.django import modulestore
-
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 NAMESPACE_CHOICES = {
     'ENTRANCE_EXAM': 'entrance_exams'
@@ -23,15 +22,15 @@ NAMESPACE_CHOICES = {
 REQUEST_CACHE_NAME = "milestones"
 
 # TODO this should be moved to edx/edx-milestones
-# .. toggle_name: FEATURES['MILESTONES_APP']
-# .. toggle_implementation: SettingDictToggle
+# .. toggle_name: MILESTONES_APP
+# .. toggle_implementation: SettingToggle
 # .. toggle_default: False
 # .. toggle_description: Enable the milestones application, which manages significant Course and/or Student events in
-#   the Open edX platform. (see https://github.com/edx/edx-milestones) Note that this feature is required to enable
+#   the Open edX platform. (see https://github.com/openedx/edx-milestones) Note that this feature is required to enable
 #   course pre-requisites.
 # .. toggle_use_cases: open_edx
 # .. toggle_creation_date: 2014-11-21
-ENABLE_MILESTONES_APP = SettingDictToggle("FEATURES", "MILESTONES_APP", default=False, module_name=__name__)
+ENABLE_MILESTONES_APP = SettingToggle("MILESTONES_APP", default=False, module_name=__name__)
 
 
 def get_namespace_choices():
@@ -45,7 +44,7 @@ def is_prerequisite_courses_enabled():
     """
     Returns boolean indicating prerequisite courses enabled system wide or not.
     """
-    return settings.FEATURES.get('ENABLE_PREREQUISITE_COURSES') and ENABLE_MILESTONES_APP.is_enabled()
+    return settings.ENABLE_PREREQUISITE_COURSES and ENABLE_MILESTONES_APP.is_enabled()
 
 
 def add_prerequisite_course(course_key, prerequisite_course_key):
@@ -150,35 +149,35 @@ def get_pre_requisite_courses_not_completed(user, enrolled_courses):
     return pre_requisite_courses
 
 
-def get_prerequisite_courses_display(course_descriptor):
+def get_prerequisite_courses_display(course_block):
     """
     It would retrieve pre-requisite courses, make display strings
     and return list of dictionary with course key as 'key' field
     and course display name as `display` field.
     """
     pre_requisite_courses = []
-    if is_prerequisite_courses_enabled() and course_descriptor.pre_requisite_courses:
-        for course_id in course_descriptor.pre_requisite_courses:
+    if is_prerequisite_courses_enabled() and course_block.pre_requisite_courses:
+        for course_id in course_block.pre_requisite_courses:
             course_key = CourseKey.from_string(course_id)
-            required_course_descriptor = modulestore().get_course(course_key)
+            required_course_block = modulestore().get_course(course_key)
             prc = {
                 'key': course_key,
-                'display': get_course_display_string(required_course_descriptor)
+                'display': get_course_display_string(required_course_block)
             }
             pre_requisite_courses.append(prc)
     return pre_requisite_courses
 
 
-def get_course_display_string(descriptor):
+def get_course_display_string(block):
     """
     Returns a string to display for a course or course overview.
 
     Arguments:
-        descriptor (CourseBlock|CourseOverview): a course or course overview.
+        block (CourseBlock|CourseOverview): a course or course overview.
     """
     return ' '.join([
-        descriptor.display_org_with_default,
-        descriptor.display_number_with_default
+        block.display_org_with_default,
+        block.display_number_with_default
     ])
 
 
@@ -233,7 +232,7 @@ def get_required_content(course_key, user):
             # For each outstanding milestone, see if this content is one of its fulfillment paths
             for path_key in milestone_paths:
                 milestone_path = milestone_paths[path_key]
-                if milestone_path.get('content') and len(milestone_path['content']):  # lint-amnesty, pylint: disable=len-as-condition
+                if milestone_path.get('content') and len(milestone_path['content']):  # pylint: disable=len-as-condition
                     for content in milestone_path['content']:
                         required_content.append(content)
         else:

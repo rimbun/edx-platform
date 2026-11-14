@@ -6,7 +6,7 @@ Tests for Course Teams configuration.
 import ddt
 from django.test import TestCase
 
-from ..teams_config import TeamsConfig, TeamsetConfig, MANAGED_TEAM_MAX_TEAM_SIZE, DEFAULT_COURSE_RUN_MAX_TEAM_SIZE
+from ..teams_config import DEFAULT_COURSE_RUN_MAX_TEAM_SIZE, MANAGED_TEAM_MAX_TEAM_SIZE, TeamsConfig, TeamsetConfig
 
 
 @ddt.ddt
@@ -23,11 +23,27 @@ class TeamsConfigTests(TestCase):
         {"team_sets": "not-a-list"},
         {"team_sets": ["not-a-dict"]},
         {"topics": None, "random_key": 88},
+        {
+            "max_team_size": 5,
+            "topics": [
+                {
+                    "id": "bananas",
+                    "max_team_size": 10,
+                    "type": "private_managed",
+                },
+                {
+                    "id": "apples",
+                    "max_team_size": 6,
+                    "type": "open",
+                },
+            ],
+            "enabled": False
+        }
     )
     def test_disabled_team_configs(self, data):
         """
         Test that configuration that doesn't specify any valid team-sets
-        is considered disabled.
+        or specifically defines enabled as False is considered disabled
         """
         teams_config = TeamsConfig(data)
         assert not teams_config.is_enabled
@@ -58,6 +74,7 @@ class TeamsConfigTests(TestCase):
     }
 
     OUTPUT_DATA_1 = {
+        "enabled": True,
         "max_team_size": 5,
         "team_sets": [
             {
@@ -66,6 +83,7 @@ class TeamsConfigTests(TestCase):
                 "description": "",
                 "max_team_size": 10,
                 "type": "private_managed",
+                "user_partition_id": None,
             },
             {
                 "id": "bokonism",
@@ -73,6 +91,7 @@ class TeamsConfigTests(TestCase):
                 "description": "Busy busy busy",
                 "max_team_size": 2,
                 "type": "open",
+                "user_partition_id": None,
             },
         ]
     }
@@ -111,6 +130,7 @@ class TeamsConfigTests(TestCase):
     }
 
     OUTPUT_DATA_2 = {
+        "enabled": True,
         "max_team_size": DEFAULT_COURSE_RUN_MAX_TEAM_SIZE,
         "team_sets": [
             {
@@ -119,13 +139,43 @@ class TeamsConfigTests(TestCase):
                 "description": "",
                 "max_team_size": None,
                 "type": "open",
+                "user_partition_id": None,
             },
+        ],
+    }
+    INPUT_DATA_3 = {}
+    OUTPUT_DATA_3 = {
+        # When starting with a default blank config, there are no teamsets configured, and as such, teamsets is
+        # disabled, so after processing the config the "enabled" field should be set to False.
+        "enabled": False,
+        "max_team_size": DEFAULT_COURSE_RUN_MAX_TEAM_SIZE,
+        "team_sets": [],
+    }
+    INPUT_DATA_4 = {
+        "team_sets": [dict(id="test-teamset", name="test", description="test")]
+    }
+    OUTPUT_DATA_4 = {
+        # If teamsets are provided, but a value for "enabled" isn't, then the presence of teamsets indicates that
+        # teams should be considered enabled, and the "enabled" field should be set to True.
+        "enabled": True,
+        "max_team_size": DEFAULT_COURSE_RUN_MAX_TEAM_SIZE,
+        "team_sets": [
+            dict(
+                id="test-teamset",
+                name="test",
+                description="test",
+                type="open",
+                max_team_size=None,
+                user_partition_id=None
+            ),
         ],
     }
 
     @ddt.data(
         (INPUT_DATA_1, OUTPUT_DATA_1),
         (INPUT_DATA_2, OUTPUT_DATA_2),
+        (INPUT_DATA_3, OUTPUT_DATA_3),
+        (INPUT_DATA_4, OUTPUT_DATA_4),
     )
     @ddt.unpack
     def test_teams_config_round_trip(self, input_data, expected_output_data):
@@ -135,7 +185,7 @@ class TeamsConfigTests(TestCase):
         """
         teams_config = TeamsConfig(input_data)
         actual_output_data = teams_config.cleaned_data
-        self.assertDictEqual(actual_output_data, expected_output_data)
+        self.assertDictEqual(actual_output_data, expected_output_data)  # noqa: PT009
 
     @ddt.data(
         (None, None, "open", DEFAULT_COURSE_RUN_MAX_TEAM_SIZE),

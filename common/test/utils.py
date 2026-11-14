@@ -1,15 +1,22 @@
 """
 General testing utilities.
 """
-
-
 import functools
 import sys
 from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
 from django.dispatch import Signal
 from markupsafe import escape
-from mock import Mock, patch
+
+
+def assert_dict_contains_subset(test_case, subset, superset):
+    """
+    Assert that `superset` includes all key/value pairs from `subset`.
+    """
+    test_case.assertTrue(  # noqa: PT009
+        all(item in superset.items() for item in subset.items())
+    )
 
 
 @contextmanager
@@ -24,7 +31,7 @@ def nostderr():
         """ /dev/null incarnation as output-stream-like object """
         def write(self, _):
             """ Write method - just does nothing"""
-            pass  # lint-amnesty, pylint: disable=unnecessary-pass
+            pass  # pylint: disable=unnecessary-pass
 
     sys.stderr = Devnull()
     try:
@@ -85,11 +92,14 @@ class MockSignalHandlerMixin:
 
         """
         with patch.object(module, signal, new=Signal()) as mock_signal:
-            def handler(*args, **kwargs):  # pylint: disable=unused-argument
+            mock_handler = Mock()
+            # Wrap the mock in a real callable so inspect.iscoroutinefunction() works
+
+            def handler(*h_args, **h_kwargs):
                 """No-op signal handler."""
-                pass  # lint-amnesty, pylint: disable=unnecessary-pass
-            mock_handler = Mock(spec=handler)
-            mock_signal.connect(mock_handler)
+                return mock_handler(*h_args, **h_kwargs)
+
+            mock_signal.connect(handler)
             yield
             assert mock_handler.called
             mock_args, mock_kwargs = mock_handler.call_args
@@ -115,16 +125,16 @@ def skip_signal(signal, **kwargs):
         signal.connect(**kwargs)
 
 
-class MockS3BotoMixin:
+class MockS3Boto3Mixin:
     """
-    TestCase mixin that mocks the S3BotoStorage save method and s3 connection.
+    TestCase mixin that mocks the S3Boto3Storage save method and s3 connection.
     """
     def setUp(self):
         super().setUp()
-        self._mocked_connection = patch('boto.connect_s3', return_value=Mock())
+        self._mocked_connection = patch('boto3.resource', return_value=Mock())
         self.mocked_connection = self._mocked_connection.start()
 
-        self.patcher = patch('storages.backends.s3boto.S3BotoStorage.save')
+        self.patcher = patch('storages.backends.s3boto3.S3Boto3Storage.save')
         self.patcher.start()
 
     def tearDown(self):

@@ -33,6 +33,8 @@
             <%  });
             } %>
             <% if ( required ) { %> aria-required="true" required<% } %>
+            <% if ( typeof disabled !== 'undefined' && disabled ) { %> disabled<% } %>
+
         >
             <% _.each(options, function(el) { %>
                 <option value="<%- el.value%>"<% if ( el.default ) { %> data-isdefault="true" selected<% } %>><%- el.name %></option>
@@ -101,6 +103,7 @@
             <% if ( restrictions.max_length && type !== 'password' ) { %> maxlength="<%- restrictions.max_length %>"<% } %>
             <% if ( restrictions.readonly )   { %> readonly <% } %>
             <% if ( required ) { %> required<% } %>
+            <% if ( defaultValue === true ) { %> checked<% } %>
             <% if ( typeof errorMessages !== 'undefined' ) {
                 _.each(errorMessages, function( msg, type ) {%>
                     data-errormsg-<%- type %>="<%- msg %>"
@@ -144,10 +147,12 @@
             <button type="button" class="enterprise-login field-link"><%- gettext("Sign in with your company or school") %></button>
         <% } %>
     <% } %>
-    <% if( form === 'password-reset' && name === 'email' ) { %>
+    <% if( (showRegisterLinks || loginIssueSupportLink) && form === 'password-reset' && name === 'email' ) { %>
         <button type="button" class="reset-help field-link" ><i class="fa fa-caret-right" /><%- gettext("Need other help signing in?") %></button>
         <div id="reset-help" style="display:none">
-            <button type="button" class="field-link form-toggle" data-type="register"><%- gettext("Create an account") %></button>
+            <% if ( showRegisterLinks ) { %>
+                <button type="button" class="field-link form-toggle" data-type="register"><%- gettext("Create an account") %></button>
+            <% } %>
             <% if ( loginIssueSupportLink ) { %>
                 <span><a  class="field-link" href="<%- loginIssueSupportLink %>"><%- gettext("Other sign-in issues") %></a></span>
             <% } %>

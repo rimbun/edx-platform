@@ -19,7 +19,12 @@ class DiscussionLtiCourseTabTestCase(TabTestCase):
 
     def setUp(self):
         super().setUp()
-        self.discussion_config = DiscussionsConfiguration.objects.create(context_key=self.course.id, enabled=False)
+        self.discussion_config = DiscussionsConfiguration.objects.create(
+            context_key=self.course.id,
+            enabled=False,
+            # Pick a provider that supports LTI
+            provider_type="yellowdig",
+        )
         self.discussion_config.lti_configuration = LtiConfiguration.objects.create(
             config_store=LtiConfiguration.CONFIG_ON_DB,
             lti_1p1_launch_url='http://test.url',
@@ -40,7 +45,7 @@ class DiscussionLtiCourseTabTestCase(TabTestCase):
         )
 
     @ddt.data(True, False)
-    @patch('common.djangoapps.student.models.CourseEnrollment.is_enrolled', Mock(return_value=True))
+    @patch('common.djangoapps.student.models.course_enrollment.CourseEnrollment.is_enrolled', Mock(return_value=True))
     def test_pii_params_on_discussion_lti_tab(self, discussion_config_enabled):
         self.discussion_config.enabled = discussion_config_enabled
         self.discussion_config.save()

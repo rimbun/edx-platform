@@ -1,12 +1,16 @@
 /* globals DiscussionTopicMenuView, DiscussionUtil */
 (function() {
     'use strict';
+
     if (Backbone) {
         this.DiscussionThreadEditView = Backbone.View.extend({
             tagName: 'form',
             events: {
                 submit: 'updateHandler',
-                'click .post-cancel': 'cancelHandler'
+                'click .post-cancel': 'cancelHandler',
+                'keypress input:not(.wmd-input)': function(event) {
+                    return DiscussionUtil.ignoreEnterKey(event);
+                }
             },
 
             attributes: {

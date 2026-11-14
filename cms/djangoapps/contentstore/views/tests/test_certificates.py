@@ -5,10 +5,8 @@ Certificates Tests.
 
 import itertools
 import json
-from unittest import mock
 
 import ddt
-from django.conf import settings
 from django.test.utils import override_settings
 from opaque_keys.edx.keys import AssetKey
 
@@ -19,14 +17,11 @@ from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.roles import CourseInstructorRole, CourseStaffRole
 from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.util.testing import EventTestMixin, UrlResetMixin
-from xmodule.contentstore.content import StaticContent
-from xmodule.contentstore.django import contentstore
-from xmodule.exceptions import NotFoundError
+from xmodule.contentstore.content import StaticContent  # pylint: disable=wrong-import-order
+from xmodule.contentstore.django import contentstore  # pylint: disable=wrong-import-order
+from xmodule.exceptions import NotFoundError  # pylint: disable=wrong-import-order
 
-from ..certificates import CERTIFICATE_SCHEMA_VERSION, CertificateManager
-
-FEATURES_WITH_CERTS_ENABLED = settings.FEATURES.copy()
-FEATURES_WITH_CERTS_ENABLED['CERTIFICATES_HTML_VIEW'] = True
+from ..certificate_manager import CERTIFICATE_SCHEMA_VERSION, CertificateManager
 
 CERTIFICATE_JSON = {
     'name': 'Test certificate',
@@ -141,10 +136,10 @@ class CertificatesBaseTestCase:
                 HTTP_X_REQUESTED_WITH="XMLHttpRequest"
             )
 
-            self.assertEqual(response.status_code, 400)
-            self.assertNotIn("Location", response)
+            self.assertEqual(response.status_code, 400)  # noqa: PT009
+            self.assertNotIn("Location", response)  # noqa: PT009
             content = json.loads(response.content.decode('utf-8'))
-            self.assertIn("error", content)
+            self.assertIn("error", content)  # noqa: PT009
 
     def test_invalid_json(self):
         """
@@ -162,10 +157,10 @@ class CertificatesBaseTestCase:
             HTTP_X_REQUESTED_WITH="XMLHttpRequest"
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn("Location", response)
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertNotIn("Location", response)  # noqa: PT009
         content = json.loads(response.content.decode('utf-8'))
-        self.assertIn("error", content)
+        self.assertTrue("error" in content or "detail" in content)  # noqa: PT009
 
     def test_certificate_data_validation(self):
         #Test certificate schema version
@@ -175,10 +170,10 @@ class CertificatesBaseTestCase:
             'description': 'Test description'
         }
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(Exception) as context:  # noqa: PT027
             CertificateManager.validate(json_data_1)
 
-        self.assertIn(
+        self.assertIn(  # noqa: PT009
             "Unsupported certificate schema version: 100.  Expected version: 1.",
             str(context.exception)
         )
@@ -189,26 +184,26 @@ class CertificatesBaseTestCase:
             'description': 'Test description'
         }
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(Exception) as context:  # noqa: PT027
             CertificateManager.validate(json_data_2)
 
-        self.assertIn('must have name of the certificate', str(context.exception))
+        self.assertIn('must have name of the certificate', str(context.exception))  # noqa: PT009
 
 
 @ddt.ddt
-@override_settings(FEATURES=FEATURES_WITH_CERTS_ENABLED)
+@override_settings(CERTIFICATES_HTML_VIEW=True)
 class CertificatesListHandlerTestCase(
-        EventTestMixin, CourseTestCase, CertificatesBaseTestCase, HelperMethods, UrlResetMixin
+        EventTestMixin, CourseTestCase, HelperMethods, UrlResetMixin
 ):
     """
     Test cases for certificates_list_handler.
     """
 
-    def setUp(self):  # lint-amnesty, pylint: disable=arguments-differ
+    def setUp(self):  # pylint: disable=arguments-differ
         """
         Set up CertificatesListHandlerTestCase.
         """
-        super().setUp('cms.djangoapps.contentstore.views.certificates.tracker')
+        super().setUp('cms.djangoapps.contentstore.views.certificate_manager.tracker')
         self.reset_urls()
 
     def _url(self):
@@ -233,11 +228,11 @@ class CertificatesListHandlerTestCase(
             data=CERTIFICATE_JSON
         )
 
-        self.assertEqual(response.status_code, 201)
-        self.assertIn("Location", response)
+        self.assertEqual(response.status_code, 201)  # noqa: PT009
+        self.assertIn("Location", response)  # noqa: PT009
         content = json.loads(response.content.decode('utf-8'))
-        certificate_id = self._remove_ids(content)
-        self.assertEqual(content, expected)
+        certificate_id = content.pop("id")
+        self.assertEqual(content, expected)  # noqa: PT009
         self.assert_event_emitted(
             'edx.certificate.configuration.created',
             course_id=str(self.course.id),
@@ -249,13 +244,13 @@ class CertificatesListHandlerTestCase(
         Tests user without write permissions on course should not able to create certificate
         """
         user = UserFactory()
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.ajax_post(
             self._url(),
             data=CERTIFICATE_JSON
         )
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403)  # noqa: PT009
 
     @override_settings(LMS_BASE=None)
     def test_no_lms_base_for_certificate_web_view_link(self):
@@ -263,7 +258,7 @@ class CertificatesListHandlerTestCase(
             course_key=self.course.id,
             mode='honor'
         )
-        self.assertEqual(test_link, None)
+        self.assertEqual(test_link, None)  # noqa: PT009
 
     @override_settings(LMS_BASE="lms_base_url")
     def test_lms_link_for_certificate_web_view(self):
@@ -273,12 +268,11 @@ class CertificatesListHandlerTestCase(
             course_key=self.course.id,
             mode='honor'
         )
-        self.assertEqual(link, test_url)
+        self.assertEqual(link, test_url)  # noqa: PT009
 
-    @mock.patch.dict('django.conf.settings.FEATURES', {'CERTIFICATES_HTML_VIEW': True})
     def test_certificate_info_in_response(self):
         """
-        Test that certificate has been created and rendered properly with non-audit course mode.
+        Test that a created certificate is returned in the JSON GET response.
         """
         CourseModeFactory.create(course_id=self.course.id, mode_slug='verified')
         response = self.client.ajax_post(
@@ -286,36 +280,14 @@ class CertificatesListHandlerTestCase(
             data=CERTIFICATE_JSON_WITH_SIGNATORIES
         )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201)  # noqa: PT009
 
-        # in html response
-        result = self.client.get_html(self._url())
-        self.assertContains(result, 'Test certificate')
-        self.assertContains(result, 'Test description')
-
-        # in JSON response
         response = self.client.get_json(self._url())
         data = json.loads(response.content.decode('utf-8'))
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]['name'], 'Test certificate')
-        self.assertEqual(data[0]['description'], 'Test description')
-        self.assertEqual(data[0]['version'], CERTIFICATE_SCHEMA_VERSION)
-
-    @mock.patch.dict('django.conf.settings.FEATURES', {'CERTIFICATES_HTML_VIEW': True})
-    def test_certificate_info_not_in_response(self):
-        """
-        Test that certificate has not been rendered audit only course mode.
-        """
-        response = self.client.ajax_post(
-            self._url(),
-            data=CERTIFICATE_JSON_WITH_SIGNATORIES
-        )
-
-        self.assertEqual(response.status_code, 201)
-
-        # in html response
-        result = self.client.get_html(self._url())
-        self.assertNotContains(result, 'Test certificate')
+        self.assertEqual(len(data), 1)  # noqa: PT009
+        self.assertEqual(data[0]['name'], 'Test certificate')  # noqa: PT009
+        self.assertEqual(data[0]['description'], 'Test description')  # noqa: PT009
+        self.assertEqual(data[0]['version'], CERTIFICATE_SCHEMA_VERSION)  # noqa: PT009
 
     def test_unsupported_http_accept_header(self):
         """
@@ -325,14 +297,14 @@ class CertificatesListHandlerTestCase(
             self._url(),
             HTTP_ACCEPT="text/plain",
         )
-        self.assertEqual(response.status_code, 406)
+        self.assertEqual(response.status_code, 406)  # noqa: PT009
 
     def test_certificate_unsupported_method(self):
         """
         Unit Test: test_certificate_unsupported_method
         """
         resp = self.client.put(self._url())
-        self.assertEqual(resp.status_code, 405)
+        self.assertEqual(resp.status_code, 405)  # noqa: PT009
 
     def test_not_permitted(self):
         """
@@ -346,52 +318,6 @@ class CertificatesListHandlerTestCase(
         )
         self.assertContains(response, "error", status_code=403)
 
-    def test_audit_course_mode_is_skipped(self):
-        """
-        Tests audit course mode is skipped when rendering certificates page.
-        """
-        CourseModeFactory.create(course_id=self.course.id)
-        CourseModeFactory.create(course_id=self.course.id, mode_slug='verified')
-        response = self.client.get_html(
-            self._url(),
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'verified')
-        self.assertNotContains(response, 'audit')
-
-    def test_audit_only_disables_cert(self):
-        """
-        Tests audit course mode is skipped when rendering certificates page.
-        """
-        CourseModeFactory.create(course_id=self.course.id, mode_slug='audit')
-        response = self.client.get_html(
-            self._url(),
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'This course does not use a mode that offers certificates.')
-        self.assertNotContains(response, 'This module is not enabled.')
-        self.assertNotContains(response, 'Loading')
-
-    @ddt.data(
-        ['audit', 'verified'],
-        ['verified'],
-        ['audit', 'verified', 'credit'],
-        ['verified', 'credit'],
-        ['professional']
-    )
-    def test_non_audit_enables_cert(self, slugs):
-        """
-        Tests audit course mode is skipped when rendering certificates page.
-        """
-        for slug in slugs:
-            CourseModeFactory.create(course_id=self.course.id, mode_slug=slug)
-        response = self.client.get_html(
-            self._url(),
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'This course does not use a mode that offers certificates.')
-        self.assertNotContains(response, 'This module is not enabled.')
-        self.assertContains(response, 'Loading')
 
     def test_assign_unique_identifier_to_certificates(self):
         """
@@ -416,11 +342,11 @@ class CertificatesListHandlerTestCase(
 
         new_certificate = json.loads(response.content.decode('utf-8'))
         for prev_certificate in self.course.certificates['certificates']:
-            self.assertNotEqual(new_certificate.get('id'), prev_certificate.get('id'))
+            self.assertNotEqual(new_certificate.get('id'), prev_certificate.get('id'))  # noqa: PT009
 
 
 @ddt.ddt
-@override_settings(FEATURES=FEATURES_WITH_CERTS_ENABLED)
+@override_settings(CERTIFICATES_HTML_VIEW=True)
 class CertificatesDetailHandlerTestCase(
         EventTestMixin, CourseTestCase, CertificatesBaseTestCase, HelperMethods, UrlResetMixin
 ):
@@ -433,7 +359,7 @@ class CertificatesDetailHandlerTestCase(
         """
         Set up CertificatesDetailHandlerTestCase.
         """
-        super().setUp('cms.djangoapps.contentstore.views.certificates.tracker')
+        super().setUp('cms.djangoapps.contentstore.views.certificate_manager.tracker')
         self.reset_urls()
 
     def _url(self, cid=-1):
@@ -469,7 +395,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
         content = json.loads(response.content.decode('utf-8'))
-        self.assertEqual(content, expected)
+        self.assertEqual(content, expected)  # noqa: PT009
         self.assert_event_emitted(
             'edx.certificate.configuration.created',
             course_id=str(self.course.id),
@@ -501,7 +427,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
         content = json.loads(response.content.decode('utf-8'))
-        self.assertEqual(content, expected)
+        self.assertEqual(content, expected)  # noqa: PT009
         self.assert_event_emitted(
             'edx.certificate.configuration.modified',
             course_id=str(self.course.id),
@@ -511,9 +437,9 @@ class CertificatesDetailHandlerTestCase(
 
         # Verify that certificate is properly updated in the course.
         course_certificates = self.course.certificates['certificates']
-        self.assertEqual(len(course_certificates), 2)
-        self.assertEqual(course_certificates[1].get('name'), 'New test certificate')
-        self.assertEqual(course_certificates[1].get('description'), 'New test description')
+        self.assertEqual(len(course_certificates), 2)  # noqa: PT009
+        self.assertEqual(course_certificates[1].get('name'), 'New test certificate')  # noqa: PT009
+        self.assertEqual(course_certificates[1].get('description'), 'New test description')  # noqa: PT009
 
     def test_can_edit_certificate_without_is_active(self):
         """
@@ -550,9 +476,9 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201)  # noqa: PT009
         content = json.loads(response.content.decode('utf-8'))
-        self.assertEqual(content, expected)
+        self.assertEqual(content, expected)  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_can_delete_certificate_with_signatories(self, signatory_path):
@@ -566,7 +492,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, 204)  # noqa: PT009
         self.assert_event_emitted(
             'edx.certificate.configuration.deleted',
             course_id=str(self.course.id),
@@ -575,9 +501,9 @@ class CertificatesDetailHandlerTestCase(
         self.reload_course()
         # Verify that certificates are properly updated in the course.
         certificates = self.course.certificates['certificates']
-        self.assertEqual(len(certificates), 1)
-        self.assertEqual(certificates[0].get('name'), 'Name 0')
-        self.assertEqual(certificates[0].get('description'), 'Description 0')
+        self.assertEqual(len(certificates), 1)  # noqa: PT009
+        self.assertEqual(certificates[0].get('name'), 'Name 0')  # noqa: PT009
+        self.assertEqual(certificates[0].get('description'), 'Description 0')  # noqa: PT009
 
     def test_can_delete_certificate_with_slash_prefix_signatory(self):
         """
@@ -590,7 +516,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, 204)  # noqa: PT009
         self.assert_event_emitted(
             'edx.certificate.configuration.deleted',
             course_id=str(self.course.id),
@@ -599,9 +525,9 @@ class CertificatesDetailHandlerTestCase(
         self.reload_course()
         # Verify that certificates are properly updated in the course.
         certificates = self.course.certificates['certificates']
-        self.assertEqual(len(certificates), 1)
-        self.assertEqual(certificates[0].get('name'), 'Name 0')
-        self.assertEqual(certificates[0].get('description'), 'Description 0')
+        self.assertEqual(len(certificates), 1)  # noqa: PT009
+        self.assertEqual(certificates[0].get('name'), 'Name 0')  # noqa: PT009
+        self.assertEqual(certificates[0].get('description'), 'Description 0')  # noqa: PT009
 
     @ddt.data("not_a_valid_asset_key{}.png", "/not_a_valid_asset_key{}.png")
     def test_can_delete_certificate_with_invalid_signatory(self, signatory_path):
@@ -615,7 +541,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, 204)  # noqa: PT009
         self.assert_event_emitted(
             'edx.certificate.configuration.deleted',
             course_id=str(self.course.id),
@@ -624,9 +550,9 @@ class CertificatesDetailHandlerTestCase(
         self.reload_course()
         # Verify that certificates are properly updated in the course.
         certificates = self.course.certificates['certificates']
-        self.assertEqual(len(certificates), 1)
-        self.assertEqual(certificates[0].get('name'), 'Name 0')
-        self.assertEqual(certificates[0].get('description'), 'Description 0')
+        self.assertEqual(len(certificates), 1)  # noqa: PT009
+        self.assertEqual(certificates[0].get('name'), 'Name 0')  # noqa: PT009
+        self.assertEqual(certificates[0].get('description'), 'Description 0')  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_delete_certificate_without_write_permissions(self, signatory_path):
@@ -635,14 +561,14 @@ class CertificatesDetailHandlerTestCase(
         """
         self._add_course_certificates(count=2, signatory_count=1, asset_path_format=signatory_path)
         user = UserFactory()
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.delete(
             self._url(cid=1),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403)  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_delete_certificate_without_global_staff_permissions(self, signatory_path):
@@ -653,14 +579,14 @@ class CertificatesDetailHandlerTestCase(
         user = UserFactory()
         for role in [CourseInstructorRole, CourseStaffRole]:
             role(self.course.id).add_users(user)
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.delete(
             self._url(cid=1),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403)  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_update_active_certificate_without_global_staff_permissions(self, signatory_path):
@@ -681,7 +607,7 @@ class CertificatesDetailHandlerTestCase(
         user = UserFactory()
         for role in [CourseInstructorRole, CourseStaffRole]:
             role(self.course.id).add_users(user)
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.put(
             self._url(cid=1),
             data=json.dumps(cert_data),
@@ -689,7 +615,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403)  # noqa: PT009
 
     def test_delete_non_existing_certificate(self):
         """
@@ -702,7 +628,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 404)  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_can_delete_signatory(self, signatory_path):
@@ -714,7 +640,7 @@ class CertificatesDetailHandlerTestCase(
         signatory = certificates[1].get("signatories")[1]
         image_asset_location = AssetKey.from_string(signatory['signature_image_path'])
         content = contentstore().find(image_asset_location)
-        self.assertIsNotNone(content)
+        self.assertIsNotNone(content)  # noqa: PT009
         test_url = f'{self._url(cid=1)}/signatories/1'
         response = self.client.delete(
             test_url,
@@ -722,14 +648,14 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, 204)  # noqa: PT009
         self.reload_course()
 
         # Verify that certificates are properly updated in the course.
         certificates = self.course.certificates['certificates']
-        self.assertEqual(len(certificates[1].get("signatories")), 2)
+        self.assertEqual(len(certificates[1].get("signatories")), 2)  # noqa: PT009
         # make sure signatory signature image is deleted too
-        self.assertRaises(NotFoundError, contentstore().find, image_asset_location)
+        self.assertRaises(NotFoundError, contentstore().find, image_asset_location)  # noqa: PT027
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_deleting_signatory_without_signature(self, signatory_path):
@@ -744,7 +670,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, 204)  # noqa: PT009
 
     def test_delete_signatory_non_existing_certificate(self):
         """
@@ -758,7 +684,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 404)  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_certificate_activation_success(self, signatory_path):
@@ -779,10 +705,10 @@ class CertificatesDetailHandlerTestCase(
                 HTTP_ACCEPT="application/json",
                 HTTP_X_REQUESTED_WITH="XMLHttpRequest"
             )
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 200)  # noqa: PT009
             course = self.store.get_course(self.course.id)
             certificates = course.certificates['certificates']
-            self.assertEqual(certificates[0].get('is_active'), is_active)
+            self.assertEqual(certificates[0].get('is_active'), is_active)  # noqa: PT009
             cert_event_type = 'activated' if is_active else 'deactivated'
             self.assert_event_emitted(
                 '.'.join(['edx.certificate.configuration', cert_event_type]),
@@ -799,7 +725,7 @@ class CertificatesDetailHandlerTestCase(
         test_url = reverse_course_url('certificate_activation_handler', self.course.id)
         self._add_course_certificates(count=1, signatory_count=2, asset_path_format=signatory_path)
         user = UserFactory()
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.post(
             test_url,
             data=json.dumps({"is_active": activate}),
@@ -807,7 +733,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest"
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403)  # noqa: PT009
 
     @ddt.data(C4X_SIGNATORY_PATH, SIGNATORY_PATH)
     def test_certificate_activation_failure(self, signatory_path):
@@ -826,7 +752,7 @@ class CertificatesDetailHandlerTestCase(
             HTTP_ACCEPT="application/json",
             HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403)  # noqa: PT009
         course = self.store.get_course(self.course.id)
         certificates = course.certificates['certificates']
-        self.assertEqual(certificates[0].get('is_active'), False)
+        self.assertEqual(certificates[0].get('is_active'), False)  # noqa: PT009

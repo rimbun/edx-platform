@@ -49,7 +49,7 @@ Transformers.
 
 Registry. Transformers are registered using the platform's
 PluginManager (e.g., Stevedore). This is currently done by updating
-setup.py.  Only registered transformers are called during the Collect
+pyproject.toml.  Only registered transformers are called during the Collect
 Phase.  And only registered transformers can be used during the
 Transform phase.  Exceptions to this rule are any nested transformers
 that are contained within higher-order transformers - as long as the
@@ -59,4 +59,10 @@ contained transformers within them.
 Note: A partial subset (as an ordered list) of the registered
 transformers can be requested during the Transform phase, allowing
 the client to manipulate exactly which transformers to call.
+
+Links to Other Block Structure Related Documentation:
+
+  * https://openedx.atlassian.net/wiki/spaces/AC/pages/154861855/Block+Structure+Cache+Invalidation+Proposal
+  * https://openedx.atlassian.net/wiki/spaces/AC/pages/34734111/Course+Block+Transformers
+  * https://openedx.atlassian.net/wiki/spaces/AC/pages/41910826/Course+Blocks+API+Storage+Cache+Requirements
 """

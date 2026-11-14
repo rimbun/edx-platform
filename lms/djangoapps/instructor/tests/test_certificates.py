@@ -9,33 +9,159 @@ from unittest import mock
 import ddt
 import pytest
 from config_models.models import cache
-from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test.utils import override_settings
 from django.urls import reverse
+from edx_toggles.toggles.testutils import override_waffle_flag
 
 from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import GlobalStaffFactory
-from common.djangoapps.student.tests.factories import InstructorFactory
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import GlobalStaffFactory, InstructorFactory, UserFactory
 from lms.djangoapps.certificates import api as certs_api
 from lms.djangoapps.certificates.data import CertificateStatuses
-from lms.djangoapps.certificates.models import (
-    CertificateGenerationConfiguration,
-    CertificateInvalidation,
-    GeneratedCertificate
-)
 from lms.djangoapps.certificates.tests.factories import (
     CertificateAllowlistFactory,
     CertificateInvalidationFactory,
-    GeneratedCertificateFactory
+    GeneratedCertificateFactory,
 )
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from lms.djangoapps.instructor.toggles import LEGACY_INSTRUCTOR_DASHBOARD
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
+# Tests for legacy views. When DEPR-38432 is picked up, these tests will require the following changes:
+# Either remove or leave the specific parts that reference the legacy instructor dashboard,
+# and remove the override_waffle_flag for LEGACY_INSTRUCTOR_DASHBOARD.
+@override_waffle_flag(LEGACY_INSTRUCTOR_DASHBOARD, active=True)
+class CertificateTaskViewTests(SharedModuleStoreTestCase):
+    """Tests for the certificate panel of the instructor dash. """
+
+    @classmethod
+    def setUpClass(cls):
+        """
+        Set up the test class with a test course and instructor dashboard URL.
+        """
+        super().setUpClass()
+        cls.course = CourseFactory.create()
+        cls.url = reverse(
+            'instructor_dashboard',
+            kwargs={'course_id': str(cls.course.id)}
+        )
+
+    def setUp(self):
+        """
+        Set up test users and enable certificate generation configuration.
+        """
+        super().setUp()
+        self.user = UserFactory.create()
+        self.global_staff = GlobalStaffFactory()
+        self.instructor = InstructorFactory(course_key=self.course.id)
+
+        # Need to clear the cache for model-based configuration
+        cache.clear()
+
+        # Enable the certificate generation feature
+        certs_api.set_certificate_generation_config(enabled=True)
+
+    def _login_as(self, role):
+        """
+        Log in the test client as the specified user role.
+        """
+        user_map = {
+            "user": self.user.username,
+            "instructor": self.instructor.username,
+            "global_staff": self.global_staff.username
+        }
+        self.client.login(username=user_map.get(role, "user"), password=self.TEST_PASSWORD)
+
+    def _get_url(self, action):
+        """
+        Build the unified certificate task URL for the given action.
+        """
+        return reverse("certificate_task", kwargs={"course_id": self.course.id, "action": action})
+
+    def _assert_redirects_to_instructor_dash(self, response):
+        """Check that the response redirects to the certificates section. """
+        expected_redirect = reverse(
+            'instructor_dashboard',
+            kwargs={'course_id': str(self.course.id)}
+        )
+        expected_redirect += '#view-certificates'
+        self.assertRedirects(response, expected_redirect)
+
+    @ddt.data(True, False)
+    def test_certificate_generation_enable(self, is_enabled):
+        """
+        Test enabling or disabling self-generated certificates as global staff.
+        """
+        self._login_as("global_staff")
+
+        params = {"certificates-enabled": "true" if is_enabled else "false"}
+        response = self.client.post(
+            self._get_url("toggle"),
+            data=params
+        )
+
+        # Expect a redirect back to the instructor dashboard
+        self._assert_redirects_to_instructor_dash(response)
+
+        # Expect that certificate generation is now enabled for the course
+        actual_enabled = certs_api.has_self_generated_certificates_enabled(str(self.course.id))
+        assert is_enabled == actual_enabled
+
+    @ddt.data("user", "instructor", "global_staff")
+    def test_certificate_generation(self, role):
+        """
+        Test permission-based access to certificate generation by role.
+        """
+        self._login_as(role)
+        response = self.client.post(self._get_url("generate"))
+        actual_status_code = {
+            "user": 403,
+            "instructor": 200,
+            "global_staff": 200
+        }
+        assert response.status_code == actual_status_code[role]
+
+    @ddt.data(
+        ("downloadable", 200, True, 'Certificate regeneration task has been started. You can view '
+         'the status of the generation task in the "Pending Tasks" section.'),
+        ("generating", 400, False, 'Please select certificate statuses that lie with '
+         'in "certificate_statuses" entry in POST data.')
+    )
+    @ddt.unpack
+    def test_certificate_regeneration_status_handling(self, cert_status, expected_status, success, expected_message):
+        """
+        Test certificate regeneration with valid and invalid certificate statuses.
+        """
+        # Create a certificate with the given status
+        GeneratedCertificateFactory.create(
+            user=self.user,
+            course_id=self.course.id,
+            status=cert_status,
+            mode='honor'
+        )
+
+        self._login_as("global_staff")
+        response = self.client.post(
+            self._get_url("regenerate"),
+            data={'certificate_statuses': [cert_status]},
+        )
+
+        assert response.status_code == expected_status
+        res_json = response.json()
+        assert res_json.get('success', False) is success
+        assert res_json.get('message') == expected_message
+
+
+@ddt.ddt
+# Tests for legacy views. When DEPR-XXXX is picked up, these tests will require the following changes:
+# Either remove or leave the specific parts that reference the legacy instructor dashboard,
+# and remove the override_waffle_flag for LEGACY_INSTRUCTOR_DASHBOARD.
+@override_waffle_flag(LEGACY_INSTRUCTOR_DASHBOARD, active=True)
 class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
     """Tests for the certificate panel of the instructor dash. """
 
@@ -60,34 +186,39 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
         cache.clear()
 
         # Enable the certificate generation feature
-        CertificateGenerationConfiguration.objects.create(enabled=True)
+        certs_api.set_certificate_generation_config(enabled=True)
 
     def test_visible_only_to_global_staff(self):
         # Instructors don't see the certificates section
-        self.client.login(username=self.instructor.username, password="test")
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
         self._assert_certificates_visible(False)
 
         # Global staff can see the certificates section
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         self._assert_certificates_visible(True)
 
     def test_visible_only_when_feature_flag_enabled(self):
         # Disable the feature flag
-        CertificateGenerationConfiguration.objects.create(enabled=False)
+        certs_api.set_certificate_generation_config(enabled=False)
         cache.clear()
 
         # Now even global staff can't see the certificates section
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         self._assert_certificates_visible(False)
 
+    @override_settings(ENABLE_CERTIFICATES_INSTRUCTOR_MANAGE=True)
+    def test_visible_for_instructors_when_feature_is_enabled(self):
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
+        self._assert_certificates_visible(True)
+
     @ddt.data("started", "error", "success")
-    def test_show_certificate_status(self, status):
-        self.client.login(username=self.global_staff.username, password="test")
-        with self._certificate_status("honor", status):
-            self._assert_certificate_status("honor", status)
+    def test_show_certificate_status(self, certificate_status):
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
+        with self._certificate_status("honor", certificate_status):
+            self._assert_certificate_status("honor", certificate_status)
 
     def test_show_enabled_button(self):
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
 
         # Initially, no example certs are generated, so
         # the enable button should be disabled
@@ -104,7 +235,7 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
             self._assert_enable_certs_button(False)
 
     def test_can_disable_even_after_failure(self):
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
 
         with self._certificate_status("honor", "error"):
             # When certs are disabled for a course, then don't allow them
@@ -117,7 +248,7 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
             certs_api.set_cert_generation_enabled(self.course.id, True)
             self._assert_enable_certs_button(False)
 
-    @mock.patch.dict(settings.FEATURES, {'CERTIFICATES_HTML_VIEW': True})
+    @override_settings(CERTIFICATES_HTML_VIEW=True)
     def test_show_enabled_button_for_html_certs(self):
         """
         Tests `Enable Student-Generated Certificates` button is enabled
@@ -127,13 +258,13 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
         self.course.cert_html_view_enabled = True
         self.course.save()
         self.store.update_item(self.course, self.global_staff.id)
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         response = self.client.get(self.url)
         self.assertContains(response, 'Enable Student-Generated Certificates')
         self.assertContains(response, 'enable-certificates-submit')
         self.assertNotContains(response, 'Generate Example Certificates')
 
-    @mock.patch.dict(settings.FEATURES, {'CERTIFICATES_HTML_VIEW': True})
+    @override_settings(CERTIFICATES_HTML_VIEW=True, CERTIFICATES_INSTRUCTOR_GENERATION=False)
     def test_buttons_for_html_certs_in_self_paced_course(self):
         """
         Tests `Enable Student-Generated Certificates` button is enabled
@@ -143,7 +274,7 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
         self.course.cert_html_view_enabled = True
         self.course.save()
         self.store.update_item(self.course, self.global_staff.id)
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         response = self.client.get(self.url)
         self.assertContains(response, 'Enable Student-Generated Certificates')
         self.assertContains(response, 'enable-certificates-submit')
@@ -159,18 +290,18 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
             self.assertNotContains(response, "Student-Generated Certificates")
 
     @contextlib.contextmanager
-    def _certificate_status(self, description, status):
+    def _certificate_status(self, description, certificate_status):
         """Configure the certificate status by mocking the certificates API. """
         patched = 'lms.djangoapps.instructor.views.instructor_dashboard.certs_api.example_certificates_status'
         with mock.patch(patched) as certs_api_status:
             cert_status = [{
                 'description': description,
-                'status': status
+                'status': certificate_status
             }]
 
-            if status == 'error':
+            if certificate_status == 'error':
                 cert_status[0]['error_reason'] = self.ERROR_REASON
-            if status == 'success':
+            if certificate_status == 'success':
                 cert_status[0]['download_url'] = self.DOWNLOAD_URL
 
             certs_api_status.return_value = cert_status
@@ -210,6 +341,10 @@ class CertificatesInstructorDashTest(SharedModuleStoreTestCase):
 
 @override_settings(CERT_QUEUE='certificates')
 @ddt.ddt
+# Tests for legacy views. When DEPR-XXXX is picked up, these tests will require the following changes:
+# Either remove or leave the specific parts that reference the legacy instructor dashboard,
+# and remove the override_waffle_flag for LEGACY_INSTRUCTOR_DASHBOARD.
+@override_waffle_flag(LEGACY_INSTRUCTOR_DASHBOARD, active=True)
 class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
     """Tests for the certificates end-points in the instructor dash API. """
     @classmethod
@@ -226,25 +361,25 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
 
         # Enable certificate generation
         cache.clear()
-        CertificateGenerationConfiguration.objects.create(enabled=True)
+        certs_api.set_certificate_generation_config(enabled=True)
 
     @ddt.data('enable_certificate_generation')
     def test_allow_only_global_staff(self, url_name):
         url = reverse(url_name, kwargs={'course_id': self.course.id})
 
         # Instructors do not have access
-        self.client.login(username=self.instructor.username, password='test')
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
         response = self.client.post(url)
-        assert response.status_code == 403
+        assert response.status_code == 302
 
         # Global staff have access
-        self.client.login(username=self.global_staff.username, password='test')
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         response = self.client.post(url)
         assert response.status_code == 302
 
     @ddt.data(True, False)
     def test_enable_certificate_generation(self, is_enabled):
-        self.client.login(username=self.global_staff.username, password='test')
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         url = reverse(
             'enable_certificate_generation',
             kwargs={'course_id': str(self.course.id)}
@@ -274,7 +409,7 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
         user who made the request is not member of global staff.
         """
         user = UserFactory.create()
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         url = reverse(
             'start_certificate_generation',
             kwargs={'course_id': str(self.course.id)}
@@ -283,16 +418,16 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
         response = self.client.post(url)
         assert response.status_code == 403
 
-        self.client.login(username=self.instructor.username, password='test')
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
         response = self.client.post(url)
-        assert response.status_code == 403
+        assert response.status_code == 200
 
     def test_certificate_generation_api_with_global_staff(self):
         """
         Test certificates generation api endpoint returns success status when called with
         valid course key
         """
-        self.client.login(username=self.global_staff.username, password='test')
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         url = reverse(
             'start_certificate_generation',
             kwargs={'course_id': str(self.course.id)}
@@ -319,7 +454,7 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
         )
 
         # Login the client and access the url with 'certificate_statuses'
-        self.client.login(username=self.global_staff.username, password='test')
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         url = reverse('start_certificate_regeneration', kwargs={'course_id': str(self.course.id)})
         response = self.client.post(url, data={'certificate_statuses': [CertificateStatuses.downloadable]})
 
@@ -332,8 +467,8 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
 
         # Assert success message
         assert res_json['message'] ==\
-               'Certificate regeneration task has been started.' \
-               ' You can view the status of the generation task in the "Pending Tasks" section.'
+            'Certificate regeneration task has been started.' \
+            ' You can view the status of the generation task in the "Pending Tasks" section.'
 
     def test_certificate_regeneration_error(self):
         """
@@ -352,7 +487,7 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
         )
 
         # Login the client and access the url without 'certificate_statuses'
-        self.client.login(username=self.global_staff.username, password='test')
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
         url = reverse('start_certificate_regeneration', kwargs={'course_id': str(self.course.id)})
         response = self.client.post(url)
 
@@ -362,7 +497,7 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
 
         # Assert Error Message
         assert res_json['message'] ==\
-               'Please select one or more certificate statuses that require certificate regeneration.'
+            'Please select certificate statuses from the list only.'
 
         # Access the url passing 'certificate_statuses' that are not present in db
         url = reverse('start_certificate_regeneration', kwargs={'course_id': str(self.course.id)})
@@ -373,7 +508,8 @@ class CertificatesInstructorApiTest(SharedModuleStoreTestCase):
         res_json = json.loads(response.content.decode('utf-8'))
 
         # Assert Error Message
-        assert res_json['message'] == 'Please select certificate statuses from the list only.'
+        assert (res_json['message'] ==
+                'Please select certificate statuses from the list only.')
 
 
 @override_settings(CERT_QUEUE='certificates')
@@ -418,8 +554,8 @@ class CertificateExceptionViewInstructorApiTest(SharedModuleStoreTestCase):
 
         # Enable certificate generation
         cache.clear()
-        CertificateGenerationConfiguration.objects.create(enabled=True)
-        self.client.login(username=self.global_staff.username, password='test')
+        certs_api.set_certificate_generation_config(enabled=True)
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
 
     def test_certificate_exception_added_successfully(self):
         """
@@ -483,9 +619,7 @@ class CertificateExceptionViewInstructorApiTest(SharedModuleStoreTestCase):
         assert not res_json['success']
 
         # Assert Error Message
-        assert res_json['message'] ==\
-               'Student username/email field is required and can not be empty.' \
-               ' Kindly fill in username/email and then press "Add to Exception List" button.'
+        assert res_json['message'] == {'user': ['This field may not be blank.']}
 
     def test_certificate_exception_duplicate_user_error(self):
         """
@@ -599,6 +733,34 @@ class CertificateExceptionViewInstructorApiTest(SharedModuleStoreTestCase):
         # Verify that certificate exception does not exist
         assert not certs_api.is_on_allowlist(self.user2, self.course.id)
 
+    def test_certificate_exception_removed_successfully_form_url(self):
+        """
+        In case of deletion front-end is sending content-type x-www-form-urlencoded.
+        Just to handle that some logic added in api and this test is for that part.
+        Test certificates exception removal api endpoint returns success status
+        when called with valid course key and certificate exception id
+        """
+        GeneratedCertificateFactory.create(
+            user=self.user2,
+            course_id=self.course.id,
+            status=CertificateStatuses.downloadable,
+            grade='1.0'
+        )
+        # Verify that certificate exception exists
+        assert certs_api.is_on_allowlist(self.user2, self.course.id)
+
+        response = self.client.post(
+            self.url,
+            data=json.dumps(self.certificate_exception_in_db),
+            content_type='application/x-www-form-urlencoded',
+            REQUEST_METHOD='DELETE'
+        )
+        # Assert successful request processing
+        assert response.status_code == 204
+
+        # Verify that certificate exception does not exist
+        assert not certs_api.is_on_allowlist(self.user2, self.course.id)
+
     def test_remove_certificate_exception_invalid_request_error(self):
         """
         Test certificates exception removal api endpoint returns error
@@ -620,7 +782,7 @@ class CertificateExceptionViewInstructorApiTest(SharedModuleStoreTestCase):
         assert not res_json['success']
         # Assert Error Message
         assert res_json['message'] ==\
-               'The record is not in the correct format. Please add a valid username or email address.'
+            'The record is not in the correct format. Please add a valid username or email address.'
 
     def test_remove_certificate_exception_non_existing_error(self):
         """
@@ -711,8 +873,8 @@ class GenerateCertificatesInstructorApiTest(SharedModuleStoreTestCase):
 
         # Enable certificate generation
         cache.clear()
-        CertificateGenerationConfiguration.objects.create(enabled=True)
-        self.client.login(username=self.global_staff.username, password='test')
+        certs_api.set_certificate_generation_config(enabled=True)
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
 
     def test_generate_certificate_exceptions_all_students(self):
         """
@@ -830,7 +992,7 @@ class TestCertificatesInstructorApiBulkAllowlist(SharedModuleStoreTestCase):
         CourseEnrollment.enroll(self.enrolled_user_2, self.course.id)
 
         # Global staff can see the certificates section
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
 
     def test_create_allowlist_exception_record(self):
         """
@@ -877,13 +1039,13 @@ class TestCertificatesInstructorApiBulkAllowlist(SharedModuleStoreTestCase):
         data = json.loads(response.content.decode('utf-8'))
         assert len(data['general_errors']) != 0
         assert data['general_errors'][0] ==\
-               'Make sure that the file you upload is in CSV format with no extraneous characters or rows.'
+            'Make sure that the file you upload is in CSV format with no extraneous characters or rows.'
 
     def test_bad_file_upload_type(self):
         """
         Try uploading CSV file with invalid binary data and verify that it is rejected
         """
-        uploaded_file = SimpleUploadedFile("temp.csv", io.BytesIO(b"some initial binary data: \x00\x01").read())
+        uploaded_file = SimpleUploadedFile("temp.csv", io.BytesIO(b"some initial binary data: \xC3\x01").read())
         response = self.client.post(self.url, {'students_list': uploaded_file})
         assert response.status_code == 200
         data = json.loads(response.content.decode('utf-8'))
@@ -1026,7 +1188,7 @@ class CertificateInvalidationViewTests(SharedModuleStoreTestCase):
         )
 
         # Global staff can see the certificates section
-        self.client.login(username=self.global_staff.username, password="test")
+        self.client.login(username=self.global_staff.username, password=self.TEST_PASSWORD)
 
     def test_invalidate_certificate(self):
         """
@@ -1048,20 +1210,20 @@ class CertificateInvalidationViewTests(SharedModuleStoreTestCase):
 
         # Verify that CertificateInvalidation record has been created in the database i.e. no DoesNotExist error
         try:
-            CertificateInvalidation.objects.get(
-                generated_certificate=self.generated_certificate,
-                invalidated_by=self.global_staff,
-                notes=self.notes,
-                active=True,
-            )
+            cert_filter_args = {
+                "generated_certificate": self.generated_certificate,
+                "invalidated_by": self.global_staff,
+                "notes": self.notes,
+                "active": True
+            }
+            certs_api.get_certificate_invalidation_entry(**cert_filter_args)
+
         except ObjectDoesNotExist:
             self.fail("The certificate is not invalidated.")
 
-        # Validate generated certificate was invalidated
-        generated_certificate = GeneratedCertificate.eligible_certificates.get(
-            user=self.enrolled_user_1,
-            course_id=self.course.id,
-        )
+        # Check if the generated certificate was invalidated
+        generated_certificate = certs_api.get_certificate_for_user(self.enrolled_user_1, self.course.id, False)
+
         assert not generated_certificate.is_valid()
 
     def test_missing_username_and_email_error(self):
@@ -1080,9 +1242,7 @@ class CertificateInvalidationViewTests(SharedModuleStoreTestCase):
         res_json = json.loads(response.content.decode('utf-8'))
 
         # Assert Error Message
-        assert res_json['message'] == \
-               'Student username/email field is required and can not be empty.' \
-               ' Kindly fill in username/email and then press "Invalidate Certificate" button.'
+        assert res_json['message'] == {'user': ['This field may not be blank.']}
 
     def test_invalid_user_name_error(self):
         """
@@ -1101,7 +1261,6 @@ class CertificateInvalidationViewTests(SharedModuleStoreTestCase):
         # Assert 400 status code in response
         assert response.status_code == 400
         res_json = json.loads(response.content.decode('utf-8'))
-
         # Assert Error Message
         assert res_json['message'] == f'{invalid_user} does not exist in the LMS. Please check your spelling and retry.'
 
@@ -1120,7 +1279,6 @@ class CertificateInvalidationViewTests(SharedModuleStoreTestCase):
         # Assert 400 status code in response
         assert response.status_code == 400
         res_json = json.loads(response.content.decode('utf-8'))
-
         # Assert Error Message
         assert res_json['message'] == f'The student {self.enrolled_user_2.username} does not have certificate for the course {self.course.number}. Kindly verify student username/email and the selected course are correct and try again.'  # pylint: disable=line-too-long
 
@@ -1191,12 +1349,18 @@ class CertificateInvalidationViewTests(SharedModuleStoreTestCase):
         assert response.status_code == 204
 
         # Verify that certificate invalidation successfully removed from database
-        with pytest.raises(ObjectDoesNotExist):
-            CertificateInvalidation.objects.get(
-                generated_certificate=self.generated_certificate,
-                invalidated_by=self.global_staff,
-                active=True,
-            )
+
+        with pytest.raises(ObjectDoesNotExist):  # noqa: PT012
+            certs_filter_args = {
+                "generated_certificate": self.generated_certificate,
+                "invalidated_by": self.global_staff,
+                "active": True
+            }
+
+            cert_invalidation_entry = certs_api.get_certificate_invalidation_entry(**certs_filter_args)
+
+            if cert_invalidation_entry is None:
+                raise ObjectDoesNotExist
 
     def test_remove_certificate_invalidation_error(self):
         """

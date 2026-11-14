@@ -4,10 +4,11 @@ Tests for the create_or_update_site_configuration management command.
 
 import codecs
 import json
-import pytest
+
 import ddt
+import pytest
 from django.contrib.sites.models import Site
-from django.core.management import call_command, CommandError
+from django.core.management import CommandError, call_command
 from django.test import TestCase
 from path import Path
 
@@ -107,6 +108,19 @@ class CreateOrUpdateSiteConfigurationTest(TestCase):
         assert not site_configuration.site_values
         assert not site_configuration.enabled
 
+    def test_site_created_when_domain_longer_than_50_characters(self):
+        """
+        Verify that a SiteConfiguration instance is created with name trimmed
+        to 50 characters when domain is longer than 50 characters
+        """
+        self.assert_site_configuration_does_not_exist()
+
+        domain = "studio.newtestserverwithlongname.development.opencraft.hosting"
+        call_command(self.command, f"{domain}")
+        site = Site.objects.filter(domain=domain)
+        assert site.exists()
+        assert site[0].name == domain[:50]
+
     def test_both_enabled_disabled_flags(self):
         """
         Verify the error on providing both the --enabled and --disabled flags.
@@ -135,7 +149,7 @@ class CreateOrUpdateSiteConfigurationTest(TestCase):
         self.assert_site_configuration_does_not_exist()
         call_command(self.command, '--configuration', json.dumps(self.input_configuration), *self.site_id_arg)
         site_configuration = self.get_site_configuration()
-        self.assertDictEqual(site_configuration.site_values, self.input_configuration)
+        self.assertDictEqual(site_configuration.site_values, self.input_configuration)  # noqa: PT009
 
     def test_site_configuration_created_with_json_file_parameters(self):
         """

@@ -1,24 +1,21 @@
 """
-Tests for validate Internationalization and Module i18n service.
+Tests for validate Internationalization and XBlock i18n service.
 """
-
-
 import gettext
-from unittest import mock, skip
+from unittest import mock
 
 from django.utils import translation
 from django.utils.translation import get_language
+from xblock.core import XBlock
 
-from cms.djangoapps.contentstore.tests.utils import AjaxEnabledTestClient
-from cms.djangoapps.contentstore.views.preview import _preview_module_system
-from common.djangoapps.student.tests.factories import UserFactory
-from openedx.core.lib.edx_six import get_gettext
-from xmodule.modulestore.django import ModuleI18nService
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from cms.djangoapps.contentstore.views.preview import _prepare_runtime_for_preview
+from xmodule.modulestore.django import XBlockI18nService
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
+from xmodule.tests.test_export import PureXBlock
 
 
-class FakeTranslations(ModuleI18nService):
+class FakeTranslations(XBlockI18nService):
     """A test GNUTranslations class that takes a map of msg -> translations."""
 
     def __init__(self, translations):  # pylint: disable=super-init-not-called
@@ -55,31 +52,28 @@ class FakeTranslations(ModuleI18nService):
         return _translation
 
 
-class TestModuleI18nService(ModuleStoreTestCase):
-    """ Test ModuleI18nService """
+class TestXBlockI18nService(ModuleStoreTestCase):
+    """ Test XBlockI18nService """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
+    @XBlock.register_temp_plugin(PureXBlock, 'pure')
     def setUp(self):
         """ Setting up tests """
         super().setUp()
         self.test_language = 'dummy language'
         self.request = mock.Mock()
         self.course = CourseFactory.create()
-        self.field_data = mock.Mock()
-        self.descriptor = ItemFactory(category="pure", parent=self.course)
-        self.runtime = _preview_module_system(
-            self.request,
-            self.descriptor,
-            self.field_data,
-        )
+        self.block = BlockFactory(category="pure", parent=self.course)
+        _prepare_runtime_for_preview(self.request, self.block)
         self.addCleanup(translation.deactivate)
 
-    def get_module_i18n_service(self, descriptor):
+    def get_block_i18n_service(self, block):
         """
-        return the module i18n service.
+        return the block i18n service.
         """
-        i18n_service = self.runtime.service(descriptor, 'i18n')
-        self.assertIsNotNone(i18n_service)
-        self.assertIsInstance(i18n_service, ModuleI18nService)
+        i18n_service = self.block.runtime.service(block, 'i18n')
+        self.assertIsNotNone(i18n_service)  # noqa: PT009
+        self.assertIsInstance(i18n_service, XBlockI18nService)  # noqa: PT009
         return i18n_service
 
     def test_django_service_translation_works(self):
@@ -95,7 +89,7 @@ class TestModuleI18nService(ModuleStoreTestCase):
 
             def __init__(self, module):
                 self.module = module
-                self.old_ugettext = get_gettext(module)
+                self.old_ugettext = module.gettext
 
             def __enter__(self):
                 def new_ugettext(*args, **kwargs):
@@ -109,7 +103,7 @@ class TestModuleI18nService(ModuleStoreTestCase):
                 self.module.ugettext = self.old_ugettext
                 self.module.gettext = self.old_ugettext
 
-        i18n_service = self.get_module_i18n_service(self.descriptor)
+        i18n_service = self.get_block_i18n_service(self.block)
 
         # Activate french, so that if the fr files haven't been loaded, they will be loaded now.
         with translation.override("fr"):
@@ -117,21 +111,20 @@ class TestModuleI18nService(ModuleStoreTestCase):
 
             # wrap the ugettext functions so that 'XYZ ' will prefix each translation
             with wrap_ugettext_with_xyz(french_translation):
-                self.assertEqual(i18n_service.ugettext(self.test_language), 'XYZ dummy language')
+                self.assertEqual(i18n_service.ugettext(self.test_language), 'XYZ dummy language')  # noqa: PT009
 
             # Check that the old ugettext has been put back into place
-            self.assertEqual(i18n_service.ugettext(self.test_language), 'dummy language')
+            self.assertEqual(i18n_service.ugettext(self.test_language), 'dummy language')  # noqa: PT009
 
-    @mock.patch('django.utils.translation.ugettext', mock.Mock(return_value='XYZ-TEST-LANGUAGE'))
     @mock.patch('django.utils.translation.gettext', mock.Mock(return_value='XYZ-TEST-LANGUAGE'))
     def test_django_translator_in_use_with_empty_block(self):
         """
         Test: Django default translator should in use if we have an empty block
         """
-        i18n_service = ModuleI18nService(None)
-        self.assertEqual(i18n_service.ugettext(self.test_language), 'XYZ-TEST-LANGUAGE')
+        i18n_service = XBlockI18nService(None)
+        self.assertEqual(i18n_service.ugettext(self.test_language), 'XYZ-TEST-LANGUAGE')  # noqa: PT009
 
-    @mock.patch('django.utils.translation.ugettext', mock.Mock(return_value='XYZ-TEST-LANGUAGE'))
+    @mock.patch('django.utils.translation.gettext', mock.Mock(return_value='XYZ-TEST-LANGUAGE'))
     def test_message_catalog_translations(self):
         """
         Test: Message catalog from FakeTranslation should return required translations.
@@ -146,121 +139,25 @@ class TestModuleI18nService(ModuleStoreTestCase):
         translation.activate("es")
         with mock.patch('gettext.translation', return_value=_translator(domain='text', localedir=localedir,
                                                                         languages=[get_language()])):
-            i18n_service = self.get_module_i18n_service(self.descriptor)
-            self.assertEqual(i18n_service.ugettext('Hello'), 'es-hello-world')
+            i18n_service = self.get_block_i18n_service(self.block)
+            self.assertEqual(i18n_service.ugettext('Hello'), 'es-hello-world')  # noqa: PT009
 
         translation.activate("ar")
         with mock.patch('gettext.translation', return_value=_translator(domain='text', localedir=localedir,
                                                                         languages=[get_language()])):
-            i18n_service = self.get_module_i18n_service(self.descriptor)
-            self.assertEqual(get_gettext(i18n_service)('Hello'), 'Hello')
-            self.assertNotEqual(get_gettext(i18n_service)('Hello'), 'fr-hello-world')
-            self.assertNotEqual(get_gettext(i18n_service)('Hello'), 'es-hello-world')
+            i18n_service = self.get_block_i18n_service(self.block)
+            self.assertEqual(i18n_service.gettext('Hello'), 'Hello')  # noqa: PT009
+            self.assertNotEqual(i18n_service.gettext('Hello'), 'fr-hello-world')  # noqa: PT009
+            self.assertNotEqual(i18n_service.gettext('Hello'), 'es-hello-world')  # noqa: PT009
 
         translation.activate("fr")
         with mock.patch('gettext.translation', return_value=_translator(domain='text', localedir=localedir,
                                                                         languages=[get_language()])):
-            i18n_service = self.get_module_i18n_service(self.descriptor)
-            self.assertEqual(i18n_service.ugettext('Hello'), 'fr-hello-world')
+            i18n_service = self.get_block_i18n_service(self.block)
+            self.assertEqual(i18n_service.ugettext('Hello'), 'fr-hello-world')  # noqa: PT009
 
     def test_i18n_service_callable(self):
         """
         Test: i18n service should be callable in studio.
         """
-        self.assertTrue(callable(self.runtime._services.get('i18n')))  # pylint: disable=protected-access
-
-
-class InternationalizationTest(ModuleStoreTestCase):
-    """
-    Tests to validate Internationalization.
-    """
-
-    CREATE_USER = False
-
-    def setUp(self):
-        """
-        These tests need a user in the DB so that the django Test Client
-        can log them in.
-        They inherit from the ModuleStoreTestCase class so that the mongodb collection
-        will be cleared out before each test case execution and deleted
-        afterwards.
-        """
-        super().setUp()
-
-        self.uname = 'testuser'
-        self.email = 'test+courses@edx.org'
-        self.password = 'foo'
-
-        # Create the use so we can log them in.
-        self.user = UserFactory.create(username=self.uname, email=self.email, password=self.password)
-
-        # Note that we do not actually need to do anything
-        # for registration if we directly mark them active.
-        self.user.is_active = True
-        # Staff has access to view all courses
-        self.user.is_staff = True
-        self.user.save()
-
-        self.course_data = {
-            'org': 'MITx',
-            'number': '999',
-            'display_name': 'Robot Super Course',
-        }
-
-    def test_course_plain_english(self):
-        """Test viewing the index page with no courses"""
-        self.client = AjaxEnabledTestClient()  # lint-amnesty, pylint: disable=attribute-defined-outside-init
-        self.client.login(username=self.uname, password=self.password)
-
-        resp = self.client.get_html('/home/')
-        self.assertContains(resp,
-                            '<h1 class="page-header">𝓢𝓽𝓾𝓭𝓲𝓸 Home</h1>',
-                            status_code=200,
-                            html=True)
-
-    def test_course_explicit_english(self):
-        """Test viewing the index page with no courses"""
-        self.client = AjaxEnabledTestClient()  # lint-amnesty, pylint: disable=attribute-defined-outside-init
-        self.client.login(username=self.uname, password=self.password)
-
-        resp = self.client.get_html(
-            '/home/',
-            {},
-            HTTP_ACCEPT_LANGUAGE='en',
-        )
-
-        self.assertContains(resp,
-                            '<h1 class="page-header">𝓢𝓽𝓾𝓭𝓲𝓸 Home</h1>',
-                            status_code=200,
-                            html=True)
-
-    # ****
-    # NOTE:
-    # ****
-    #
-    # This test will break when we replace this fake 'test' language
-    # with actual Esperanto. This test will need to be updated with
-    # actual Esperanto at that time.
-    # Test temporarily disable since it depends on creation of dummy strings
-    @skip
-    def test_course_with_accents(self):
-        """Test viewing the index page with no courses"""
-        self.client = AjaxEnabledTestClient()  # lint-amnesty, pylint: disable=attribute-defined-outside-init
-        self.client.login(username=self.uname, password=self.password)
-
-        resp = self.client.get_html(
-            '/home/',
-            {},
-            HTTP_ACCEPT_LANGUAGE='eo'
-        )
-
-        TEST_STRING = (
-            '<h1 class="title-1">'
-            'My \xc7\xf6\xfcrs\xe9s L#'
-            '</h1>'
-        )
-
-        self.assertContains(resp,
-                            TEST_STRING,
-                            status_code=200,
-                            html=True)
+        self.assertTrue(callable(self.block.runtime._services.get('i18n')))  # pylint: disable=protected-access  # noqa: PT009

@@ -1,11 +1,8 @@
 """
 Certificates utilities
 """
-from datetime import datetime
 import logging
-
-from edx_name_affirmation.api import get_verified_name, should_use_verified_name_for_certs
-from edx_name_affirmation.toggles import is_verified_name_enabled
+from datetime import datetime
 
 from django.conf import settings
 from django.urls import reverse
@@ -17,7 +14,8 @@ from common.djangoapps.student import models_api as student_api
 from lms.djangoapps.certificates.data import CertificateStatuses
 from lms.djangoapps.certificates.models import GeneratedCertificate
 from openedx.core.djangoapps.content.course_overviews.api import get_course_overview_or_none
-from xmodule.data import CertificatesDisplayBehaviors
+from openedx.features.name_affirmation_api.utils import get_name_affirmation_service
+from xmodule.data import CertificatesDisplayBehaviors  # pylint: disable=wrong-import-order
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +87,7 @@ def has_html_certificates_enabled(course_overview):
     """
     Returns True if HTML certificates are enabled in a course run.
     """
-    if not settings.FEATURES.get('CERTIFICATES_HTML_VIEW', False):
+    if not settings.CERTIFICATES_HTML_VIEW:
         return False
     return course_overview.cert_html_view_enabled
 
@@ -155,30 +153,19 @@ def should_certificate_be_visible(
         certificate_available_date (datetime): the date the certificate is available on for the course.
         self_paced (bool): Whether the course is self-paced.
     """
-    if settings.FEATURES.get("ENABLE_V2_CERT_DISPLAY_SETTINGS"):
-        show_early = (
-            certificates_display_behavior == CertificatesDisplayBehaviors.EARLY_NO_INFO
-            or certificates_show_before_end
-        )
-        past_available_date = (
-            certificates_display_behavior == CertificatesDisplayBehaviors.END_WITH_DATE
-            and certificate_available_date
-            and certificate_available_date < datetime.now(utc)
-        )
-        ended_without_available_date = (
-            certificates_display_behavior == CertificatesDisplayBehaviors.END
-            and has_ended
-        )
-    else:
-        show_early = (
-            certificates_display_behavior in ('early_with_info', 'early_no_info')
-            or certificates_show_before_end
-        )
-        past_available_date = (
-            certificate_available_date
-            and certificate_available_date < datetime.now(utc)
-        )
-        ended_without_available_date = (certificate_available_date is None) and has_ended
+    show_early = (
+        certificates_display_behavior == CertificatesDisplayBehaviors.EARLY_NO_INFO
+        or certificates_show_before_end
+    )
+    past_available_date = (
+        certificates_display_behavior == CertificatesDisplayBehaviors.END_WITH_DATE
+        and certificate_available_date
+        and certificate_available_date < datetime.now(utc)
+    )
+    ended_without_available_date = (
+        certificates_display_behavior == CertificatesDisplayBehaviors.END
+        and has_ended
+    )
 
     return any((self_paced, show_early, past_available_date, ended_without_available_date))
 
@@ -241,9 +228,10 @@ def get_preferred_certificate_name(user):
     name, or an empty string if it doesn't exist.
     """
     name_to_use = student_api.get_name(user.id)
+    name_affirmation_service = get_name_affirmation_service()
 
-    if is_verified_name_enabled() and should_use_verified_name_for_certs(user):
-        verified_name_obj = get_verified_name(user, is_verified=True)
+    if name_affirmation_service and name_affirmation_service.should_use_verified_name_for_certs(user):
+        verified_name_obj = name_affirmation_service.get_verified_name(user, is_verified=True)
         if verified_name_obj:
             name_to_use = verified_name_obj.verified_name
 

@@ -52,7 +52,6 @@ from django.utils.deprecation import MiddlewareMixin
 
 from .helpers import is_cross_domain_request_allowed, skip_cross_domain_referer_check
 
-
 log = logging.getLogger(__name__)
 
 
@@ -63,7 +62,7 @@ class CorsCSRFMiddleware(CsrfViewMiddleware, MiddlewareMixin):
 
     def __init__(self, *args, **kwargs):
         """Disable the middleware if the feature flag is disabled. """
-        if not settings.FEATURES.get('ENABLE_CORS_HEADERS'):
+        if not settings.ENABLE_CORS_HEADERS:
             raise MiddlewareNotUsed()
         super().__init__(*args, **kwargs)
 
@@ -86,7 +85,7 @@ class CsrfCrossDomainCookieMiddleware(MiddlewareMixin):
         2) Set `CROSS_DOMAIN_CSRF_COOKIE_NAME` and `CROSS_DOMAIN_CSRF_COOKIE_DOMAIN`
             in settings.
         3) Add the domain to `CORS_ORIGIN_WHITELIST`
-        4) Enable `FEATURES['ENABLE_CROSS_DOMAIN_CSRF_COOKIE']`
+        4) Enable `ENABLE_CROSS_DOMAIN_CSRF_COOKIE`
 
     For testing, it is often easier to relax the security checks by setting:
         * `CORS_ALLOW_INSECURE = True`
@@ -96,19 +95,19 @@ class CsrfCrossDomainCookieMiddleware(MiddlewareMixin):
 
     def __init__(self, *args, **kwargs):
         """Disable the middleware if the feature is not enabled. """
-        if not settings.FEATURES.get('ENABLE_CROSS_DOMAIN_CSRF_COOKIE'):
+        if not settings.ENABLE_CROSS_DOMAIN_CSRF_COOKIE:
             raise MiddlewareNotUsed()
 
         if not getattr(settings, 'CROSS_DOMAIN_CSRF_COOKIE_NAME', ''):
             raise ImproperlyConfigured(
                 "You must set `CROSS_DOMAIN_CSRF_COOKIE_NAME` when "
-                "`FEATURES['ENABLE_CROSS_DOMAIN_CSRF_COOKIE']` is True."
+                "`ENABLE_CROSS_DOMAIN_CSRF_COOKIE` is True."
             )
 
         if not getattr(settings, 'CROSS_DOMAIN_CSRF_COOKIE_DOMAIN', ''):
             raise ImproperlyConfigured(
                 "You must set `CROSS_DOMAIN_CSRF_COOKIE_DOMAIN` when "
-                "`FEATURES['ENABLE_CROSS_DOMAIN_CSRF_COOKIE']` is True."
+                "`ENABLE_CROSS_DOMAIN_CSRF_COOKIE` is True."
             )
         super().__init__(*args, **kwargs)
 
@@ -120,12 +119,18 @@ class CsrfCrossDomainCookieMiddleware(MiddlewareMixin):
             log.debug("Could not set cross-domain CSRF cookie.")
             return response
 
-        # Check whether (a) the CSRF middleware has already set a cookie, and
-        # (b) this is a view decorated with `@ensure_cross_domain_csrf_cookie`
-        # If so, we can send the cross-domain CSRF cookie.
+        # Send the cross-domain CSRF cookie if this is a view decorated with
+        # `@ensure_cross_domain_csrf_cookie` and the same-domain CSRF cookie
+        # value is available.
+        #
+        # Because CSRF_COOKIE can be set either by an inbound CSRF token or
+        # by the middleware generating a new one or echoing the old one for
+        # the response, this might result in sending the cookie more often
+        # than the CSRF value actually changes, but as of Django 4.0 we no
+        # longer have a good way of finding out when the csrf middleware has
+        # updated the value.
         should_set_cookie = (
             request.META.get('CROSS_DOMAIN_CSRF_COOKIE_USED', False) and
-            request.META.get('CSRF_COOKIE_USED', False) and
             request.META.get('CSRF_COOKIE') is not None
         )
 

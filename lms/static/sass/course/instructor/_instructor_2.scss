@@ -162,13 +162,21 @@
     overflow: hidden;
     vertical-align: bottom;
 
+    @include media-breakpoint-up(sm) {
+      margin-right: 6px;
+    }
+
+    @include media-breakpoint-down(xs) {
+      width: 100%;
+    }
+
     .enhanced-input-file {
       @include border-radius(4px 0 0 4px);
       @include padding(23px 6px 5px);
 
       position: relative;
       display: inline-block;
-      width: 265px;
+      width: 100%;
       vertical-align: middle;
       border: 1px solid $lightGrey1;
       background: $white;
@@ -177,8 +185,6 @@
     }
 
     .file-browse {
-      @include margin-left(-5px);
-
       display: inline-block;
       position: absolute;
       bottom: 0;
@@ -191,27 +197,34 @@
 
       .browse {
         @include button(simple, $primary);
-        @include margin-left(268px);
-
+        box-sizing: border-box;
+        height: 30px;
+        position: absolute;
+        bottom: 0;
+        right: 0;
+        z-index: 2;
         border-radius: 0 3px 3px 0;
         padding: 6px ($baseline/2);
         font-size: 12px;
       }
 
       .file_field {
-        @include left(-27%);
-
-        position: absolute;
+        box-sizing: border-box;
+        position: relative;
+        left: 0;
+        width: 100%;
+        padding: 3px 12px;
+        height: 30px;
         z-index: 3;
-        height: 24px; // To match bull browse button
-        width: 124%;
         margin: 0;
-        padding: 4px 0 0;
         cursor: pointer;
 
-        // for visual sync, need to make button similar to firefox
-        &::-webkit-file-upload-button {
-          width: 100px;
+        @include media-breakpoint-down(xs) {
+          padding-right: 80px;
+        }
+
+        &::file-selector-button {
+          display: none;
         }
       }
     }
@@ -695,16 +708,14 @@
     .hint {
       @extend %t-copy-sub2;
 
-      display: block;
+      display: none;
       position: absolute;
       top: ($baseline/2);
-
-      @include left(-9999em);
-
       padding: ($baseline/2);
       width: 50%;
       background-color: $light-gray3;
       box-shadow: 2px 2px 3px $shadow;
+      z-index: 1;
 
       .hint-caret {
         display: block;
@@ -723,11 +734,10 @@
     /* ***
      * Ideally we want to handle functionality with JS.
      * This functionality should eventually be moved into CS/JS, and out of here. */
-    .has-hint:hover > .hint {
-      @include left($baseline*10);
-    }
-
+    .has-hint:hover > .hint,
     .has-hint input:focus ~ .hint {
+      display: block;
+
       @include left($baseline*10);
     }
 
@@ -2669,6 +2679,11 @@ input[name="subject"] {
           width: 140px;
         }
 
+        &.attempt-ready-to-resume {
+          width: 60px;
+          @include text-align(center);
+        }
+
         &.email {
           width: ($baseline*8);
           word-wrap: break-word;
@@ -2715,7 +2730,8 @@ input[name="subject"] {
 
       td:nth-child(6),
       td:nth-child(5),
-      td:nth-child(7) {
+      td:nth-child(7),
+      td:nth-child(8){
         @include padding-left(0);
 
         text-align: center;
@@ -2726,7 +2742,7 @@ input[name="subject"] {
         text-align: center;
       }
 
-      td:nth-child(8) {
+      td:nth-child(9) {
         word-wrap: break-word;
         text-align: center;
       }

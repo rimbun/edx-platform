@@ -1,15 +1,17 @@
 """
 Tests for course_overviews app.
 """
+import datetime  # pylint: disable=wrong-import-order
+import itertools  # pylint: disable=wrong-import-order
+import json
+import math  # pylint: disable=wrong-import-order
+import os
 from io import BytesIO
 from unittest import mock
+from zoneinfo import ZoneInfo
 
-import pytest
-import datetime  # lint-amnesty, pylint: disable=wrong-import-order
-import itertools  # lint-amnesty, pylint: disable=wrong-import-order
-import math  # lint-amnesty, pylint: disable=wrong-import-order
 import ddt
-import pytz
+import pytest
 from django.conf import settings
 from django.db.utils import IntegrityError
 from django.test.utils import override_settings
@@ -17,27 +19,31 @@ from django.utils import timezone
 from opaque_keys.edx.keys import CourseKey
 from PIL import Image
 
+from common.djangoapps.static_replace.models import AssetBaseUrlConfig
 from lms.djangoapps.certificates.api import get_active_web_certificate
 from openedx.core.djangoapps.catalog.tests.mixins import CatalogIntegrationMixin
 from openedx.core.djangoapps.dark_lang.models import DarkLangConfig
 from openedx.core.djangoapps.models.course_details import CourseDetails
 from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
 from openedx.core.lib.courses import course_image_url
-from common.djangoapps.static_replace.models import AssetBaseUrlConfig
-from xmodule.assetstore.assetmgr import AssetManager
-from xmodule.contentstore.content import StaticContent
-from xmodule.contentstore.django import contentstore
-from xmodule.course_metadata_utils import DEFAULT_START_DATE
-from xmodule.course_module import (
+from xmodule.contentstore.content import StaticContent  # pylint: disable=wrong-import-order
+from xmodule.contentstore.django import contentstore  # pylint: disable=wrong-import-order
+from xmodule.course_block import (  # pylint: disable=wrong-import-order
     CATALOG_VISIBILITY_ABOUT,
     CATALOG_VISIBILITY_CATALOG_AND_ABOUT,
-    CATALOG_VISIBILITY_NONE
+    CATALOG_VISIBILITY_NONE,
 )
-from xmodule.error_module import ErrorBlock
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, check_mongo_calls_range
+from xmodule.course_metadata_utils import DEFAULT_START_DATE  # pylint: disable=wrong-import-order
+from xmodule.error_block import ErrorBlock  # pylint: disable=wrong-import-order
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    CourseFactory,
+    check_mongo_calls_range,
+)
 
 from ..models import CourseOverview, CourseOverviewImageConfig, CourseOverviewImageSet, CourseOverviewTab
 from .factories import CourseOverviewFactory
@@ -62,7 +68,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
         None: None,
     }
 
-    COURSE_OVERVIEW_TABS = {'courseware', 'info', 'textbooks', 'discussion', 'wiki', 'progress'}
+    COURSE_OVERVIEW_TABS = {'courseware', 'textbooks', 'discussion', 'wiki', 'progress', 'dates'}
 
     ENABLED_SIGNALS = ['course_deleted', 'course_published']
 
@@ -91,7 +97,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
             """
             if date_time is None:
                 return None
-            epoch = datetime.datetime.utcfromtimestamp(0).replace(tzinfo=pytz.utc)
+            epoch = datetime.datetime.utcfromtimestamp(0).replace(tzinfo=ZoneInfo("UTC"))
             return math.floor((date_time - epoch).total_seconds())
 
         # Load the CourseOverview from the cache twice. The first load will be a cache miss (because the cache
@@ -141,6 +147,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
             ('clean_id', ('#',)),
             ('has_ended', ()),
             ('has_started', ()),
+            ('is_enrollment_open', ()),
         ]
         for method_name, method_args in methods_to_test:
             course_value = getattr(course, method_name)(*method_args)
@@ -160,7 +167,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
         time_field_accessor = lambda object, field_name: get_seconds_since_epoch(getattr(object, field_name))
 
         # The course about fields are accessed through the CourseDetail
-        # class for the course module, and stored as attributes on the
+        # class for the course block, and stored as attributes on the
         # CourseOverview objects.
         course_about_accessor = lambda object, field_name: CourseDetails.fetch_about_attribute(object.id, field_name)
 
@@ -248,7 +255,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
                 "catalog_visibility": CATALOG_VISIBILITY_NONE,
             }
         ],
-        [ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split]
+        [ModuleStoreEnum.Type.split]
     ))
     @ddt.unpack
     def test_course_overview_behavior(self, course_kwargs, modulestore_type):
@@ -305,8 +312,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
         course_overview = CourseOverviewFactory.create(language=course_language)
         assert course_overview.closest_released_language == expected_language
 
-    @ddt.data(ModuleStoreEnum.Type.split, ModuleStoreEnum.Type.mongo)
-    def test_get_non_existent_course(self, modulestore_type):
+    def test_get_non_existent_course(self):
         """
         Tests that requesting a non-existent course from get_from_id raises
         CourseOverview.DoesNotExist.
@@ -315,39 +321,34 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
             modulestore_type (ModuleStoreEnum.Type): type of store to create the
                 course in.
         """
-        store = modulestore()._get_modulestore_by_type(modulestore_type)  # pylint: disable=protected-access
         with pytest.raises(CourseOverview.DoesNotExist):
-            CourseOverview.get_from_id(store.make_course_key('Non', 'Existent', 'Course'))
+            CourseOverview.get_from_id(self.store.make_course_key('Non', 'Existent', 'Course'))
 
-    @ddt.data(ModuleStoreEnum.Type.split, ModuleStoreEnum.Type.mongo)
-    def test_course_with_course_overview_exists(self, modulestore_type):
+    def test_course_with_course_overview_exists(self):
         """
         Tests that calling course_exists on an existent course
         that is cached in CourseOverview table returns True.
         """
-        course = CourseFactory.create(default_store=modulestore_type)
+        course = CourseFactory.create()
         CourseOverview.get_from_id(course.id)  # Ensure course in cached in CourseOverviews
         assert CourseOverview.objects.filter(id=course.id).exists()
         assert CourseOverview.course_exists(course.id)
 
-    @ddt.data(ModuleStoreEnum.Type.split, ModuleStoreEnum.Type.mongo)
-    def test_course_without_overview_exists(self, modulestore_type):
+    def test_course_without_overview_exists(self):
         """
         Tests that calling course_exists on an existent course
         that is NOT cached in CourseOverview table returns True.
         """
-        course = CourseFactory.create(default_store=modulestore_type)
+        course = CourseFactory.create()
         CourseOverview.objects.filter(id=course.id).delete()
         assert CourseOverview.course_exists(course.id)
         assert not CourseOverview.objects.filter(id=course.id).exists()
 
-    @ddt.data(ModuleStoreEnum.Type.split, ModuleStoreEnum.Type.mongo)
-    def test_nonexistent_course_does_not_exists(self, modulestore_type):
+    def test_nonexistent_course_does_not_exists(self):
         """
         Tests that calling course_exists on an non-existent course returns False.
         """
-        store = modulestore()._get_modulestore_by_type(modulestore_type)  # pylint: disable=protected-access
-        course_id = store.make_course_key('Non', 'Existent', 'Course')
+        course_id = self.store.make_course_key('Non', 'Existent', 'Course')
         assert not CourseOverview.course_exists(course_id)
 
     def test_get_errored_course(self):
@@ -360,7 +361,7 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
             # This mock makes it so when the module store tries to load course data,
             # an exception is thrown, which causes get_course to return an ErrorBlock,
             # which causes get_from_id to raise an IOError.
-            with pytest.raises(IOError):
+            with pytest.raises(IOError):  # noqa: PT011
                 CourseOverview.load_from_module_store(self.store.make_course_key('Non', 'Existent', 'Course'))
 
     def test_malformed_grading_policy(self):
@@ -373,28 +374,25 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
         """
         course = CourseFactory.create()
         course._grading_policy['GRADE_CUTOFFS'] = {}  # pylint: disable=protected-access
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             __ = course.lowest_passing_grade
         course_overview = CourseOverview._create_or_update(course)  # pylint: disable=protected-access
         assert course_overview.lowest_passing_grade is None
 
-    @ddt.data((ModuleStoreEnum.Type.mongo, 4, 4), (ModuleStoreEnum.Type.split, 3, 3))
-    @ddt.unpack
-    def test_versioning(self, modulestore_type, min_mongo_calls, max_mongo_calls):
+    def test_versioning(self):
         """
         Test that CourseOverviews with old version numbers are thrown out.
         """
-        with self.store.default_store(modulestore_type):
-            course = CourseFactory.create()
-            course_overview = CourseOverview.get_from_id(course.id)
-            course_overview.version = CourseOverview.VERSION - 1
-            course_overview.save()
+        course = CourseFactory.create()
+        course_overview = CourseOverview.get_from_id(course.id)
+        course_overview.version = CourseOverview.VERSION - 1
+        course_overview.save()
 
-            # Because the course overview now has an old version number, it should
-            # be thrown out after being loaded from the cache, which results in
-            # a call to get_course.
-            with check_mongo_calls_range(max_finds=max_mongo_calls, min_finds=min_mongo_calls):
-                _course_overview_2 = CourseOverview.get_from_id(course.id)
+        # Because the course overview now has an old version number, it should
+        # be thrown out after being loaded from the cache, which results in
+        # a call to get_course.
+        with check_mongo_calls_range(max_finds=2, min_finds=2):
+            _course_overview_2 = CourseOverview.get_from_id(course.id)
 
     # The CourseOverviewTab and CourseOverviewImageSet objects can't be filtered with course overview object as it is
     # created with `None` as 'id' - We are going to mock this to as this isn't being tested in this test case, instead
@@ -553,6 +551,178 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
             assert {course_overview.id for course_overview in CourseOverview.get_all_courses(filter_=filter_)} ==\
                    expected_courses, f'testing CourseOverview.get_all_courses with filter_={filter_}'
 
+    def test_get_all_active_courses(self):
+        """
+        Verify active courses or courses with null end date are returned if active_only is provided.
+        """
+        active_course = CourseFactory.create(emit_signals=True, end=self.DATES[self.NEXT_MONTH])
+        missing_end_date = CourseFactory.create(emit_signals=True, end=None)
+        inactive_course = CourseFactory.create(emit_signals=True, end=self.DATES[self.LAST_MONTH])
+
+        output_ids = {course.id for course in CourseOverview.get_all_courses(active_only=True)}
+
+        assert len(output_ids) == 2
+        assert inactive_course.id not in output_ids
+        assert {active_course.id, missing_end_date.id} == output_ids
+
+    def test_get_all_courses_by_start_date_range(self):
+        """
+        Verify only courses starting within the given range are returned.
+        """
+        in_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_WEEK])
+        out_of_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_MONTH])
+        no_start_date_course = CourseFactory.create(emit_signals=True, start=None)
+
+        output_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                start_date_on_or_after=self.DATES[self.LAST_WEEK],
+                start_date_on_or_before=self.DATES[self.NEXT_MONTH] - datetime.timedelta(days=1),
+            )
+        }
+
+        assert out_of_range_course.id not in output_ids
+        assert no_start_date_course.id not in output_ids
+        assert {in_range_course.id} == output_ids
+
+    def test_get_all_courses_by_start_date_on_or_after_only(self):
+        """
+        Verify start_date_on_or_after alone includes courses starting on or after it, with no upper bound.
+        """
+        in_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_WEEK])
+        far_in_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_MONTH])
+        out_of_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.LAST_MONTH])
+        no_start_date_course = CourseFactory.create(emit_signals=True, start=None)
+
+        output_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                start_date_on_or_after=self.DATES[self.LAST_WEEK],
+            )
+        }
+
+        assert out_of_range_course.id not in output_ids
+        assert no_start_date_course.id not in output_ids
+        assert {in_range_course.id, far_in_range_course.id} == output_ids
+
+    def test_get_all_courses_by_start_date_on_or_before_only(self):
+        """
+        Verify start_date_on_or_before alone includes courses starting on or before it, with no lower bound.
+        """
+        in_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.LAST_WEEK])
+        far_in_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.LAST_MONTH])
+        out_of_range_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_MONTH])
+        no_start_date_course = CourseFactory.create(emit_signals=True, start=None)
+
+        output_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                start_date_on_or_before=self.DATES[self.NEXT_WEEK],
+            )
+        }
+
+        assert out_of_range_course.id not in output_ids
+        assert no_start_date_course.id not in output_ids
+        assert {in_range_course.id, far_in_range_course.id} == output_ids
+
+    def test_get_all_courses_by_start_date_excludes_no_start_date_course(self):
+        """
+        Verify a course with no start date is excluded whenever either date bound is set.
+        """
+        no_start_date_course = CourseFactory.create(emit_signals=True, start=None)
+
+        after_only_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                start_date_on_or_after=self.DATES[self.LAST_WEEK],
+            )
+        }
+        before_only_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                start_date_on_or_before=self.DATES[self.NEXT_WEEK],
+            )
+        }
+
+        assert no_start_date_course.id not in after_only_ids
+        assert no_start_date_course.id not in before_only_ids
+
+    def test_get_all_courses_by_start_date_boundary_inclusive(self):
+        """
+        Verify both bounds include a course starting at the exact instant and exclude one a microsecond outside.
+        """
+        boundary = datetime.datetime(2027, 7, 1, 12, 0, tzinfo=ZoneInfo("UTC"))
+        one_microsecond = datetime.timedelta(microseconds=1)
+        at_boundary = CourseFactory.create(emit_signals=True, start=boundary)
+        just_before = CourseFactory.create(emit_signals=True, start=boundary - one_microsecond)
+        just_after = CourseFactory.create(emit_signals=True, start=boundary + one_microsecond)
+
+        after_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                filter_={"id__in": [at_boundary.id, just_before.id, just_after.id]},
+                start_date_on_or_after=boundary,
+            )
+        }
+        before_ids = {
+            course.id for course in CourseOverview.get_all_courses(
+                filter_={"id__in": [at_boundary.id, just_before.id, just_after.id]},
+                start_date_on_or_before=boundary,
+            )
+        }
+
+        assert after_ids == {at_boundary.id, just_after.id}
+        assert before_ids == {at_boundary.id, just_before.id}
+
+    def test_get_all_courses_by_start_date_offset_instants(self):
+        """
+        Verify a course starting late on June 30 UTC is found by a July 1 UTC+4 day range, not the same
+        wall-clock range in UTC.
+        """
+        course = CourseFactory.create(
+            emit_signals=True, start=datetime.datetime(2027, 6, 30, 22, 0, tzinfo=ZoneInfo("UTC"))
+        )
+        utc_plus_4 = datetime.timezone(datetime.timedelta(hours=4))
+
+        local_day_ids = {
+            course_overview.id for course_overview in CourseOverview.get_all_courses(
+                start_date_on_or_after=datetime.datetime(2027, 7, 1, 0, 0, tzinfo=utc_plus_4),
+                start_date_on_or_before=datetime.datetime(2027, 7, 1, 23, 59, 59, 999999, tzinfo=utc_plus_4),
+            )
+        }
+        utc_day_ids = {
+            course_overview.id for course_overview in CourseOverview.get_all_courses(
+                start_date_on_or_after=datetime.datetime(2027, 7, 1, 0, 0, tzinfo=ZoneInfo("UTC")),
+                start_date_on_or_before=datetime.datetime(2027, 7, 1, 23, 59, 59, 999999, tzinfo=ZoneInfo("UTC")),
+            )
+        }
+
+        assert course.id in local_day_ids
+        assert course.id not in utc_day_ids
+
+    def test_get_all_courses_by_start_date_us_timezone(self):
+        """
+        Verify a course starting early on July 1 UTC is found by a June 30 UTC-4 day range.
+        """
+        course = CourseFactory.create(
+            emit_signals=True, start=datetime.datetime(2027, 7, 1, 2, 0, tzinfo=ZoneInfo("UTC"))
+        )
+        utc_minus_4 = datetime.timezone(datetime.timedelta(hours=-4))
+
+        output_ids = {
+            course_overview.id for course_overview in CourseOverview.get_all_courses(
+                start_date_on_or_after=datetime.datetime(2027, 6, 30, 0, 0, tzinfo=utc_minus_4),
+                start_date_on_or_before=datetime.datetime(2027, 6, 30, 23, 59, 59, 999999, tzinfo=utc_minus_4),
+            )
+        }
+
+        assert course.id in output_ids
+
+    def test_get_all_courses_by_start_date_params_absent(self):
+        """
+        Verify get_all_courses returns courses unfiltered by start date when neither param is given.
+        """
+        course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_WEEK])
+        other_course = CourseFactory.create(emit_signals=True, start=self.DATES[self.NEXT_MONTH])
+
+        output_ids = {course_overview.id for course_overview in CourseOverview.get_all_courses()}
+
+        assert {course.id, other_course.id} == output_ids
+
     def test_get_from_ids(self):
         """
         Assert that CourseOverviews.get_from_ids works as expected.
@@ -595,6 +765,24 @@ class CourseOverviewTestCase(CatalogIntegrationMixin, ModuleStoreTestCase, Cache
         assert overviews_by_id[old_overview.id].id == old_overview.id
         assert overviews_by_id[non_existent_course_key] is None
         assert mock_load_from_modulestore.call_count == 3
+
+    def test_mongo_course_overview_generation(self):
+        """
+        Tests that course_overview can be generated for old Mongo course.
+        """
+        store = modulestore()._get_modulestore_by_type(ModuleStoreEnum.Type.mongo)  # pylint: disable=protected-access
+        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data/mongo_course.json')
+        with open(file_path) as file:
+            course_structure = json.load(file)
+
+        store.collection.insert_one(course_structure)
+
+        course_key = CourseKey.from_string('org.0/course_0/Run_0')
+        assert CourseOverview.course_exists(course_key)
+        assert not CourseOverview.objects.filter(id=course_key).exists()
+
+        CourseOverview.load_from_module_store(course_key)
+        assert CourseOverview.objects.filter(id=course_key).exists()
 
 
 @ddt.ddt
@@ -650,28 +838,21 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
 
     @override_settings(DEFAULT_COURSE_ABOUT_IMAGE_URL='default_course.png')
     @override_settings(STATIC_URL='static/')
-    @ddt.data(
-        *itertools.product(
-            [ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split],
-            [None, '']
-        )
-    )
-    @ddt.unpack
-    def test_no_source_image(self, modulestore_type, course_image):
+    @ddt.data(None, '')
+    def test_no_source_image(self, course_image):
         """
         Tests that we behave as expected if no source image was specified.
         """
         # Because we're sending None and '', we expect to get the generic
         # fallback URL for course images.
         fallback_url = settings.STATIC_URL + settings.DEFAULT_COURSE_ABOUT_IMAGE_URL
-        course_overview = self._assert_image_urls_all_default(modulestore_type, course_image, fallback_url)
+        course_overview = self._assert_image_urls_all_default(ModuleStoreEnum.Type.split, course_image, fallback_url)
 
         # Even though there was no source image to generate, we should still
         # have a CourseOverviewImageSet object associated with this overview.
         assert hasattr(course_overview, 'image_set')
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_disabled_no_prior_data(self, modulestore_type):
+    def test_disabled_no_prior_data(self):
         """
         Test behavior when we are disabled and no entries exist.
 
@@ -684,13 +865,12 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
         # Since we're disabled, we should just return the raw source image back
         # for every resolution in image_urls.
         fake_course_image = 'sample_image.png'
-        course_overview = self._assert_image_urls_all_default(modulestore_type, fake_course_image)
+        course_overview = self._assert_image_urls_all_default(ModuleStoreEnum.Type.split, fake_course_image)
 
         # Because we are disabled, no image set should have been generated.
         assert not hasattr(course_overview, 'image_set')
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_disabled_with_prior_data(self, modulestore_type):
+    def test_disabled_with_prior_data(self):
         """
         Test behavior when entries have been created but we are disabled.
 
@@ -706,11 +886,8 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
         course_image = "my_course.jpg"
         broken_small_url = "I am small!"
         broken_large_url = "I am big!"
-        with self.store.default_store(modulestore_type):
-            course = CourseFactory.create(
-                default_store=modulestore_type, course_image=course_image
-            )
-            course_overview_before = self.get_from_id(course.id)
+        course = CourseFactory.create(course_image=course_image)
+        course_overview_before = self.get_from_id(course.id)
 
         # This initial seeding should create an entry for the image_set.
         assert hasattr(course_overview_before, 'image_set')
@@ -738,81 +915,71 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
         expected_url = course_image_url(course)
         assert course_overview_after.image_urls == {'raw': expected_url, 'small': expected_url, 'large': expected_url}
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_cdn(self, modulestore_type):
+    def test_cdn(self):
         """
         Test that we return CDN prefixed URLs if it is enabled.
         """
-        with self.store.default_store(modulestore_type):
-            course = CourseFactory.create(default_store=modulestore_type)
-            overview = self.get_from_id(course.id)
+        course = CourseFactory.create()
+        overview = self.get_from_id(course.id)
 
-            # First the behavior when there's no CDN enabled...
-            AssetBaseUrlConfig.objects.all().delete()
-            if modulestore_type == ModuleStoreEnum.Type.mongo:
-                expected_path_start = "/c4x/"
-            elif modulestore_type == ModuleStoreEnum.Type.split:
-                expected_path_start = "/asset-v1:"
+        # First the behavior when there's no CDN enabled...
+        AssetBaseUrlConfig.objects.all().delete()
+        expected_path_start = "/asset-v1:"
 
-            for url in overview.image_urls.values():
-                assert url.startswith(expected_path_start)
+        for url in overview.image_urls.values():
+            assert url.startswith(expected_path_start)
 
-            # Now enable the CDN...
-            AssetBaseUrlConfig.objects.create(enabled=True, base_url='fakecdn.edx.org')
-            expected_cdn_url = "//fakecdn.edx.org" + expected_path_start
+        # Now enable the CDN...
+        AssetBaseUrlConfig.objects.create(enabled=True, base_url='fakecdn.edx.org')
+        expected_cdn_url = "//fakecdn.edx.org" + expected_path_start
 
-            for url in overview.image_urls.values():
-                assert url.startswith(expected_cdn_url)
+        for url in overview.image_urls.values():
+            assert url.startswith(expected_cdn_url)
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_cdn_with_external_image(self, modulestore_type):
+    def test_cdn_with_external_image(self):
         """
         Test that we return CDN prefixed URLs unless they're absolute.
         """
-        with self.store.default_store(modulestore_type):
-            course = CourseFactory.create(default_store=modulestore_type)
-            overview = self.get_from_id(course.id)
+        course = CourseFactory.create()
+        overview = self.get_from_id(course.id)
 
-            # Now enable the CDN...
-            AssetBaseUrlConfig.objects.create(enabled=True, base_url='fakecdn.edx.org')
-            expected_cdn_url = "//fakecdn.edx.org"
+        # Now enable the CDN...
+        AssetBaseUrlConfig.objects.create(enabled=True, base_url='fakecdn.edx.org')
+        expected_cdn_url = "//fakecdn.edx.org"
 
-            start_urls = {
-                'raw': 'http://google.com/image.png',
-                'small': '/static/overview.png',
-                'large': ''
-            }
+        start_urls = {
+            'raw': 'http://google.com/image.png',
+            'small': '/static/overview.png',
+            'large': ''
+        }
 
-            modified_urls = overview.apply_cdn_to_urls(start_urls)
-            assert modified_urls['raw'] == start_urls['raw']
-            assert modified_urls['small'] != start_urls['small']
-            assert modified_urls['small'].startswith(expected_cdn_url)
-            assert modified_urls['large'] == start_urls['large']
+        modified_urls = overview.apply_cdn_to_urls(start_urls)
+        assert modified_urls['raw'] == start_urls['raw']
+        assert modified_urls['small'] != start_urls['small']
+        assert modified_urls['small'].startswith(expected_cdn_url)
+        assert modified_urls['large'] == start_urls['large']
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_cdn_with_a_single_external_image(self, modulestore_type):
+    def test_cdn_with_a_single_external_image(self):
         """
         Test CDN is applied for a URL when apply_cdn_to_url called directly.
 
         Apply CDN/base URL to the given URL if CDN configuration is enabled
         and the URL is not absolute.
         """
-        with self.store.default_store(modulestore_type):
-            course = CourseFactory.create(default_store=modulestore_type)
-            overview = self.get_from_id(course.id)
+        course = CourseFactory.create()
+        overview = self.get_from_id(course.id)
 
-            # Now enable the CDN...
-            AssetBaseUrlConfig.objects.create(enabled=True, base_url='fakecdn.edx.org')
-            expected_cdn_url = "//fakecdn.edx.org"
+        # Now enable the CDN...
+        AssetBaseUrlConfig.objects.create(enabled=True, base_url='fakecdn.edx.org')
+        expected_cdn_url = "//fakecdn.edx.org"
 
-            start_url = "/static/overview.png"
-            modified_url = overview.apply_cdn_to_url(start_url)
+        start_url = "/static/overview.png"
+        modified_url = overview.apply_cdn_to_url(start_url)
 
-            assert start_url != modified_url
-            assert modified_url.startswith(expected_cdn_url)
+        assert start_url != modified_url
+        assert modified_url.startswith(expected_cdn_url)
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_error_generating_thumbnails(self, modulestore_type):
+    def test_error_generating_thumbnails(self):
         """
         Test a scenario where thumbnails cannot be generated.
 
@@ -832,7 +999,7 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
 
             # This will generate a CourseOverview and verify that we get the
             # source image back for all resolutions.
-            course_overview = self._assert_image_urls_all_default(modulestore_type, fake_course_image)
+            course_overview = self._assert_image_urls_all_default(ModuleStoreEnum.Type.split, fake_course_image)
 
             # Make sure we were called (i.e. we tried to create the thumbnail)
             patched_create_thumbnail.assert_called()
@@ -849,14 +1016,8 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
             self.get_from_id(course_overview.id)
             patched_create_thumbnail.assert_not_called()
 
-    @ddt.data(
-        *itertools.product(
-            [ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split],
-            [True, False],
-        )
-    )
-    @ddt.unpack
-    def test_happy_path(self, modulestore_type, create_after_overview):
+    @ddt.data(True, False)
+    def test_happy_path(self, create_after_overview):
         """
         What happens when everything works like we expect it to.
 
@@ -873,48 +1034,45 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
         image_buff.seek(0)
         image_name = "big_course_image.jpeg"
 
-        with self.store.default_store(modulestore_type):
-            course = CourseFactory.create(
-                default_store=modulestore_type, course_image=image_name
-            )
+        course = CourseFactory.create(course_image=image_name)
 
-            # Save a real image here...
-            course_image_asset_key = StaticContent.compute_location(course.id, course.course_image)
-            course_image_content = StaticContent(course_image_asset_key, image_name, 'image/jpeg', image_buff)
-            contentstore().save(course_image_content)
+        # Save a real image here...
+        course_image_asset_key = StaticContent.compute_location(course.id, course.course_image)
+        course_image_content = StaticContent(course_image_asset_key, image_name, 'image/jpeg', image_buff)
+        contentstore().save(course_image_content)
 
-            # If create_after_overview is True, disable thumbnail generation so
-            # that the CourseOverview object is created and saved without an
-            # image_set at first (it will be lazily created later).
-            if create_after_overview:
-                self.set_config(enabled=False)
+        # If create_after_overview is True, disable thumbnail generation so
+        # that the CourseOverview object is created and saved without an
+        # image_set at first (it will be lazily created later).
+        if create_after_overview:
+            self.set_config(enabled=False)
 
-            # Now generate the CourseOverview...
+        # Now generate the CourseOverview...
+        course_overview = self.get_from_id(course.id)
+
+        # If create_after_overview is True, no image_set exists yet. Verify
+        # that, then switch config back over to True and it should lazily
+        # create the image_set on the next get_from_id() call.
+        if create_after_overview:
+            assert not hasattr(course_overview, 'image_set')
+            self.set_config(enabled=True)
             course_overview = self.get_from_id(course.id)
 
-            # If create_after_overview is True, no image_set exists yet. Verify
-            # that, then switch config back over to True and it should lazily
-            # create the image_set on the next get_from_id() call.
-            if create_after_overview:
-                assert not hasattr(course_overview, 'image_set')
-                self.set_config(enabled=True)
-                course_overview = self.get_from_id(course.id)
+        assert hasattr(course_overview, 'image_set')
+        image_urls = course_overview.image_urls
+        config = CourseOverviewImageConfig.current()
 
-            assert hasattr(course_overview, 'image_set')
-            image_urls = course_overview.image_urls
-            config = CourseOverviewImageConfig.current()
+        # Make sure the thumbnail names come out as expected...
+        assert image_urls['raw'].endswith('big_course_image.jpeg')
+        assert image_urls['small'].endswith('big_course_image-jpeg-{}x{}.jpg'.format(*config.small))
+        assert image_urls['large'].endswith('big_course_image-jpeg-{}x{}.jpg'.format(*config.large))
 
-            # Make sure the thumbnail names come out as expected...
-            assert image_urls['raw'].endswith('big_course_image.jpeg')
-            assert image_urls['small'].endswith('big_course_image-jpeg-{}x{}.jpg'.format(*config.small))
-            assert image_urls['large'].endswith('big_course_image-jpeg-{}x{}.jpg'.format(*config.large))
-
-            # Now make sure our thumbnails are of the sizes we expect...
-            for image_url, expected_size in [(image_urls['small'], config.small), (image_urls['large'], config.large)]:
-                image_key = StaticContent.get_location_from_path(image_url)
-                image_content = AssetManager.find(image_key)
-                image = Image.open(BytesIO(image_content.data))
-                assert image.size == expected_size
+        # Now make sure our thumbnails are of the sizes we expect...
+        for image_url, expected_size in [(image_urls['small'], config.small), (image_urls['large'], config.large)]:
+            image_key = StaticContent.get_location_from_path(image_url)
+            image_content = contentstore().find(image_key)
+            image = Image.open(BytesIO(image_content.data))
+            assert image.size == expected_size
 
     @ddt.data(
         (800, 400),  # Larger than both, correct ratio
@@ -964,7 +1122,7 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
 
         for image_url, target in [(image_urls['small'], config.small), (image_urls['large'], config.large)]:
             image_key = StaticContent.get_location_from_path(image_url)
-            image_content = AssetManager.find(image_key)
+            image_content = contentstore().find(image_key)
             image = Image.open(BytesIO(image_content.data))
 
             # Naming convention for thumbnail
@@ -1049,7 +1207,7 @@ class CourseOverviewImageSetTestCase(ModuleStoreTestCase):
         assert image_urls['small'].endswith('src_course_image-png-{}x{}.jpg'.format(*config.small))
         assert image_urls['large'].endswith('src_course_image-png-{}x{}.jpg'.format(*config.large))
 
-        # Update course image on the course descriptor This fires a
+        # Update course image on the course block. This fires a
         # course_published signal, this will be caught in signals.py,
         # which should in turn load CourseOverview from modulestore.
         course.course_image = 'src_course_image1.png'
@@ -1096,13 +1254,12 @@ class CourseOverviewTabTestCase(ModuleStoreTestCase):
 
     ENABLED_SIGNALS = ['course_published']
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_tabs_deletion_rollback_on_integrity_error(self, modulestore_type):
+    def test_tabs_deletion_rollback_on_integrity_error(self):
         """
         Tests that course_overview tabs deletion is correctly rolled back if an Exception
         occurs while updating the course_overview.
         """
-        course = CourseFactory.create(default_store=modulestore_type)
+        course = CourseFactory.create()
         course_overview = CourseOverview.get_from_id(course.id)
         expected_tabs = {tab.tab_id for tab in course_overview.tab_set.all()}
 
@@ -1111,7 +1268,7 @@ class CourseOverviewTabTestCase(ModuleStoreTestCase):
         ) as course_overview_tabs_bulk_create:
             course_overview_tabs_bulk_create.side_effect = IntegrityError
 
-            # Update display name on the course descriptor
+            # Update display name on the course block
             # This fires a course_published signal, which should be caught in signals.py,
             # which should in turn load CourseOverview from modulestore.
             course.display_name = 'Updated display name'

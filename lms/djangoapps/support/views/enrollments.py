@@ -1,8 +1,10 @@
 """
 Support tool for changing course enrollments.
 """
+import logging
 
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+import markupsafe
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponseBadRequest
@@ -11,26 +13,29 @@ from django.utils.decorators import method_decorator
 from django.views.generic import View
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
+from openedx_filters.learning.filters import SupportEnrollmentDataRequested
 from rest_framework.generics import GenericAPIView
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.edxmako.shortcuts import render_to_response
+from common.djangoapps.entitlements.models import CourseEntitlement
 from common.djangoapps.student.models import (
     ENROLLED_TO_ENROLLED,
     UNENROLLED_TO_ENROLLED,
     CourseEnrollment,
     CourseEnrollmentAttribute,
-    ManualEnrollmentAudit
+    ManualEnrollmentAudit,
 )
 from common.djangoapps.util.json_request import JsonResponse
-from common.djangoapps.entitlements.models import CourseEntitlement
 from lms.djangoapps.support.decorators import require_support_permission
 from lms.djangoapps.support.serializers import ManualEnrollmentSerializer
 from lms.djangoapps.verify_student.models import VerificationDeadline
 from openedx.core.djangoapps.credit.email_utils import get_credit_provider_attribute_values
-from openedx.core.djangoapps.enrollments.api import get_enrollments, update_enrollment
+from openedx.core.djangoapps.enrollments.api import get_enrollment_attributes, get_enrollments, update_enrollment
 from openedx.core.djangoapps.enrollments.errors import CourseModeNotFoundError
 from openedx.core.djangoapps.enrollments.serializers import ModeSerializer
+
+logger = logging.getLogger(__name__)
 
 
 class EnrollmentSupportView(View):
@@ -71,16 +76,23 @@ class EnrollmentSupportListView(GenericAPIView):
             return JsonResponse([])
 
         enrollments = get_enrollments(user.username, include_inactive=True)
+
         for enrollment in enrollments:
             # Folds the course_details field up into the main JSON object.
             enrollment.update(**enrollment.pop('course_details'))
             course_key = CourseKey.from_string(enrollment['course_id'])
-            # get the all courses modes and replace with existing modes.
+            # Get the all courses modes and replace with existing modes.
             enrollment['course_modes'] = self.get_course_modes(course_key)
             # Add the price of the course's verified mode.
             self.include_verified_mode_info(enrollment, course_key)
+            # Add order number associated with the enrollment if available
+            self.include_order_number(enrollment)
+            self.include_source_system(enrollment)
             # Add manual enrollment history, if it exists
             enrollment['manual_enrollment'] = self.manual_enrollment_data(enrollment, course_key)
+
+        enrollments, _ = SupportEnrollmentDataRequested.run_filter(enrollments_data=enrollments, user=user)
+
         return JsonResponse(enrollments)
 
     @method_decorator(require_support_permission)
@@ -100,7 +112,7 @@ class EnrollmentSupportListView(GenericAPIView):
             return HttpResponseBadRequest('Could not parse course key.')
         except User.DoesNotExist:
             return HttpResponseBadRequest(
-                'Could not find user {username}.'.format(
+                'Could not find user {username}.'.format(  # noqa: UP032
                     username=username_or_email
                 )
             )
@@ -117,7 +129,7 @@ class EnrollmentSupportListView(GenericAPIView):
         ]
         if mode not in enrollment_modes:
             return HttpResponseBadRequest(
-                f'{str(mode)} is not a valid mode for {str(course_id)}. '
+                f'{markupsafe.escape(mode)} is not a valid mode for {str(course_id)}. '
                 f'Possible valid modes are {str(enrollment_modes)}'
             )
 
@@ -147,17 +159,16 @@ class EnrollmentSupportListView(GenericAPIView):
             reason = request.data['reason']
             enrollment = CourseEnrollment.objects.get(user=user, course_id=course_key)
             if enrollment.mode != old_mode:
-                return HttpResponseBadRequest('User {username} is not enrolled with mode {old_mode}.'.format(
-                    username=user.username,
-                    old_mode=old_mode
-                ))
+                return HttpResponseBadRequest(
+                    f'User {user.username} is not enrolled with mode {markupsafe.escape(old_mode)}.'
+                )
         except KeyError as err:
             return HttpResponseBadRequest(f'The field {str(err)} is required.')
         except InvalidKeyError:
             return HttpResponseBadRequest('Could not parse course key.')
         except (CourseEnrollment.DoesNotExist, User.DoesNotExist):
             return HttpResponseBadRequest(
-                'Could not find enrollment for user {username} in course {course}.'.format(
+                'Could not find enrollment for user {username} in course {course}.'.format(  # noqa: UP032
                     username=username_or_email,
                     course=str(course_key)
                 )
@@ -212,6 +223,52 @@ class EnrollmentSupportListView(GenericAPIView):
                 enrollment_data['verified_price'] = mode['min_price']
                 enrollment_data['verified_upgrade_deadline'] = mode['expiration_datetime']
                 enrollment_data['verification_deadline'] = VerificationDeadline.deadline_for_course(course_key)
+
+    @staticmethod
+    def include_order_number(enrollment):
+        """
+        For a provided enrollment data dictionary, include order_number from CourseEnrollmentAttribute if available.
+
+        From all the attributes of a course enrollment:
+
+          * Filter order_number attributes namespaced under `order`
+          * Use the last/latest order number attr if multiple attrs found
+             * This is to keep the usage consistent with get_order_attribute_value method in CourseEnrollment
+        """
+        username = enrollment['user']
+        course_id = enrollment['course_id']
+        enrollment_attributes = get_enrollment_attributes(username, course_id)
+        order_attribute = [
+            enrollment_attribute.get('value', '') for enrollment_attribute in enrollment_attributes if
+            enrollment_attribute['namespace'] == 'order' and enrollment_attribute['name'] == 'order_number'
+        ]
+        if len(order_attribute) > 1:
+            # logging this warning for info/debug purpose
+            logger.warning(
+                "Found multiple order name attributes for CourseEnrollment for user %s with course %s",
+                username,
+                course_id
+            )
+        enrollment['order_number'] = order_attribute[-1] if order_attribute else ''
+
+    @staticmethod
+    def include_source_system(enrollment):
+        """
+        For a provided enrollment data dictionary, include source_system from CourseEnrollmentAttribute if available.
+
+        From all the attributes of a course enrollment:
+
+          * Filter source_system attribute namespaced under `order`
+        """
+        username = enrollment['user']
+        course_id = enrollment['course_id']
+        enrollment_attributes = get_enrollment_attributes(username, course_id)
+        source_system = ''
+        for attribute in enrollment_attributes:
+            if attribute['namespace'] == 'order' and attribute['name'] == 'source_system':
+                source_system = attribute.get('value', '')
+                break
+        enrollment['source_system'] = source_system
 
     @staticmethod
     def manual_enrollment_data(enrollment_data, course_key):

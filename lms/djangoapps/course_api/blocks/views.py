@@ -9,17 +9,20 @@ from django.http import Http404
 from django.utils.cache import patch_response_headers
 from django.utils.decorators import method_decorator
 from opaque_keys import InvalidKeyError
-from opaque_keys.edx.keys import CourseKey
+from opaque_keys.edx.keys import CourseKey, UsageKey
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 
 from lms.djangoapps.course_goals.models import UserActivity
+from lms.djangoapps.courseware.access import has_access
 from openedx.core.lib.api.view_utils import DeveloperErrorViewMixin, view_auth_classes
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
 
-from .api import get_blocks
+from .api import get_block_metadata, get_blocks
 from .forms import BlockListGetForm
+from .utils import filter_discussion_xblocks_from_response
 
 
 @method_decorator(transaction.non_atomic_requests, name='dispatch')
@@ -243,7 +246,7 @@ class BlocksView(DeveloperErrorViewMixin, ListAPIView):
                 patch_response_headers(response)
             return response
         except ItemNotFoundError as exception:
-            raise Http404(f"Block not found: {str(exception)}")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise Http404(f"Block not found: {str(exception)}")  # pylint: disable=raise-missing-from  # noqa: B904
 
 
 @view_auth_classes(is_authenticated=False)
@@ -306,9 +309,10 @@ class BlocksInCourseView(BlocksView):
             course_key = CourseKey.from_string(course_key_string)
             course_usage_key = modulestore().make_course_usage_key(course_key)
         except InvalidKeyError:
-            raise ValidationError(f"'{str(course_key_string)}' is not a valid course key.")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise ValidationError(f"'{str(course_key_string)}' is not a valid course key.")  # pylint: disable=raise-missing-from  # noqa: B904
         response = super().list(request, course_usage_key,
                                 hide_access_denials=hide_access_denials)
+        response = filter_discussion_xblocks_from_response(response, course_key)
 
         # Record user activity for tracking progress towards a user's course goals (for mobile app)
         UserActivity.record_user_activity(request.user, course_key, request=request, only_if_mobile_app=True)
@@ -326,15 +330,76 @@ class BlocksInCourseView(BlocksView):
 
                 if course_block.get('type') == 'course':
                     root = course_block['id']
+                else:
+                    root = str(course_usage_key)
         else:
             root = response.data['root']
             course_blocks = response.data['blocks']
 
         if not root:
-            raise ValueError(f"Unable to find course block in {course_key_string}")
+            raise ValidationError(f"Unable to find course block in '{course_key_string}'")
 
         recurse_mark_complete(root, course_blocks)
         return response
+
+
+@method_decorator(transaction.non_atomic_requests, name='dispatch')
+@view_auth_classes(is_authenticated=False)
+class BlockMetadataView(DeveloperErrorViewMixin, ListAPIView):
+    """
+    **Use Case**
+
+        Returns the block metadata. Data like index_dictionary related to a
+        block should be fetched using this API, because they are too large for
+        the cache used by the course blocks/transformers API.
+
+    **Example requests**:
+
+        GET /api/courses/v1/block_metadata/<usage_id>/?
+            &include=index_dictionary
+
+    **Parameters**:
+
+        * "include": a comma-separated list of keys to include.
+          Valid keys are "index_dictionary".
+
+    **Response Values**
+
+        A dictionary containing:
+        * id (string): Block usage_key_str.
+        * type (string) Block type.
+        * index_dictionary: (dict) The index_dictionary JSON data
+          (usually this is the text content of the block, for search
+          indexing or other purposes) for this block. Returned only if
+          the "index_dictionary" is included in the "include"
+          parameter.
+    """
+
+    def list(self, request, usage_key_string):  # pylint: disable=arguments-differ
+        """
+        Retrieves the usage_key for the requested block, and then returns the
+        block metadata
+
+        Arguments:
+            request - Django request object
+        """
+
+        try:
+            usage_key = UsageKey.from_string(usage_key_string)
+        except InvalidKeyError:
+            raise ValidationError(f"'{str(usage_key_string)}' is not a valid usage key.")  # pylint: disable=raise-missing-from  # noqa: B904
+
+        if not has_access(request.user, "staff", usage_key):
+            raise PermissionDenied(f"You do not have permission to access block '{usage_key_string}'.")
+
+        try:
+            block = modulestore().get_item(usage_key)
+        except ItemNotFoundError as exception:
+            raise Http404(f"Block not found: {str(exception)}")  # pylint: disable=raise-missing-from  # noqa: B904
+
+        includes = request.GET.get("include", "").split(",")
+        data = get_block_metadata(block, includes)
+        return Response(data)
 
 
 def recurse_mark_complete(block_id, blocks):

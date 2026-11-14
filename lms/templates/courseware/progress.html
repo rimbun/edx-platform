@@ -7,19 +7,20 @@ from datetime import datetime
 
 from django.conf import settings
 from django.urls import reverse
-from django.utils.http import urlquote_plus
-from django.utils.translation import ugettext as _
+from urllib.parse import quote_plus
+from django.utils.translation import gettext as _
 from pytz import UTC
+from xblock.scorable import ShowCorrectness
 
 from common.djangoapps.course_modes.models import CourseMode
+from lms.djangoapps.branding.api import get_learner_display_username
 from lms.djangoapps.certificates.data import CertificateStatuses
 from lms.djangoapps.grades.api import constants as grades_constants
 from openedx.core.djangolib.markup import HTML, Text
-from openedx.features.enterprise_support.utils import get_enterprise_learner_generic_name
 %>
 
 <%
-username = get_enterprise_learner_generic_name(request) or student.username
+username = get_learner_display_username(user=student)
 %>
 
 <%block name="bodyclass">view-in-course view-progress</%block>
@@ -83,8 +84,6 @@ username = get_enterprise_learner_generic_name(request) or student.username
                                 <div class="msg-actions">
                                     %if certificate_data.cert_web_view_url:
                                     <a class="btn" href="${certificate_data.cert_web_view_url}" rel="noopener" target="_blank">${_("View Certificate")} <span class="sr">${_("Opens in a new browser window")}</span></a>
-                                    %elif certificate_data.cert_status == CertificateStatuses.downloadable and certificate_data.download_url:
-                                    <a class="btn" href="${certificate_data.download_url}" rel="noopener" target="_blank">${_("Download Your Certificate")} <span class="sr">${_("Opens in a new browser window")}</span></a>
                                     %elif certificate_data.cert_status == CertificateStatuses.requesting:
                                     <button class="btn generate_certs" data-endpoint="${post_url}" id="btn_generate_cert">${_('Request Certificate')}</button>
                                     %endif
@@ -182,23 +181,23 @@ username = get_enterprise_learner_generic_name(request) or student.username
                                         <h4 class="hd hd-4">
                                             %if hide_url:
                                                 <p class="d-inline">${section.display_name}
-                                                %if (total > 0 or earned > 0) and section.show_grades(staff_access):
+                                                %if (total > 0 or earned > 0) and ShowCorrectness.correctness_available(section.show_correctness, section.due, staff_access):
                                                     <span class="sr">
                                                         ${_("{earned} of {total} possible points").format(earned='{:.3n}'.format(float(earned)), total='{:.3n}'.format(float(total)))}
                                                     </span>
                                                     %endif
                                                 </p>
                                             %else:
-                                                <a href="${reverse('courseware_section', kwargs=dict(course_id=str(course.id), chapter=chapter['url_name'], section=section.url_name))}">
+                                                <a href="${reverse('courseware_subsection', kwargs=dict(course_id=str(course.id), section=chapter['url_name'], subsection=section.url_name))}">
                                                     ${ section.display_name}
-                                                    %if (total > 0 or earned > 0) and section.show_grades(staff_access):
+                                                    %if (total > 0 or earned > 0) and ShowCorrectness.correctness_available(section.show_correctness, section.due, staff_access):
                                                     <span class="sr">
                                                         ${_("{earned} of {total} possible points").format(earned='{:.3n}'.format(float(earned)), total='{:.3n}'.format(float(total)))}
                                                     </span>
                                                     %endif
                                                 </a>
                                             %endif
-                                            %if (total > 0 or earned > 0) and section.show_grades(staff_access):
+                                            %if (total > 0 or earned > 0) and ShowCorrectness.correctness_available(section.show_correctness, section.due, staff_access):
                                             <span> ${"({0:.3n}/{1:.3n}) {2}".format( float(earned), float(total), percentageString )}</span>
                                             %endif
                                         </h4>
@@ -221,7 +220,7 @@ username = get_enterprise_learner_generic_name(request) or student.username
                                             %endif
                                         </p>
                                         %if len(section.problem_scores.values()) > 0:
-                                          %if section.show_grades(staff_access):
+                                          %if ShowCorrectness.correctness_available(section.show_correctness, section.due, staff_access):
                                           <dl class="scores">
                                               <dt class="hd hd-6">${ _("Problem Scores: ") if section.graded else _("Practice Scores: ")}</dt>
                                               %for score in section.problem_scores.values():

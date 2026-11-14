@@ -7,7 +7,6 @@ import shutil
 import unittest
 from tempfile import mkdtemp
 
-import ddt
 from django.core.management import CommandError, call_command
 
 from xmodule.modulestore import ModuleStoreEnum
@@ -25,11 +24,10 @@ class TestArgParsingCourseExport(unittest.TestCase):
         Test export command with no arguments
         """
         errstring = "Error: the following arguments are required: course_id, output_path"
-        with self.assertRaisesRegex(CommandError, errstring):
+        with self.assertRaisesRegex(CommandError, errstring):  # noqa: PT027
             call_command('export')
 
 
-@ddt.ddt
 class TestCourseExport(ModuleStoreTestCase):
     """
     Test exporting a course
@@ -45,20 +43,19 @@ class TestCourseExport(ModuleStoreTestCase):
         self.addCleanup(shutil.rmtree, self.temp_dir_1)
         self.addCleanup(shutil.rmtree, self.temp_dir_2)
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_export_course_with_directory_name(self, store):
+    def test_export_course_with_directory_name(self):
         """
         Create a new course try exporting in a path specified
         """
-        course = CourseFactory.create(default_store=store)
+        course = CourseFactory.create(default_store=ModuleStoreEnum.Type.split)
         course_id = str(course.id)
-        self.assertTrue(
+        self.assertTrue(  # noqa: PT009
             modulestore().has_course(course.id),
-            f"Could not find course in {store}"
+            f"Could not find course in {ModuleStoreEnum.Type.split}"
         )
         # Test `export` management command with invalid course_id
         errstring = "Invalid course_key: 'InvalidCourseID'."
-        with self.assertRaisesRegex(CommandError, errstring):
+        with self.assertRaisesRegex(CommandError, errstring):  # noqa: PT027
             call_command('export', "InvalidCourseID", self.temp_dir_1)
 
         # Test `export` management command with correct course_id
@@ -70,5 +67,5 @@ class TestCourseExport(ModuleStoreTestCase):
         Test export command with a valid course key that doesn't exist
         """
         errstring = "Course with x/y/z key not found."
-        with self.assertRaisesRegex(CommandError, errstring):
+        with self.assertRaisesRegex(CommandError, errstring):  # noqa: PT027
             call_command('export', "x/y/z", self.temp_dir_1)

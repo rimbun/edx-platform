@@ -10,10 +10,7 @@ from django.forms import CharField, Form
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
 
-from openedx.core.djangoapps.util.forms import (
-    ExtendedNullBooleanField,
-    MultiValueField
-)
+from openedx.core.djangoapps.util.forms import ExtendedNullBooleanField, MultiValueField
 
 
 class UsernameValidatorMixin:
@@ -45,7 +42,7 @@ class CourseDetailGetForm(UsernameValidatorMixin, Form):
         try:
             return CourseKey.from_string(course_key_string)
         except InvalidKeyError:
-            raise ValidationError(f"'{str(course_key_string)}' is not a valid course key.")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise ValidationError(f"'{str(course_key_string)}' is not a valid course key.")  # pylint: disable=raise-missing-from  # noqa: B904
 
 
 class CourseListGetForm(UsernameValidatorMixin, Form):
@@ -62,7 +59,10 @@ class CourseListGetForm(UsernameValidatorMixin, Form):
         filter_type(param_name='mobile', field_name='mobile_available'),
     ]
     mobile = ExtendedNullBooleanField(required=False)
+    active_only = ExtendedNullBooleanField(required=False)
     permissions = MultiValueField(required=False)
+    course_keys = MultiValueField(required=False)
+    mobile_search = ExtendedNullBooleanField(required=False)
 
     def clean(self):
         """
@@ -78,6 +78,20 @@ class CourseListGetForm(UsernameValidatorMixin, Form):
         cleaned_data['filter_'] = filter_ or None
 
         return cleaned_data
+
+    def clean_course_keys(self):
+        """
+        Ensure valid course_keys were provided.
+        """
+        course_keys = self.cleaned_data['course_keys']
+        if course_keys:
+            for course_key in course_keys:
+                try:
+                    CourseKey.from_string(course_key)
+                except InvalidKeyError:
+                    raise ValidationError(f"'{str(course_key)}' is not a valid course key.")  # pylint: disable=raise-missing-from  # noqa: B904
+
+        return course_keys
 
 
 class CourseIdListGetForm(UsernameValidatorMixin, Form):

@@ -11,9 +11,10 @@ import logging
 import eventtracking
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.utils.translation import ugettext as _
-from django.utils.translation import ugettext_noop
-import edx_api_doc_tools as apidocs
+from django.utils.translation import gettext as _
+from django.utils.translation import gettext_noop
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from edx_rest_framework_extensions.paginators import DefaultPagination
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey, UsageKey
@@ -23,11 +24,11 @@ from rest_framework.generics import ListCreateAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from openedx.core.lib.api.authentication import BearerAuthentication
 from openedx.core.djangoapps.bookmarks.api import BookmarksLimitReachedError
+from openedx.core.lib.api.authentication import BearerAuthentication
 from openedx.core.lib.api.permissions import IsUserInUrl
 from openedx.core.lib.url_utils import unquote_slashes
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
 
 from . import DEFAULT_FIELDS, OPTIONAL_FIELDS, api
 from .serializers import BookmarkSerializer
@@ -36,7 +37,7 @@ log = logging.getLogger(__name__)
 
 
 # Default error message for user
-DEFAULT_USER_MESSAGE = ugettext_noop('An error has occurred. Please try again.')
+DEFAULT_USER_MESSAGE = gettext_noop('An error has occurred. Please try again.')
 
 
 class BookmarksPagination(DefaultPagination):
@@ -91,7 +92,7 @@ class BookmarksViewMixin:
         return Response(
             {
                 "developer_message": developer_message,
-                "user_message": _(user_message)  # lint-amnesty, pylint: disable=translation-of-non-string
+                "user_message": _(user_message)  # pylint: disable=translation-of-non-string
             },
             status=error_status
         )
@@ -105,16 +106,18 @@ class BookmarksListView(ListCreateAPIView, BookmarksViewMixin):
     permission_classes = (permissions.IsAuthenticated,)
     serializer_class = BookmarkSerializer
 
-    @apidocs.schema(
+    @extend_schema(
         parameters=[
-            apidocs.string_parameter(
+            OpenApiParameter(
                 'course_id',
-                apidocs.ParameterLocation.QUERY,
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
                 description="The id of the course to limit the list",
             ),
-            apidocs.string_parameter(
+            OpenApiParameter(
                 'fields',
-                apidocs.ParameterLocation.QUERY,
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
                 description="The fields to return: display_name, path.",
             ),
         ],
@@ -201,8 +204,8 @@ class BookmarksListView(ListCreateAPIView, BookmarksViewMixin):
 
         return page
 
-    @apidocs.schema()
-    def post(self, request, *unused_args, **unused_kwargs):  # lint-amnesty, pylint: disable=unused-argument
+    @extend_schema()
+    def post(self, request, *unused_args, **unused_kwargs):  # pylint: disable=unused-argument
         """Create a new bookmark for a user.
 
         The POST request only needs to contain one parameter "usage_id".
@@ -217,27 +220,27 @@ class BookmarksListView(ListCreateAPIView, BookmarksViewMixin):
         Request data: {"usage_id": <usage-id>}
         """
         if not request.data:
-            return self.error_response(ugettext_noop('No data provided.'), DEFAULT_USER_MESSAGE)
+            return self.error_response(gettext_noop('No data provided.'), DEFAULT_USER_MESSAGE)
 
         usage_id = request.data.get('usage_id', None)
         if not usage_id:
-            return self.error_response(ugettext_noop('Parameter usage_id not provided.'), DEFAULT_USER_MESSAGE)
+            return self.error_response(gettext_noop('Parameter usage_id not provided.'), DEFAULT_USER_MESSAGE)
 
         try:
             usage_key = UsageKey.from_string(unquote_slashes(usage_id))
         except InvalidKeyError:
-            error_message = ugettext_noop('Invalid usage_id: {usage_id}.').format(usage_id=usage_id)
+            error_message = gettext_noop('Invalid usage_id: {usage_id}.').format(usage_id=usage_id)
             log.error(error_message)
             return self.error_response(error_message, DEFAULT_USER_MESSAGE)
 
         try:
             bookmark = api.create_bookmark(user=self.request.user, usage_key=usage_key)
         except ItemNotFoundError:
-            error_message = ugettext_noop('Block with usage_id: {usage_id} not found.').format(usage_id=usage_id)
+            error_message = gettext_noop('Block with usage_id: {usage_id} not found.').format(usage_id=usage_id)
             log.error(error_message)
             return self.error_response(error_message, DEFAULT_USER_MESSAGE)
         except BookmarksLimitReachedError:
-            error_message = ugettext_noop(
+            error_message = gettext_noop(
                 'You can create up to {max_num_bookmarks_per_course} bookmarks.'
                 ' You must remove some bookmarks before you can add new ones.'
             ).format(max_num_bookmarks_per_course=settings.MAX_BOOKMARKS_PER_COURSE)
@@ -307,12 +310,12 @@ class BookmarksDetailView(APIView, BookmarksViewMixin):
         try:
             return UsageKey.from_string(usage_id)
         except InvalidKeyError:
-            error_message = ugettext_noop('Invalid usage_id: {usage_id}.').format(usage_id=usage_id)
+            error_message = gettext_noop('Invalid usage_id: {usage_id}.').format(usage_id=usage_id)
             log.error(error_message)
             return self.error_response(error_message, error_status=status.HTTP_404_NOT_FOUND)
 
-    @apidocs.schema()
-    def get(self, request, username=None, usage_id=None):  # lint-amnesty, pylint: disable=unused-argument
+    @extend_schema()
+    def get(self, request, username=None, usage_id=None):  # pylint: disable=unused-argument
         """
         Get a specific bookmark for a user.
 
@@ -332,7 +335,7 @@ class BookmarksDetailView(APIView, BookmarksViewMixin):
                 fields=self.fields_to_return(request.query_params)
             )
         except ObjectDoesNotExist:
-            error_message = ugettext_noop(
+            error_message = gettext_noop(
                 'Bookmark with usage_id: {usage_id} does not exist.'
             ).format(usage_id=usage_id)
             log.error(error_message)
@@ -352,7 +355,7 @@ class BookmarksDetailView(APIView, BookmarksViewMixin):
         try:
             api.delete_bookmark(user=request.user, usage_key=usage_key_or_response)
         except ObjectDoesNotExist:
-            error_message = ugettext_noop(
+            error_message = gettext_noop(
                 'Bookmark with usage_id: {usage_id} does not exist.'
             ).format(usage_id=usage_id)
             log.error(error_message)

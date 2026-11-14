@@ -2,7 +2,8 @@ define([
     'domReady', 'js/views/export', 'jquery', 'gettext'
 ], function(domReady, Export, $, gettext) {
     'use strict';
-    return function(courselikeHomeUrl, library, statusUrl) {
+
+    return function(courselikeHomeUrl, statusUrl) {
         var $submitBtn = $('.action-export'),
             unloading = false,
             previousExport = Export.storedExport(courselikeHomeUrl);
@@ -14,7 +15,7 @@ define([
         var startExport = function(e) {
             e.preventDefault();
             $submitBtn.hide();
-            Export.reset(library);
+            Export.reset();
             Export.start(statusUrl).then(onComplete);
             $.ajax({
                 type: 'POST',
@@ -29,7 +30,7 @@ define([
                         if (!unloading) {
                             $(window).off('beforeunload.import');
 
-                            Export.reset(library);
+                            Export.reset();
                             onComplete();
 
                             Export.showError(gettext('Your export has failed.'));
@@ -46,7 +47,7 @@ define([
             if (previousExport.completed !== true) {
                 $submitBtn.hide();
             }
-            Export.resume(library).then(onComplete);
+            Export.resume().then(onComplete);
         }
 
         domReady(function() {

@@ -10,20 +10,20 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import ddt
-import pytest
 import pytz
-from django.conf import settings
 from django.db.utils import IntegrityError
+from django.test import TestCase
 from django.utils import timezone
 from edx_toggles.toggles.testutils import override_waffle_flag
+from stevedore.extension import Extension, ExtensionManager
 
 from common.djangoapps.student.models import CourseEnrollment, anonymous_id_for_user
 from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.track.event_transaction_utils import create_new_event_transaction_id, get_event_transaction_id
 from common.djangoapps.util.date_utils import to_timestamp
+from lms.djangoapps.courseware.tests.test_group_access import MemoryUserPartitionScheme
 from lms.djangoapps.grades import tasks
-from lms.djangoapps.grades.config.models import PersistentGradesEnabledFlag
-from lms.djangoapps.grades.config.waffle import ENFORCE_FREEZE_GRADE_AFTER_COURSE_END, waffle_flags
+from lms.djangoapps.grades.config.waffle import ENFORCE_FREEZE_GRADE_AFTER_COURSE_END
 from lms.djangoapps.grades.constants import ScoreDatabaseTableEnum
 from lms.djangoapps.grades.models import PersistentCourseGrade, PersistentSubsectionGrade
 from lms.djangoapps.grades.signals.signals import PROBLEM_WEIGHTED_SCORE_CHANGED
@@ -33,13 +33,14 @@ from lms.djangoapps.grades.tasks import (
     compute_all_grades_for_course,
     compute_grades_for_course,
     compute_grades_for_course_v2,
-    recalculate_subsection_grade_v3
+    recalculate_subsection_grade_v3,
+    roll_up_competency_statuses_for_user,
 )
 from openedx.core.djangoapps.content.block_structure.exceptions import BlockStructureNotFound
 from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
 from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory, check_mongo_calls
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory, check_mongo_calls
+from xmodule.partitions.partitions import USER_PARTITION_SCHEME_NAMESPACE, Group, UserPartition
 
 from .utils import mock_get_score
 
@@ -48,7 +49,7 @@ class HasCourseWithProblemsMixin:
     """
     Mixin to provide tests with a sample course with graded subsections
     """
-    def set_up_course(self, enable_persistent_grades=True, create_multiple_subsections=False, course_end=None):
+    def set_up_course(self, create_multiple_subsections=False, course_end=None):
         """
         Configures the course for this test.
         """
@@ -58,16 +59,14 @@ class HasCourseWithProblemsMixin:
             run='run',
             end=course_end
         )
-        if not enable_persistent_grades:
-            PersistentGradesEnabledFlag.objects.create(enabled=False)
 
-        self.chapter = ItemFactory.create(parent=self.course, category="chapter", display_name="Chapter")
-        self.sequential = ItemFactory.create(parent=self.chapter, category='sequential', display_name="Sequential1")
-        self.problem = ItemFactory.create(parent=self.sequential, category='problem', display_name='Problem')
+        self.chapter = BlockFactory.create(parent=self.course, category="chapter", display_name="Chapter")
+        self.sequential = BlockFactory.create(parent=self.chapter, category='sequential', display_name="Sequential1")
+        self.problem = BlockFactory.create(parent=self.sequential, category='problem', display_name='Problem')
 
         if create_multiple_subsections:
-            seq2 = ItemFactory.create(parent=self.chapter, category='sequential')
-            ItemFactory.create(parent=seq2, category='problem')
+            seq2 = BlockFactory.create(parent=self.chapter, category='sequential')
+            BlockFactory.create(parent=seq2, category='problem')
 
         self.frozen_now_datetime = datetime.now().replace(tzinfo=pytz.UTC)
         self.frozen_now_timestamp = to_timestamp(self.frozen_now_datetime)
@@ -104,7 +103,6 @@ class HasCourseWithProblemsMixin:
         # pylint: enable=attribute-defined-outside-init,no-member
 
 
-@patch.dict(settings.FEATURES, {'PERSISTENT_GRADES_ENABLED_FOR_ALL_TESTS': False})
 @ddt.ddt
 class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTestCase):
     """
@@ -115,10 +113,9 @@ class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTest
     def setUp(self):
         super().setUp()
         self.user = UserFactory()
-        PersistentGradesEnabledFlag.objects.create(enabled_for_all_courses=True, enabled=True)
 
     @contextmanager
-    def mock_csm_get_score(self, score=MagicMock(grade=1.0, max_grade=2.0)):
+    def mock_csm_get_score(self, score=MagicMock(grade=1.0, max_grade=2.0)):  # noqa: B008
         """
         Mocks the scores needed by the SCORE_PUBLISHED signal
         handler. By default, sets the returned score to 1/2.
@@ -153,7 +150,6 @@ class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTest
 
     def test_block_structure_created_only_once(self):
         self.set_up_course()
-        assert PersistentGradesEnabledFlag.feature_enabled(self.course.id)
         with patch(
             'openedx.core.djangoapps.content.block_structure.factory.BlockStructureFactory.create_from_store',
             side_effect=BlockStructureNotFound(self.course.location),
@@ -162,37 +158,32 @@ class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTest
             assert mock_block_structure_create.call_count == 1
 
     @ddt.data(
-        (ModuleStoreEnum.Type.mongo, 1, 39, True),
-        (ModuleStoreEnum.Type.mongo, 1, 39, False),
-        (ModuleStoreEnum.Type.split, 3, 39, True),
-        (ModuleStoreEnum.Type.split, 3, 39, False),
+        (ModuleStoreEnum.Type.split, 1, 50, True),
+        (ModuleStoreEnum.Type.split, 1, 50, False),
     )
     @ddt.unpack
     def test_query_counts(self, default_store, num_mongo_calls, num_sql_calls, create_multiple_subsections):
         with self.store.default_store(default_store):
             self.set_up_course(create_multiple_subsections=create_multiple_subsections)
-            assert PersistentGradesEnabledFlag.feature_enabled(self.course.id)
             with check_mongo_calls(num_mongo_calls):
                 with self.assertNumQueries(num_sql_calls):
                     self._apply_recalculate_subsection_grade()
 
     @ddt.data(
-        (ModuleStoreEnum.Type.mongo, 1, 39),
-        (ModuleStoreEnum.Type.split, 3, 39),
+        (ModuleStoreEnum.Type.split, 1, 50),
     )
     @ddt.unpack
     def test_query_counts_dont_change_with_more_content(self, default_store, num_mongo_calls, num_sql_calls):
         with self.store.default_store(default_store):
             self.set_up_course(create_multiple_subsections=True)
-            assert PersistentGradesEnabledFlag.feature_enabled(self.course.id)
 
             num_problems = 10
             for _ in range(num_problems):
-                ItemFactory.create(parent=self.sequential, category='problem')
+                BlockFactory.create(parent=self.sequential, category='problem')
 
             num_sequentials = 10
             for _ in range(num_sequentials):
-                ItemFactory.create(parent=self.chapter, category='sequential')
+                BlockFactory.create(parent=self.chapter, category='sequential')
 
             with check_mongo_calls(num_mongo_calls):
                 with self.assertNumQueries(num_sql_calls):
@@ -201,50 +192,78 @@ class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTest
     @patch('lms.djangoapps.grades.signals.signals.SUBSECTION_SCORE_CHANGED.send')
     def test_other_inaccessible_subsection(self, mock_subsection_signal):
         self.set_up_course()
-        accessible_seq = ItemFactory.create(parent=self.chapter, category='sequential')
-        inaccessible_seq = ItemFactory.create(parent=self.chapter, category='sequential', visible_to_staff_only=True)
+        accessible_seq = BlockFactory.create(parent=self.chapter, category='sequential')
+        inaccessible_seq = BlockFactory.create(parent=self.chapter, category='sequential', visible_to_staff_only=True)
 
         # Update problem to have 2 additional sequential parents.
         # So in total, 3 sequential parents, with one inaccessible.
         for sequential in (accessible_seq, inaccessible_seq):
             sequential.children = [self.problem.location]
-            modulestore().update_item(sequential, self.user.id)
+            with self.store.branch_setting(ModuleStoreEnum.Branch.draft_preferred, self.course.id):
+                self.store.update_item(sequential, self.user.id)
 
-        # Make sure the signal is sent for only the 2 accessible sequentials.
+        # Make sure the signal is sent for only the 1 accessible sequentials.
+        # Update: draft branch content shouldn't be accessible
         self._apply_recalculate_subsection_grade()
-        assert mock_subsection_signal.call_count == 2
+        assert mock_subsection_signal.call_count == 1
         sequentials_signalled = {
             args[1]['subsection_grade'].location
             for args in mock_subsection_signal.call_args_list
         }
-        self.assertSetEqual(
+        self.assertSetEqual(  # noqa: PT009
             sequentials_signalled,
-            {self.sequential.location, accessible_seq.location},
+            {self.sequential.location},
         )
 
-    @ddt.data(
-        (ModuleStoreEnum.Type.mongo, 1, 22),
-        (ModuleStoreEnum.Type.split, 3, 22),
-    )
-    @ddt.unpack
-    def test_persistent_grades_not_enabled_on_course(self, default_store, num_mongo_queries, num_sql_queries):
-        with self.store.default_store(default_store):
-            self.set_up_course(enable_persistent_grades=False)
-            with check_mongo_calls(num_mongo_queries):
-                with self.assertNumQueries(num_sql_queries):
-                    self._apply_recalculate_subsection_grade()
-            with pytest.raises(PersistentCourseGrade.DoesNotExist):
-                PersistentCourseGrade.read(self.user.id, self.course.id)
-            assert len(PersistentSubsectionGrade.bulk_read_grades(self.user.id, self.course.id)) == 0
+    @patch('lms.djangoapps.grades.signals.signals.SUBSECTION_SCORE_CHANGED.send')
+    def test_problem_block_with_restricted_access(self, mock_subsection_signal):
+        """
+        Test that `SUBSECTION_SCORE_CHANGED` is sent for a restricted problem block.
+        """
+        self.set_up_course()
+
+        UserPartition.scheme_extensions = ExtensionManager.make_test_instance(
+            [
+                Extension(
+                    "memory",
+                    USER_PARTITION_SCHEME_NAMESPACE,
+                    MemoryUserPartitionScheme(),
+                    None
+                )
+            ],
+            namespace=USER_PARTITION_SCHEME_NAMESPACE
+        )
+        verified_group = Group(60, 'verified')
+        verified_partition = UserPartition(
+            0,
+            'Verified Partition',
+            'Verified Learners',
+            [verified_group],
+            scheme=UserPartition.get_scheme("memory"),
+        )
+
+        accessible_seq = BlockFactory.create(parent=self.chapter, category='sequential')
+        restricted_problem = BlockFactory.create(
+            parent=accessible_seq,
+            category='problem',
+            display_name='Restricted Problem',
+            group_access={verified_partition.id: [verified_group.id]}
+        )
+
+        self.recalculate_subsection_grade_kwargs['usage_id'] = str(restricted_problem.location)
+        verified_partition.scheme.set_group_for_user(self.user, verified_partition, verified_group)
+
+        self._apply_recalculate_subsection_grade()
+        assert mock_subsection_signal.call_count == 1
+        UserPartition.scheme_extensions = None
 
     @ddt.data(
-        (ModuleStoreEnum.Type.mongo, 1, 40),
-        (ModuleStoreEnum.Type.split, 3, 40),
+        (ModuleStoreEnum.Type.split, 1, 50),
     )
     @ddt.unpack
-    def test_persistent_grades_enabled_on_course(self, default_store, num_mongo_queries, num_sql_queries):
+    def test_persistent_grades_on_course(self, default_store, num_mongo_queries, num_sql_queries):
         with self.store.default_store(default_store):
-            self.set_up_course(enable_persistent_grades=True)
+            self.set_up_course()
             with check_mongo_calls(num_mongo_queries):
                 with self.assertNumQueries(num_sql_queries):
                     self._apply_recalculate_subsection_grade()
@@ -366,8 +385,8 @@ class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTest
 
     def _apply_recalculate_subsection_grade(
             self,
-            mock_score=MagicMock(
-                modified=datetime.utcnow().replace(tzinfo=pytz.UTC) + timedelta(days=1),
+            mock_score=MagicMock(  # noqa: B008
+                modified=datetime.utcnow().replace(tzinfo=pytz.UTC) + timedelta(days=1),  # noqa: B008
                 grade=1.0,
                 max_grade=2.0,
             )
@@ -393,6 +412,46 @@ class RecalculateSubsectionGradeTest(HasCourseWithProblemsMixin, ModuleStoreTest
         Verifies the task was not retried.
         """
         assert not mock_retry.called
+
+
+class RollUpCompetencyStatusesForUserTest(TestCase):
+    """
+    Tests for the task that rolls up competency statuses after a graded write.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.task_kwargs = {'user_id': 7, 'object_ids': ['block-v1:org+course+run+type@sequential+block@abc']}
+
+    @patch('lms.djangoapps.grades.tasks.roll_up_competency_statuses')
+    def test_delegates_to_core_with_exact_kwargs(self, mock_roll_up):
+        result = roll_up_competency_statuses_for_user.apply(kwargs=self.task_kwargs)
+
+        assert result.successful()
+        mock_roll_up.assert_called_once_with(**self.task_kwargs)
+
+    @patch('lms.djangoapps.grades.tasks.roll_up_competency_statuses_for_user.retry')
+    @patch(
+        'lms.djangoapps.grades.tasks.roll_up_competency_statuses',
+        new=MagicMock(side_effect=IntegrityError("WHAMMY")),
+    )
+    def test_retries_with_same_kwargs_on_known_error(self, mock_retry):
+        roll_up_competency_statuses_for_user.apply(kwargs=self.task_kwargs)
+
+        mock_retry.assert_called_once()
+        assert mock_retry.call_args.kwargs['kwargs'] == self.task_kwargs
+        assert isinstance(mock_retry.call_args.kwargs['exc'], IntegrityError)
+
+    @patch('lms.djangoapps.grades.tasks.roll_up_competency_statuses_for_user.retry')
+    @patch(
+        'lms.djangoapps.grades.tasks.roll_up_competency_statuses',
+        new=MagicMock(side_effect=ValueError("not retryable")),
+    )
+    def test_reraises_unknown_error_without_retry(self, mock_retry):
+        result = roll_up_competency_statuses_for_user.apply(kwargs=self.task_kwargs)
+
+        assert isinstance(result.result, ValueError)
+        mock_retry.assert_not_called()
 
 
 @ddt.ddt
@@ -490,14 +549,14 @@ class FreezeGradingAfterCourseEndTest(HasCourseWithProblemsMixin, ModuleStoreTes
         super().setUp()
         self.users = [UserFactory.create() for _ in range(12)]
         self.user = self.users[0]
-        self.freeze_grade_flag = waffle_flags()[ENFORCE_FREEZE_GRADE_AFTER_COURSE_END]
+        self.freeze_grade_flag = ENFORCE_FREEZE_GRADE_AFTER_COURSE_END
 
     def _assert_log(self, mock_log, method_name):
         assert mock_log.info.called
         log_message = f"Attempted {method_name} for course '%s', but grades are frozen."
         assert log_message in mock_log.info.call_args_list[0][0][0]
 
-    def _assert_for_freeze_grade_flag(  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _assert_for_freeze_grade_flag(  # pylint: disable=missing-function-docstring
         self,
         result,
         freeze_flag_value,
@@ -621,7 +680,7 @@ class FreezeGradingAfterCourseEndTest(HasCourseWithProblemsMixin, ModuleStoreTes
             CourseEnrollment.enroll(user, self.course.id)
 
         with override_waffle_flag(self.freeze_grade_flag, active=freeze_flag_value):
-            modified_datetime = datetime.utcnow().replace(tzinfo=pytz.UTC) - timedelta(days=1)  # lint-amnesty, pylint: disable=unused-variable
+            modified_datetime = datetime.utcnow().replace(tzinfo=pytz.UTC) - timedelta(days=1)  # pylint: disable=unused-variable  # noqa: F841
             with patch('lms.djangoapps.grades.tasks._has_db_updated_with_new_score') as mock_has_db_updated:
                 result = recalculate_subsection_grade_v3.apply_async(kwargs=self.recalculate_subsection_grade_kwargs)
                 self._assert_for_freeze_grade_flag(

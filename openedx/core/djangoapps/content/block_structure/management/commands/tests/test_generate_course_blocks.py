@@ -2,19 +2,21 @@
 Tests for generate_course_blocks management command.
 """
 
+import itertools
 from unittest.mock import patch
 
-import itertools
-import pytest
 import ddt
+import pytest
 from django.core.management.base import CommandError
 
 from openedx.core.djangoapps.content.block_structure.tests.helpers import (
     is_course_in_block_structure_cache,
-    is_course_in_block_structure_storage
+    is_course_in_block_structure_storage,
 )
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 from .. import generate_course_blocks
 
@@ -85,14 +87,7 @@ class TestGenerateCourseBlocks(ModuleStoreTestCase):
             assert mock_update_from_store.call_count == (self.num_courses if force_update else 0)
 
     def test_one_course(self):
-        self._assert_courses_not_in_block_cache(*self.course_keys)
         self.command.handle(courses=[str(self.course_keys[0])])
-        self._assert_courses_in_block_cache(self.course_keys[0])
-        self._assert_courses_not_in_block_cache(*self.course_keys[1:])
-        self._assert_courses_not_in_block_storage(*self.course_keys)
-
-    def test_with_storage(self):
-        self.command.handle(with_storage=True, courses=[str(self.course_keys[0])])
         self._assert_courses_in_block_cache(self.course_keys[0])
         self._assert_courses_in_block_storage(self.course_keys[0])
         self._assert_courses_not_in_block_storage(*self.course_keys[1:])

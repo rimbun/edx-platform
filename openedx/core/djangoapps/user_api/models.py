@@ -3,14 +3,21 @@ Django ORM model specifications for the User API application
 """
 
 
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
-from django.core.validators import RegexValidator
+from config_models.models import ConfigurationModel
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.core.validators import FileExtensionValidator, RegexValidator
 from django.db import models
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
-
+from django.utils.translation import gettext_lazy as _
 from model_utils.models import TimeStampedModel
 from opaque_keys.edx.django.models import CourseKeyField
+
+# pylint: disable=unused-import
+from common.djangoapps.student.models import get_retired_email_by_email, get_retired_username_by_username
+from common.djangoapps.util.model_utils import emit_settings_changed_event, get_changed_fields_dict
+from openedx.core.djangolib.model_mixins import DeletableByUserValue
+from openedx.core.lib.cache_utils import request_cached
 
 # Currently, the "student" app is responsible for
 # accounts, profiles, enrollments, and the student dashboard.
@@ -19,25 +26,13 @@ from opaque_keys.edx.django.models import CourseKeyField
 # certain models.  For now we will leave the models in "student" and
 # create an alias in "user_api".
 
-from openedx.core.djangolib.model_mixins import DeletableByUserValue
-from openedx.core.lib.cache_utils import request_cached
-# pylint: disable=unused-import
-from common.djangoapps.student.models import (
-    get_retired_email_by_email,
-    get_retired_username_by_username
-)
-from common.djangoapps.util.model_utils import (
-    emit_settings_changed_event,
-    get_changed_fields_dict,
-
-)
 
 
 class RetirementStateError(Exception):
     pass
 
 
-class UserPreference(models.Model):
+class UserPreference(models.Model):  # noqa: DJ008
     """
     A user's preference, stored as generic text to be processed by client
 
@@ -102,6 +97,13 @@ class UserPreference(models.Model):
         """
         return cls.objects.filter(user=user, key=preference_key).exists()
 
+    @classmethod
+    def get_preference_for_users(cls, user_ids, preference_key):
+        """
+        Returns preference for list of users
+        """
+        return cls.objects.filter(user__in=user_ids, key=preference_key)
+
 
 @receiver(pre_save, sender=UserPreference)
 def pre_save_callback(sender, **kwargs):
@@ -144,7 +146,7 @@ def post_delete_callback(sender, **kwargs):
     )
 
 
-class UserCourseTag(models.Model):
+class UserCourseTag(models.Model):  # noqa: DJ008
     """
     Per-course user tags, to be used by various things that want to store tags about
     the user.  Added initially to store assignment to experimental groups.
@@ -194,16 +196,20 @@ class RetirementState(models.Model):
     def __str__(self):
         return f'{self.state_name} (step {self.state_execution_order})'
 
-    class Meta:
+    class Meta:  # noqa: DJ012
         ordering = ('state_execution_order',)
 
     @classmethod
     def get_dead_end_states(cls):
-        return cls.objects.filter(is_dead_end_state=True)
+        # We use models.Value(1) to make use of the indexing on the field. MySQL does not
+        # support boolean types natively, and checking for False will cause a table scan.
+        return cls.objects.filter(is_dead_end_state=models.Value(1))
 
     @classmethod
     def get_dead_end_state_names_list(cls):
-        return cls.objects.filter(is_dead_end_state=True).values_list('state_name', flat=True)
+        # We use models.Value(0) to make use of the indexing on the field. MySQL does not
+        # support boolean types natively, and checking for False will cause a table scan.
+        return cls.objects.filter(is_dead_end_state=models.Value(1)).values_list('state_name', flat=True)
 
     @classmethod
     def get_state_names_list(cls):
@@ -233,7 +239,7 @@ class UserRetirementPartnerReportingStatus(TimeStampedModel):
         verbose_name_plural = 'User Retirement Reporting Statuses'
 
     def __str__(self):
-        return 'UserRetirementPartnerReportingStatus: {} is being processed: {}'.format(
+        return 'UserRetirementPartnerReportingStatus: {} is being processed: {}'.format(  # noqa: UP032
             self.user,
             self.is_being_processed
         )
@@ -310,7 +316,7 @@ class UserRetirementStatus(TimeStampedModel):
                 raise ValueError()
         except ValueError:
             err = f'{new_state} does not exist or is an eariler state than current state {self.current_state}'
-            raise RetirementStateError(err)  # lint-amnesty, pylint: disable=raise-missing-from
+            raise RetirementStateError(err)  # pylint: disable=raise-missing-from  # noqa: B904
 
     def _validate_update_data(self, data):
         """
@@ -337,7 +343,7 @@ class UserRetirementStatus(TimeStampedModel):
         try:
             pending = RetirementState.objects.all().order_by('state_execution_order')[0]
         except IndexError:
-            raise RetirementStateError('Default state does not exist! Populate retirement states to retire users.')  # lint-amnesty, pylint: disable=raise-missing-from
+            raise RetirementStateError('Default state does not exist! Populate retirement states to retire users.')  # pylint: disable=raise-missing-from,line-too-long  # noqa: B904
 
         if cls.objects.filter(user=user).exists():
             raise RetirementStateError(f'User {user} already has a retirement status row!')
@@ -401,19 +407,34 @@ class UserRetirementStatus(TimeStampedModel):
                 break
 
         if retirement is None:
-            raise UserRetirementStatus.DoesNotExist('{} does not have an exact match in UserRetirementStatus. '
+            raise UserRetirementStatus.DoesNotExist('{} does not have an exact match in UserRetirementStatus. '  # noqa: UP032  # pylint: disable=line-too-long
                                                     '{} similar rows found.'.format(username, len(retirements)))
 
         state = retirement.current_state
 
         if state.required or state.state_name.endswith('_COMPLETE'):
-            raise RetirementStateError('{} is in {}, not a valid state to perform retirement '
+            raise RetirementStateError('{} is in {}, not a valid state to perform retirement '  # noqa: UP032
                                        'actions on.'.format(retirement, state.state_name))
 
         return retirement
 
     def __str__(self):
         return f'User: {self.user.id} State: {self.current_state} Last Updated: {self.modified}'
+
+
+class BulkUserRetirementConfig(ConfigurationModel):
+    """
+    Configuration to store a csv file that will be used in retire_user management command.
+
+    .. no_pii:
+    """
+    # Timeout set to 0 so that the model does not read from cached config in case the config entry is deleted.
+    cache_timeout = 0
+    csv_file = models.FileField(
+        upload_to="bulk_user_retirement_files/",
+        validators=[FileExtensionValidator(allowed_extensions=['csv'])],
+        help_text=_("Comma separated file that have username and user_email of the users that needs to be retired")
+    )
 
 
 @receiver(models.signals.post_delete, sender=UserRetirementStatus)

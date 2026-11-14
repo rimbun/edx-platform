@@ -1,15 +1,15 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 from contextlib import contextmanager
 from datetime import timedelta
 from unittest import mock
 
-from django.conf import settings
+from django.conf import settings  # noqa: F401
 from django.db import DEFAULT_DB_ALIAS
 from django.test import TestCase
 from django.utils.timezone import now
 
 from common.djangoapps.student.tests.factories import UserFactory
-from lms.djangoapps.verify_student.models import SoftwareSecurePhotoVerification
+from lms.djangoapps.verify_student.models import SoftwareSecurePhotoVerification, VerificationAttempt
 
 
 class TestVerificationBase(TestCase):
@@ -52,11 +52,14 @@ class TestVerificationBase(TestCase):
 
         # Active immediately before expiration date
         expiration = attempt.expiration_datetime
-        before_expiration = expiration - timedelta(seconds=1)
-        assert attempt.active_at_datetime(before_expiration)
+        if expiration:
+            before_expiration = expiration - timedelta(seconds=1)
+            assert attempt.active_at_datetime(before_expiration)
 
         # Not active after the expiration date
-        attempt.expiration_date = now() - timedelta(days=1)
+        field = 'expiration_datetime' if isinstance(attempt, VerificationAttempt) else 'expiration_date'
+        setattr(attempt, field, now() - timedelta(days=1))
+        # attempt.expiration_date = now() - timedelta(days=1)
         attempt.save()
         assert not attempt.active_at_datetime(now())
 

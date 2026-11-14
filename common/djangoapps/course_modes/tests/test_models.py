@@ -21,12 +21,14 @@ from common.djangoapps.course_modes.models import (
     CourseMode,
     Mode,
     get_cosmetic_display_price,
-    invalidate_course_mode_cache
+    invalidate_course_mode_cache,
 )
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
@@ -95,7 +97,7 @@ class CourseModeModelTest(TestCase):
 
         self.create_mode('verified', 'Verified Certificate', 10)
         modes = CourseMode.modes_for_course(self.course_key)
-        mode = Mode('verified', 'Verified Certificate', 10, '', 'usd', None, None, None, None)
+        mode = Mode('verified', 'Verified Certificate', 10, '', 'usd', None, None, None, None, None, None)
         assert [mode] == modes
 
         modes_dict = CourseMode.modes_for_course_dict(self.course_key)
@@ -106,8 +108,8 @@ class CourseModeModelTest(TestCase):
         """
         Finding the modes when there's multiple modes
         """
-        mode1 = Mode('honor', 'Honor Code Certificate', 0, '', 'usd', None, None, None, None)
-        mode2 = Mode('verified', 'Verified Certificate', 10, '', 'usd', None, None, None, None)
+        mode1 = Mode('honor', 'Honor Code Certificate', 0, '', 'usd', None, None, None, None, None, None)
+        mode2 = Mode('verified', 'Verified Certificate', 10, '', 'usd', None, None, None, None, None, None)
         set_modes = [mode1, mode2]
         for mode in set_modes:
             self.create_mode(mode.slug, mode.name, mode.min_price, mode.suggested_prices)
@@ -125,10 +127,15 @@ class CourseModeModelTest(TestCase):
         # no modes, should get 0
         assert 0 == CourseMode.min_course_price_for_currency(self.course_key, 'usd')
 
+        # with mode with other currency, should get 0
+        mode = Mode('audit', 'Audit', 30, '', 'eur', None, None, None, None, None, None)
+        self.create_mode(mode.slug, mode.name, mode.min_price, mode.suggested_prices, mode.currency)
+        assert 0 == CourseMode.min_course_price_for_currency(self.course_key, 'usd')
+
         # create some modes
-        mode1 = Mode('honor', 'Honor Code Certificate', 10, '', 'usd', None, None, None, None)
-        mode2 = Mode('verified', 'Verified Certificate', 20, '', 'usd', None, None, None, None)
-        mode3 = Mode('honor', 'Honor Code Certificate', 80, '', 'cny', None, None, None, None)
+        mode1 = Mode('honor', 'Honor Code Certificate', 10, '', 'usd', None, None, None, None, None, None)
+        mode2 = Mode('verified', 'Verified Certificate', 20, '', 'usd', None, None, None, None, None, None)
+        mode3 = Mode('honor', 'Honor Code Certificate', 80, '', 'cny', None, None, None, None, None, None)
         set_modes = [mode1, mode2, mode3]
         for mode in set_modes:
             self.create_mode(mode.slug, mode.name, mode.min_price, mode.suggested_prices, mode.currency)
@@ -143,7 +150,7 @@ class CourseModeModelTest(TestCase):
         modes = CourseMode.modes_for_course(self.course_key)
         assert [CourseMode.DEFAULT_MODE] == modes
 
-        mode1 = Mode('honor', 'Honor Code Certificate', 0, '', 'usd', None, None, None, None)
+        mode1 = Mode('honor', 'Honor Code Certificate', 0, '', 'usd', None, None, None, None, None, None)
         self.create_mode(mode1.slug, mode1.name, mode1.min_price, mode1.suggested_prices)
         modes = CourseMode.modes_for_course(self.course_key)
         assert [mode1] == modes
@@ -158,6 +165,8 @@ class CourseModeModelTest(TestCase):
             '',
             'usd',
             expiration_datetime,
+            None,
+            None,
             None,
             None,
             None
@@ -338,39 +347,18 @@ class CourseModeModelTest(TestCase):
             assert not is_error_expected, 'Expected a ValidationError to be thrown.'
         except ValidationError as exc:
             assert is_error_expected, 'Did not expect a ValidationError to be thrown.'
-            assert exc.messages == ['Professional education modes are not allowed to have expiration_datetime set.']
+            assert exc.messages == ['Professional education modes are not allowed to have expiration_datetime set.']  # noqa: PT017  # pylint: disable=line-too-long
 
     @ddt.data(
-        ("verified", "verify_need_to_verify"),
-        ("verified", "verify_submitted"),
-        ("verified", "verify_approved"),
-        ("verified", 'dummy'),
-        ("verified", None),
-        ('honor', None),
-        ('honor', 'dummy'),
-        ('audit', None),
-        ('professional', None),
-        ('no-id-professional', None),
-        ('no-id-professional', 'dummy')
+        "verified",
+        "honor",
+        "audit",
+        "professional",
+        "no-id-professional",
     )
-    @ddt.unpack
-    def test_enrollment_mode_display(self, mode, verification_status):
-        if mode == "verified":
-            assert enrollment_mode_display(mode, verification_status, self.course_key) ==\
-                   self._enrollment_display_modes_dicts(verification_status)
-            assert enrollment_mode_display(mode, verification_status, self.course_key) ==\
-                   self._enrollment_display_modes_dicts(verification_status)
-            assert enrollment_mode_display(mode, verification_status, self.course_key) ==\
-                   self._enrollment_display_modes_dicts(verification_status)
-        elif mode == "honor":
-            assert enrollment_mode_display(mode, verification_status, self.course_key) ==\
-                   self._enrollment_display_modes_dicts(mode)
-        elif mode == "audit":
-            assert enrollment_mode_display(mode, verification_status, self.course_key) ==\
-                   self._enrollment_display_modes_dicts(mode)
-        elif mode == "professional":
-            assert enrollment_mode_display(mode, verification_status, self.course_key) ==\
-                   self._enrollment_display_modes_dicts(mode)
+    def test_enrollment_mode_display(self, mode):
+        assert enrollment_mode_display(mode, self.course_key) == \
+               self._enrollment_display_modes_dicts(mode)
 
     @ddt.data(
         (['honor', 'verified', 'credit'], ['honor', 'verified']),
@@ -388,34 +376,29 @@ class CourseModeModelTest(TestCase):
 
         # Check the selectable modes, which should exclude credit
         selectable_modes = CourseMode.modes_for_course_dict(self.course_key)
-        self.assertCountEqual(list(selectable_modes.keys()), expected_selectable_modes)
+        self.assertCountEqual(list(selectable_modes.keys()), expected_selectable_modes)  # noqa: PT009
 
         # When we get all unexpired modes, we should see credit as well
         all_modes = CourseMode.modes_for_course_dict(self.course_key, only_selectable=False)
-        self.assertCountEqual(list(all_modes.keys()), available_modes)
+        self.assertCountEqual(list(all_modes.keys()), available_modes)  # noqa: PT009
 
-    def _enrollment_display_modes_dicts(self, dict_type):
+    def _enrollment_display_modes_dicts(self, mode):
         """
         Helper function to generate the enrollment display mode dict.
         """
         dict_keys = ['enrollment_title', 'enrollment_value', 'show_image', 'image_alt', 'display_mode']
         display_values = {
-            "verify_need_to_verify": ["Your verification is pending", "Verified: Pending Verification", True,
-                                      'ID verification pending', 'verified'],
-            "verify_approved": ["You're enrolled as a verified student", "Verified", True, 'ID Verified Ribbon/Badge',
-                                'verified'],
-            "verify_none": ["", "", False, '', 'audit'],
+            "verified": ["You're enrolled as a verified student", "Verified", True, 'ID Verified Ribbon/Badge',
+                         'verified'],
             "honor": ["You're enrolled as an honor code student", "Honor Code", False, '', 'honor'],
             "audit": ["", "", False, '', 'audit'],
             "professional": ["You're enrolled as a professional education student", "Professional Ed", False, '',
-                             'professional']
+                             'professional'],
+            "no-id-professional": ["You're enrolled as a professional education student", "Professional Ed", False, '',
+                                   'professional'],
         }
-        if dict_type in ['verify_need_to_verify', 'verify_submitted']:
-            return dict(list(zip(dict_keys, display_values.get('verify_need_to_verify'))))
-        elif dict_type is None or dict_type == 'dummy':
-            return dict(list(zip(dict_keys, display_values.get('verify_none'))))
-        else:
-            return dict(list(zip(dict_keys, display_values.get(dict_type))))
+
+        return dict(list(zip(dict_keys, display_values.get(mode))))  # noqa: B905
 
     def test_expiration_datetime_explicitly_set(self):
         """ Verify that setting the expiration_date property sets the explicit flag. """
@@ -461,7 +444,7 @@ class CourseModeModelTest(TestCase):
     @ddt.unpack
     def test_eligible_for_cert(self, disable_honor_cert, mode_slug, expected_eligibility):
         """Verify that non-audit modes are eligible for a cert."""
-        with override_settings(FEATURES={'DISABLE_HONOR_CERTIFICATES': disable_honor_cert}):
+        with override_settings(DISABLE_HONOR_CERTIFICATES=disable_honor_cert):
             assert CourseMode.is_eligible_for_certificate(mode_slug) == expected_eligibility
 
     @ddt.data(
@@ -511,7 +494,7 @@ class CourseModeModelTest(TestCase):
         assert CourseMode.is_masters_only(self.course_key) == expected_is_masters_only
 
 
-class TestCourseOverviewIntegration(ModuleStoreTestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
+class TestCourseOverviewIntegration(ModuleStoreTestCase):  # pylint: disable=missing-class-docstring
     def test_course_overview_version_update(self):
         course = CourseFactory.create()
         course_overview = CourseOverview.get_from_id(course.id)
@@ -524,7 +507,7 @@ class TestCourseOverviewIntegration(ModuleStoreTestCase):  # lint-amnesty, pylin
         assert CourseMode.objects.filter(pk=course_mode.pk).exists()
 
 
-class TestDisplayPrices(ModuleStoreTestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
+class TestDisplayPrices(ModuleStoreTestCase):  # pylint: disable=missing-class-docstring
     @override_settings(PAID_COURSE_REGISTRATION_CURRENCY=["USD", "$"])
     def test_get_cosmetic_display_price(self):
         """

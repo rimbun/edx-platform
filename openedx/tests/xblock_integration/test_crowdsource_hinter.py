@@ -13,7 +13,7 @@ from common.djangoapps.student.tests.factories import GlobalStaffFactory
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from openedx.core.lib.url_utils import quote_slashes
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 class TestCrowdsourceHinter(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
@@ -21,8 +21,8 @@ class TestCrowdsourceHinter(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
     Create the test environment with the crowdsourcehinter xblock.
     """
     STUDENTS = [
-        {'email': 'view@test.com', 'password': 'foo'},
-        {'email': 'view2@test.com', 'password': 'foo'}
+        {'email': 'view@test.com', 'password': SharedModuleStoreTestCase.TEST_PASSWORD},
+        {'email': 'view2@test.com', 'password': SharedModuleStoreTestCase.TEST_PASSWORD}
     ]
     XBLOCK_NAMES = ['crowdsourcehinter']
 
@@ -39,27 +39,27 @@ class TestCrowdsourceHinter(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
             display_name='CrowdsourceHinter_Test_Course'
         )
         with cls.store.bulk_operations(cls.course.id, emit_signals=False):
-            cls.chapter = ItemFactory.create(
+            cls.chapter = BlockFactory.create(
                 parent=cls.course, display_name='Overview'
             )
-            cls.section = ItemFactory.create(
+            cls.section = BlockFactory.create(
                 parent=cls.chapter, display_name='Welcome'
             )
-            cls.unit = ItemFactory.create(
+            cls.unit = BlockFactory.create(
                 parent=cls.section, display_name='New Unit'
             )
-            cls.xblock = ItemFactory.create(
+            cls.xblock = BlockFactory.create(
                 parent=cls.unit,
                 category='crowdsourcehinter',
                 display_name='crowdsourcehinter'
             )
 
         cls.course_url = reverse(
-            'courseware_section',
+            'courseware_subsection',
             kwargs={
                 'course_id': str(cls.course.id),
-                'chapter': 'Overview',
-                'section': 'Welcome',
+                'section': 'Overview',
+                'subsection': 'Welcome',
             }
         )
 

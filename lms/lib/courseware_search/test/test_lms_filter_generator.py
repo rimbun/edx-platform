@@ -3,11 +3,17 @@ Tests for the lms_filter_generator
 """
 from unittest.mock import Mock, patch
 
-from lms.lib.courseware_search.lms_filter_generator import LmsSearchFilterGenerator
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from lms.lib.courseware_search.lms_filter_generator import LmsSearchFilterGenerator
+from xmodule.course_block import CATALOG_VISIBILITY_ABOUT, CATALOG_VISIBILITY_NONE
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 
 class LmsSearchFilterGeneratorTestCase(ModuleStoreTestCase):
@@ -34,14 +40,14 @@ class LmsSearchFilterGeneratorTestCase(ModuleStoreTestCase):
             )
         ]
 
-        self.chapter = ItemFactory.create(
+        self.chapter = BlockFactory.create(
             parent_location=self.courses[0].location,
             category='chapter',
             display_name="Week 1",
             publish_item=True,
         )
 
-        self.chapter2 = ItemFactory.create(
+        self.chapter2 = BlockFactory.create(
             parent_location=self.courses[1].location,
             category='chapter',
             display_name="Week 1",
@@ -139,3 +145,9 @@ class LmsSearchFilterGeneratorTestCase(ModuleStoreTestCase):
         assert 'org' not in exclude_dictionary
         assert 'org' in field_dictionary
         assert ['TestSite3'] == field_dictionary['org']
+
+    @patch('django.conf.settings.SEARCH_SKIP_SHOW_IN_CATALOG_FILTERING', False)
+    def test_excludes_catalog_visibility(self):
+        _, _, exclude_dictionary = LmsSearchFilterGenerator.generate_field_filters(user=self.user)
+        assert 'catalog_visibility' in exclude_dictionary
+        assert exclude_dictionary['catalog_visibility'] == [CATALOG_VISIBILITY_ABOUT, CATALOG_VISIBILITY_NONE]

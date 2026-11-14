@@ -4,12 +4,11 @@ data_file = reports/.coverage
 source =
     cms
     common/djangoapps
-    common/lib/capa
-    common/lib/xmodule
     lms
     openedx
     pavelib
     scripts
+    xmodule
 
 omit =
     cms/envs/*
@@ -22,10 +21,10 @@ omit =
     lms/envs/*
     lms/djangoapps/*/migrations/*
     lms/djangoapps/*/features/*
-    common/djangoapps/terrain/*
     common/djangoapps/*/migrations/*
     openedx/core/djangoapps/*/migrations/*
     openedx/core/djangoapps/debug/*
+    openedx/envs/*
     openedx/features/*/migrations/*
 
 concurrency=multiprocessing

@@ -9,9 +9,8 @@ import logging
 
 from django.core.management.base import BaseCommand, CommandError
 
+from openedx.core.djangoapps.user_api.accounts.utils import handle_retirement_cancellation
 from openedx.core.djangoapps.user_api.models import UserRetirementStatus
-
-from edx_django_utils.user import generate_password
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,25 +37,18 @@ class Command(BaseCommand):
                 original_email=email_address
             )
         except UserRetirementStatus.DoesNotExist:
-            raise CommandError(f"No retirement request with email address '{email_address}' exists.")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise CommandError(f"No retirement request with email address '{email_address}' exists.")  # pylint: disable=raise-missing-from  # noqa: B904
 
         # Check if the user has started the retirement process -or- not.
         if retirement_status.current_state.state_name != 'PENDING':
             raise CommandError(
-                "Retirement requests can only be cancelled for users in the PENDING state."
+                "Retirement requests can only be cancelled for users in the PENDING state."  # noqa: UP032
                 " Current request state for '{}': {}".format(
                     email_address,
                     retirement_status.current_state.state_name
                 )
             )
 
-        # Load the user record using the retired email address -and- change the email address back.
-        retirement_status.user.email = email_address
-        retirement_status.user.set_password(generate_password(length=25))
-        retirement_status.user.save()
-
-        # Delete the user retirement status record.
-        # No need to delete the accompanying "permanent" retirement request record - it gets done via Django signal.
-        retirement_status.delete()
+        handle_retirement_cancellation(retirement_status, email_address)
 
         print(f"Successfully cancelled retirement request for user with email address '{email_address}'.")

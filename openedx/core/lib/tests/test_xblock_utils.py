@@ -14,21 +14,19 @@ from web_fragments.fragment import Fragment
 from xblock.core import XBlockAside
 
 from openedx.core.lib.url_utils import quote_slashes
-from openedx.core.lib.xblock_builtin import get_css_dependencies, get_js_dependencies
 from openedx.core.lib.xblock_utils import (
     get_aside_from_xblock,
+    get_css_dependencies,
+    get_js_dependencies,
     is_xblock_aside,
-    replace_course_urls,
-    replace_jump_to_id_urls,
-    replace_static_urls,
     request_token,
     sanitize_html_id,
     wrap_fragment,
-    wrap_xblock
+    wrap_xblock,
 )
 from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.modulestore.tests.test_asides import AsideTestType
 
 
@@ -41,13 +39,7 @@ class TestXblockUtils(SharedModuleStoreTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.course_mongo = CourseFactory.create(
-            default_store=ModuleStoreEnum.Type.mongo,
-            org='TestX',
-            number='TS01',
-            run='2015'
-        )
-        cls.course_split = CourseFactory.create(
+        cls.course = CourseFactory.create(
             default_store=ModuleStoreEnum.Type.split,
             org='TestX',
             number='TS02',
@@ -89,21 +81,15 @@ class TestXblockUtils(SharedModuleStoreTestCase):
         test_uuid = uuid.UUID(token, version=1)
         assert token == test_uuid.hex
 
-    @ddt.data(
-        ('course_mongo', 'data-usage-id="i4x:;_;_TestX;_TS01;_course;_2015"'),
-        ('course_split', 'data-usage-id="block-v1:TestX+TS02+2015+type@course+block@course"')
-    )
-    @ddt.unpack
-    def test_wrap_xblock(self, course_id, data_usage_id):
+    def test_wrap_xblock(self):
         """
         Verify that new content is added and the resources are the same.
         """
         fragment = self.create_fragment("<h1>Test!</h1>")
         fragment.initialize_js('BlockMain')  # wrap_block() sets some attributes only if there is JS.
-        course = getattr(self, course_id)
         test_wrap_output = wrap_xblock(
             runtime_class='TestRuntime',
-            block=course,
+            block=self.course,
             view='baseview',
             frag=fragment,
             context={"wrap_xblock_data": {"custom-attribute": "custom-value"}},
@@ -113,69 +99,11 @@ class TestXblockUtils(SharedModuleStoreTestCase):
         assert isinstance(test_wrap_output, Fragment)
         assert 'xblock-baseview' in test_wrap_output.content
         assert 'data-runtime-class="TestRuntime"' in test_wrap_output.content
-        assert data_usage_id in test_wrap_output.content
+        assert 'data-usage-id="block-v1:TestX+TS02+2015+type@course+block@course"' in test_wrap_output.content
         assert '<h1>Test!</h1>' in test_wrap_output.content
         assert 'data-custom-attribute="custom-value"' in test_wrap_output.content
         assert test_wrap_output.resources[0].data == 'body {background-color:red;}'
         assert test_wrap_output.resources[1].data == 'alert("Hi!");'
-
-    @ddt.data('course_mongo', 'course_split')
-    def test_replace_jump_to_id_urls(self, course_id):
-        """
-        Verify that the jump-to URL has been replaced.
-        """
-        course = getattr(self, course_id)
-        test_replace = replace_jump_to_id_urls(
-            course_id=course.id,
-            jump_to_id_base_url='/base_url/',
-            block=course,
-            view='baseview',
-            frag=Fragment('<a href="/jump_to_id/id">'),
-            context=None
-        )
-        assert isinstance(test_replace, Fragment)
-        assert test_replace.content == '<a href="/base_url/id">'
-
-    @ddt.data(
-        ('course_mongo', '<a href="/courses/TestX/TS01/2015/id">'),
-        ('course_split', '<a href="/courses/course-v1:TestX+TS02+2015/id">')
-    )
-    @ddt.unpack
-    def test_replace_course_urls(self, course_id, anchor_tag):
-        """
-        Verify that the course URL has been replaced.
-        """
-        course = getattr(self, course_id)
-        test_replace = replace_course_urls(
-            course_id=course.id,
-            block=course,
-            view='baseview',
-            frag=Fragment('<a href="/course/id">'),
-            context=None
-        )
-        assert isinstance(test_replace, Fragment)
-        assert test_replace.content == anchor_tag
-
-    @ddt.data(
-        ('course_mongo', '<a href="/c4x/TestX/TS01/asset/id">'),
-        ('course_split', '<a href="/asset-v1:TestX+TS02+2015+type@asset+block/id">')
-    )
-    @ddt.unpack
-    def test_replace_static_urls(self, course_id, anchor_tag):
-        """
-        Verify that the static URL has been replaced.
-        """
-        course = getattr(self, course_id)
-        test_replace = replace_static_urls(
-            data_dir=None,
-            course_id=course.id,
-            block=course,
-            view='baseview',
-            frag=Fragment('<a href="/static/id">'),
-            context=None
-        )
-        assert isinstance(test_replace, Fragment)
-        assert test_replace.content == anchor_tag
 
     def test_sanitize_html_id(self):
         """
@@ -231,12 +159,13 @@ class TestXblockUtils(SharedModuleStoreTestCase):
 
 class TestXBlockAside(SharedModuleStoreTestCase):
     """Test the xblock aside function."""
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         cls.course = CourseFactory.create()
-        cls.block = ItemFactory.create(category='aside', parent=cls.course)
+        cls.block = BlockFactory.create(parent=cls.course)
         cls.aside_v2 = AsideUsageKeyV2(cls.block.scope_ids.usage_id, "aside")
         cls.aside_v1 = AsideUsageKeyV1(cls.block.scope_ids.usage_id, "aside")
 
@@ -249,7 +178,10 @@ class TestXBlockAside(SharedModuleStoreTestCase):
         """test if xblock is not aside"""
         assert is_xblock_aside(self.block.scope_ids.usage_id) is False
 
-    @patch('xmodule.modulestore.xml.ImportSystem.applicable_aside_types', lambda self, block: ['test_aside'])
+    @patch(
+        'xmodule.modulestore.xml.XMLImportingModuleStoreRuntime.applicable_aside_types',
+        lambda self, block: ['test_aside'],
+    )
     @XBlockAside.register_temp_plugin(AsideTestType, 'test_aside')
     def test_get_aside(self):
         """test get aside success"""

@@ -3,7 +3,7 @@
 <%page args="active_page=None" expression_filter="h" />
 <%namespace name='static' file='/static_content.html'/>
 <%!
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from django.conf import settings
 from openedx.core.djangolib.js_utils import dump_js_escaped_json
 from openedx.core.djangolib.markup import HTML, Text
@@ -91,11 +91,6 @@ show_preview_menu = course and can_masquerade and supports_preview_menu
                 </div>
             % endif
             <div style="flex-shrink: 1; text-align: center;">
-            % if microfrontend_link:
-                <a class="btn btn-primary" style="border: solid 1px white;" href="${microfrontend_link}">
-                    ${_("View in the new experience")}
-                </a>
-            % endif
             % if studio_url:
                 <a
                     class="btn btn-primary view-in-studio"

@@ -4,7 +4,9 @@
 // Docs and troubleshooting tips in common/static/common/js/karma.common.conf.js
 
 'use strict';
+
 var path = require('path');
+
 var configModule = require(path.join(__dirname, '../../common/static/common/js/karma.common.conf.js'));
 
 var options = {
@@ -23,9 +25,7 @@ var options = {
     //     {pattern: 'js/factories/xblock_validation.js', webpack: true},
     //     {pattern: 'js/factories/container.js', webpack: true},
     //     {pattern: 'js/factories/context_course.js', webpack: true},
-    //     {pattern: 'js/factories/edit_tabs.js', webpack: true},
     //     {pattern: 'js/factories/library.js', webpack: true},
-    //     {pattern: 'js/factories/textbooks.js', webpack: true},
     // ],
 
     // All spec files should be imported in main_webpack.js, rather than being listed here

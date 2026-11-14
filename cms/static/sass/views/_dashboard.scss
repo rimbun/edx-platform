@@ -151,6 +151,7 @@
       .action-primary {
         @extend %btn-primary-blue;
         @extend %t-action3;
+        color: $white;
       }
 
       // specific - request button
@@ -675,8 +676,14 @@
     .new-course-org,
     .new-course-number,
     .new-course-name,
-    .new-course-run {
+    .new-course-run,
+    .new-library-org {
       width: 100%;
+    }
+
+    .new-course-org,
+    .new-library-org {
+      padding: 10px;
     }
 
     .course-run-text-direction {

@@ -2,12 +2,13 @@
 Serializers for Course Blocks related return objects.
 """
 
-
 from django.conf import settings
 from rest_framework import serializers
 from rest_framework.reverse import reverse
 
+from lms.djangoapps.course_blocks.transformers.hidden_content import HiddenContentTransformer
 from lms.djangoapps.course_blocks.transformers.visibility import VisibilityTransformer
+from openedx.core.djangoapps.discussions.transformers import DiscussionsTopicLinkTransformer
 
 from .transformers.block_completion import BlockCompletionTransformer
 from .transformers.block_counts import BlockCountsTransformer
@@ -21,13 +22,14 @@ class SupportedFieldType:
     """
     Metadata about fields supported by different transformers
     """
+
     def __init__(
-            self,
-            block_field_name,
-            transformer=None,
-            requested_field_name=None,
-            serializer_field_name=None,
-            default_value=None
+        self,
+        block_field_name,
+        transformer=None,
+        requested_field_name=None,
+        serializer_field_name=None,
+        default_value=None
     ):
         self.transformer = transformer
         self.block_field_name = block_field_name
@@ -56,6 +58,8 @@ SUPPORTED_FIELDS = [
     SupportedFieldType('has_scheduled_content'),
     SupportedFieldType('weight'),
     SupportedFieldType('show_correctness'),
+    SupportedFieldType('hide_from_toc'),
+    SupportedFieldType('icon_class'),
     # 'student_view_data'
     SupportedFieldType(StudentViewTransformer.STUDENT_VIEW_DATA, StudentViewTransformer),
     # 'student_view_multi_device'
@@ -79,9 +83,18 @@ SUPPORTED_FIELDS = [
         VisibilityTransformer,
         requested_field_name='visible_to_staff_only',
     ),
+
+    SupportedFieldType(
+        'merged_hide_after_due',
+        HiddenContentTransformer,
+        requested_field_name='hide_after_due'
+    ),
+
     SupportedFieldType(BlockCompletionTransformer.COMPLETION, BlockCompletionTransformer),
     SupportedFieldType(BlockCompletionTransformer.COMPLETE),
     SupportedFieldType(BlockCompletionTransformer.RESUME_BLOCK),
+    SupportedFieldType(DiscussionsTopicLinkTransformer.EXTERNAL_ID),
+    SupportedFieldType(DiscussionsTopicLinkTransformer.EMBED_URL),
 
     *[SupportedFieldType(field_name) for field_name in ExtraFieldsTransformer.get_requested_extra_fields()],
 ]
@@ -111,6 +124,7 @@ class BlockSerializer(serializers.Serializer):  # pylint: disable=abstract-metho
     """
     Serializer for single course block
     """
+
     def _get_field(self, block_key, transformer, field_name, default):
         """
         Get the field value requested.  The field may be an XBlock field, a
@@ -129,7 +143,7 @@ class BlockSerializer(serializers.Serializer):  # pylint: disable=abstract-metho
 
         return value if (value is not None) else default
 
-    def to_representation(self, block_key):  # lint-amnesty, pylint: disable=arguments-differ
+    def to_representation(self, block_key):  # pylint: disable=arguments-differ
         """
         Return a serializable representation of the requested block
         """
@@ -160,7 +174,7 @@ class BlockSerializer(serializers.Serializer):  # pylint: disable=abstract-metho
             ),
         }
 
-        if settings.FEATURES.get("ENABLE_LTI_PROVIDER") and 'lti_url' in self.context['requested_fields']:
+        if settings.ENABLE_LTI_PROVIDER and 'lti_url' in self.context['requested_fields']:
             data['lti_url'] = reverse(
                 'lti_provider_launch',
                 kwargs={'course_id': str(block_key.course_key), 'usage_id': str(block_key)},

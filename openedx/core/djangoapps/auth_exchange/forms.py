@@ -3,11 +3,11 @@ Forms to support third-party to first-party OAuth 2.0 access token exchange
 """
 
 from django import forms
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
-from django.forms import CharField
 from django.conf import settings
-from django.utils.encoding import smart_text
-from django.utils.translation import ugettext as _
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.forms import CharField
+from django.utils.encoding import smart_str
+from django.utils.translation import gettext as _
 from oauth2_provider.models import Application
 from requests import HTTPError
 from social_core.backends import oauth as social_oauth
@@ -55,7 +55,7 @@ class ScopeChoiceField(forms.ChoiceField):
             value = value.split(' ')
 
         # Split values into list
-        return ' '.join([smart_text(val) for val in value]).split(' ')
+        return ' '.join([smart_str(val) for val in value]).split(' ')
 
     def validate(self, value):
         """
@@ -164,7 +164,7 @@ class AccessTokenExchangeForm(forms.Form):
         try:
             client = self.oauth2_adapter.get_client(client_id=client_id)
         except Application.DoesNotExist:
-            raise OAuthValidationError(  # lint-amnesty, pylint: disable=raise-missing-from
+            raise OAuthValidationError(  # pylint: disable=raise-missing-from  # noqa: B904
                 {
                     "error": "invalid_client",
                     "error_description": f"{client_id} is not a valid client_id",
@@ -174,7 +174,7 @@ class AccessTokenExchangeForm(forms.Form):
             raise OAuthValidationError(
                 {
                     # invalid_client isn't really the right code, but this mirrors
-                    # https://github.com/edx/django-oauth2-provider/blob/edx/provider/oauth2/forms.py#L331
+                    # https://github.com/openedx/django-oauth2-provider/blob/edx/provider/oauth2/forms.py#L331
                     "error": "invalid_client",
                     "error_description": f"{client_id} is not a public client",
                 }

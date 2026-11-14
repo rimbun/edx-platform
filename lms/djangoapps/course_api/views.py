@@ -59,6 +59,9 @@ class CourseDetailView(DeveloperErrorViewMixin, RetrieveAPIView):
             * `"timestamp"`: generated from the `start` timestamp
             * `"empty"`: no start date is specified
         * pacing: Course pacing. Possible values: instructor, self
+        * certificate_available_date (optional): Date the certificate will be available,
+            in ISO 8601 notation if the `certificates.auto_certificate_generation`
+            waffle switch is enabled
 
         Deprecated fields:
 
@@ -103,7 +106,8 @@ class CourseDetailView(DeveloperErrorViewMixin, RetrieveAPIView):
                 "start": "2015-07-17T12:00:00Z",
                 "start_display": "July 17, 2015",
                 "start_type": "timestamp",
-                "pacing": "instructor"
+                "pacing": "instructor",
+                "certificate_available_date": "2015-08-14T00:00:00Z"
             }
     """
 
@@ -138,7 +142,7 @@ class CourseListUserThrottle(UserRateThrottle):
         'staff': '40/minute',
     }
 
-    def check_for_switches(self):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def check_for_switches(self):  # pylint: disable=missing-function-docstring
         if USE_RATE_LIMIT_2_FOR_COURSE_LIST_API.is_enabled():
             self.THROTTLE_RATES = {
                 'user': '2/minute',
@@ -161,6 +165,14 @@ class CourseListUserThrottle(UserRateThrottle):
 
         return super().allow_request(request, view)
 
+    def get_cache_key(self, request, view):
+        # Namespace this throttle's cache key so it does not share a rate-limit
+        # bucket with other throttles that happen to use the same scope name.
+        cache_key = super().get_cache_key(request, view)
+        if cache_key:
+            cache_key = f"course_list.{cache_key}"
+        return cache_key
+
 
 class LazyPageNumberPagination(NamespacedPageNumberPagination):
     """
@@ -168,7 +180,7 @@ class LazyPageNumberPagination(NamespacedPageNumberPagination):
 
     The paginator cache uses ``@cached_property`` to cache the property values for
     count and num_pages.  It assumes these won't change, but in the case of a
-    LazySquence, its count gets updated as we move through it.  This class clears
+    LazySequence, its count gets updated as we move through it.  This class clears
     the cached property values before reporting results so they will be recalculated.
 
     """
@@ -191,7 +203,7 @@ class LazyPageNumberPagination(NamespacedPageNumberPagination):
                 page_number=page_number, message=str(exc)
             )
             self.page.number = self.page.paginator.num_pages
-            raise NotFound(msg)  # lint-amnesty, pylint: disable=raise-missing-from
+            raise NotFound(msg)  # pylint: disable=raise-missing-from  # noqa: B904
 
         return super().get_paginated_response(data)
 
@@ -220,19 +232,19 @@ class LazyPageNumberPagination(NamespacedPageNumberPagination):
 
         with function_trace('pagination_paginate_queryset_get_page'):
             try:
-                self.page = paginator.page(page_number)  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+                self.page = paginator.page(page_number)  # pylint: disable=attribute-defined-outside-init
             except InvalidPage as exc:
                 msg = self.invalid_page_message.format(
                     page_number=page_number, message=str(exc)
                 )
-                raise NotFound(msg)  # lint-amnesty, pylint: disable=raise-missing-from
+                raise NotFound(msg)  # pylint: disable=raise-missing-from  # noqa: B904
 
         with function_trace('pagination_paginate_queryset_get_num_pages'):
             if paginator.num_pages > 1 and self.template is not None:
                 # The browsable API should display pagination controls.
                 self.display_page_controls = True
 
-        self.request = request  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.request = request  # pylint: disable=attribute-defined-outside-init
 
         with function_trace('pagination_paginate_queryset_listify_page'):
             page_list = list(self.page)
@@ -250,6 +262,7 @@ class CourseListView(DeveloperErrorViewMixin, ListAPIView):
     **Example Requests**
 
         GET /api/courses/v1/courses/
+        POST /api/courses/v1/courses/
 
     **Response Values**
 
@@ -276,6 +289,19 @@ class CourseListView(DeveloperErrorViewMixin, ListAPIView):
             checking if each permission specified is granted for the username.
             Notice that Staff users are always granted permission to list any
             course.
+
+        active_only (optional):
+            If this boolean is specified, only the courses that have not ended or do not have any end
+            date are returned. This is different from search_term because this filtering is done on
+            CourseOverview and not ElasticSearch.
+
+        course_keys (optional):
+            If specified, it fetches the `CourseOverview` objects for the
+            the specified course keys
+
+        mobile_search (bool):
+            Optional parameter that limits the number of returned courses
+            to MOBILE_SEARCH_COURSE_LIMIT.
 
     **Returns**
 
@@ -312,6 +338,10 @@ class CourseListView(DeveloperErrorViewMixin, ListAPIView):
                 "start_type": "timestamp"
               }
             ]
+    **Note**
+
+        The POST /api/courses/v1/courses/ reads `request.body` for parameters, allowing for
+        larger input than the query string.
     """
     class CourseListPageNumberPagination(LazyPageNumberPagination):
         max_page_size = 100
@@ -324,7 +354,13 @@ class CourseListView(DeveloperErrorViewMixin, ListAPIView):
         """
         Yield courses visible to the user.
         """
-        form = CourseListGetForm(self.request.query_params, initial={'requesting_user': self.request.user})
+        form_data = self.request.query_params
+        if self.request.method == 'POST':
+            form_data = self.request.data
+        form = CourseListGetForm(
+            data=form_data,
+            initial={'requesting_user': self.request.user}
+        )
         if not form.is_valid():
             raise ValidationError(form.errors)
         return list_courses(
@@ -333,8 +369,17 @@ class CourseListView(DeveloperErrorViewMixin, ListAPIView):
             org=form.cleaned_data['org'],
             filter_=form.cleaned_data['filter_'],
             search_term=form.cleaned_data['search_term'],
-            permissions=form.cleaned_data['permissions']
+            permissions=form.cleaned_data['permissions'],
+            active_only=form.cleaned_data.get('active_only', False),
+            course_keys=form.cleaned_data['course_keys'],
+            mobile_search=form.cleaned_data.get('mobile_search', False),
         )
+
+    def post(self, request, *args, **kwargs):
+        """
+        POST courses filter.
+        """
+        return self.list(request, *args, **kwargs)
 
 
 class CourseIdListUserThrottle(UserRateThrottle):
@@ -354,6 +399,14 @@ class CourseIdListUserThrottle(UserRateThrottle):
             self.num_requests, self.duration = self.parse_rate(self.rate)
 
         return super().allow_request(request, view)
+
+    def get_cache_key(self, request, view):
+        # Namespace this throttle's cache key so it does not share a rate-limit
+        # bucket with other throttles that use the same scope name.
+        cache_key = super().get_cache_key(request, view)
+        if cache_key:
+            cache_key = f"course_id_list.{cache_key}"
+        return cache_key
 
 
 @view_auth_classes()

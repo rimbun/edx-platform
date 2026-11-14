@@ -9,9 +9,11 @@ define([
 ], function(domReady, Import, $, gettext) {
     'use strict';
 
+    const IMPORTABLE_FILE_TYPES = /\.tar\.gz$|\.zip$/;
+
     return {
-        Import: function(feedbackUrl, library) {
-            var dbError,
+        Import: function(feedbackUrl) {
+            var dbError = gettext('There was an error while importing the new course to our database.'),
                 $bar = $('.progress-bar'),
                 $fill = $('.progress-fill'),
                 $submitBtn = $('.submit-button'),
@@ -35,7 +37,7 @@ define([
                     var filepath = $(this).val(),
                         msg;
 
-                    if (filepath.substr(filepath.length - 6, 6) === 'tar.gz') {
+                    if (IMPORTABLE_FILE_TYPES.test(filepath)) {
                         $('.error-block').hide();
                         $('.file-name').text($(this).val().replace('C:\\fakepath\\', ''));
                         $('.file-name-block').show();
@@ -44,17 +46,11 @@ define([
                         $('.progress').show();
                     } else {
                         msg = gettext('File format not supported. Please upload a file with a {ext} extension.')
-                            .replace('{ext}', '<code>tar.gz</code>');
+                            .replace('{ext}', '<code>tar.gz or zip</code>');
 
                         $('.error-block').text(msg).show();
                     }
                 };
-
-            if (library) {
-                dbError = gettext('There was an error while importing the new library to our database.');
-            } else {
-                dbError = gettext('There was an error while importing the new course to our database.');
-            }
 
             $(window).on('beforeunload', function() { unloading = true; });
 
@@ -84,7 +80,7 @@ define([
 
                     file = data.files[0];
 
-                    if (file.name.match(/tar\.gz$/)) {
+                    if (IMPORTABLE_FILE_TYPES.test(file.name)) {
                         $submitBtn.click(function(event) {
                             event.preventDefault();
 
@@ -116,7 +112,7 @@ define([
                                         Import.reset();
                                         onComplete();
 
-                                        alert(gettext('Your import has failed.') + '\n\n' + errMsg);  // eslint-disable-line max-len, no-alert
+                                        alert(gettext('Your import has failed.') + '\n\n' + errMsg); // eslint-disable-line max-len, no-alert
                                     }
                                 }
                             });
@@ -124,11 +120,12 @@ define([
                     } else {
                         // Can't fix this lint error without major structural changes, which I'm not comfortable
                         // doing given this file's test coverage
-                        data.files = [];  // eslint-disable-line no-param-reassign
+                        data.files = []; // eslint-disable-line no-param-reassign
                     }
                 },
 
                 progressall: function(e, data) {
+                    // eslint-disable-next-line no-mixed-operators
                     var percentInt = data.loaded / data.total * 100,
                         percentVal = parseInt(percentInt, 10) + '%',
                         doneAt;

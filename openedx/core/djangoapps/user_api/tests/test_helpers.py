@@ -16,12 +16,12 @@ from ..helpers import FormDescription, InvalidFieldError, intercept_errors
 
 class FakeInputException(Exception):
     """Fake exception that should be intercepted."""
-    pass  # lint-amnesty, pylint: disable=unnecessary-pass
+    pass  # pylint: disable=unnecessary-pass
 
 
 class FakeOutputException(Exception):
     """Fake exception that should be raised."""
-    pass  # lint-amnesty, pylint: disable=unnecessary-pass
+    pass  # pylint: disable=unnecessary-pass
 
 
 @intercept_errors(FakeOutputException, ignore_errors=[ValueError])
@@ -47,7 +47,7 @@ class InterceptErrorsTest(TestCase):
         intercepted_function()
 
     def test_ignores_expected_errors(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             intercepted_function(raise_error=ValueError)
 
     @mock.patch('openedx.core.djangoapps.user_api.helpers.LOGGER')
@@ -95,6 +95,7 @@ class FormDescriptionTest(TestCase):
             placeholder="placeholder",
             instructions="instructions",
             required=True,
+            exposed=True,
             restrictions={
                 "min_length": 2,
                 "max_length": 10
@@ -110,8 +111,8 @@ class FormDescriptionTest(TestCase):
                json.dumps({'method': 'post',
                            'submit_url': '/submit',
                            'fields': [{'name': 'name', 'label': 'label', 'type': 'text', 'defaultValue': 'default',
-                                       'placeholder': 'placeholder', 'instructions': 'instructions', 'required': True,
-                                       'restrictions': {'min_length': 2, 'max_length': 10},
+                                       'placeholder': 'placeholder', 'instructions': 'instructions', 'exposed': True,
+                                       'required': True, 'restrictions': {'min_length': 2, 'max_length': 10},
                                        'errorMessages': {'required': 'You must provide a value!'},
                                        'supplementalLink': '', 'supplementalText': '',
                                        'loginIssueSupportLink': 'https://support.example.com/login-issue-help.html'}]})

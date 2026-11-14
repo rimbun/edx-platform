@@ -2,21 +2,21 @@
 Slightly customized python-social-auth backend for SAML 2.0 support
 """
 
-
 import logging
 from copy import deepcopy
 
 import requests
 from django.contrib.sites.models import Site
 from django.http import Http404
+from django.utils.datastructures import MultiValueDictKeyError
 from django.utils.functional import cached_property
 from django_countries import countries
 from onelogin.saml2.settings import OneLogin_Saml2_Settings
 from social_core.backends.saml import OID_EDU_PERSON_ENTITLEMENT, SAMLAuth, SAMLIdentityProvider
-from social_core.exceptions import AuthForbidden
+from social_core.exceptions import AuthForbidden, AuthInvalidParameter, AuthMissingParameter
 
-from openedx.core.djangoapps.theming.helpers import get_current_request
 from common.djangoapps.third_party_auth.exceptions import IncorrectConfigurationException
+from openedx.core.djangoapps.theming.helpers import get_current_request
 
 STANDARD_SAML_PROVIDER_KEY = 'standard_saml_provider'
 SAP_SUCCESSFACTORS_SAML_KEY = 'sap_success_factors'
@@ -33,7 +33,7 @@ class SAMLAuthBackend(SAMLAuth):  # pylint: disable=abstract-method
     def get_idp(self, idp_name):
         """ Given the name of an IdP, get a SAMLIdentityProvider instance """
         from .models import SAMLProviderConfig
-        return SAMLProviderConfig.current(idp_name).get_config()
+        return SAMLProviderConfig.current(idp_name).get_config(self)
 
     def setting(self, name, default=None):
         """ Get a setting, from SAMLConfiguration """
@@ -84,21 +84,32 @@ class SAMLAuthBackend(SAMLAuth):  # pylint: disable=abstract-method
         else:
             return super().generate_saml_config()
 
+    def auth_complete(self, *args, **kwargs):
+        """
+        Handle exceptions that happen during SAML authentication
+        """
+        try:
+            return super().auth_complete(*args, **kwargs)
+        # We are seeing errors of MultiValueDictKeyError looking for the parameter 'RelayState'.
+        # We would like to have a more specific error to handle for observability purposes.
+        except MultiValueDictKeyError as e:
+            raise AuthMissingParameter(self.name, e.args[0]) from e
+
     def get_user_id(self, details, response):
         """
         Calling the parent function and handling the exception properly.
         """
         try:
             return super().get_user_id(details, response)
-        except KeyError as ex:
+        except (KeyError, IndexError, AuthInvalidParameter) as ex:  # Add AuthInvalidParameter here
             log.warning(
                 '[THIRD_PARTY_AUTH] Error in SAML authentication flow. '
                 'Provider: {idp_name}, Message: {message}'.format(
-                    message=ex.message,  # lint-amnesty, pylint: disable=no-member, exception-message-attribute
+                    message=str(ex),
                     idp_name=response.get('idp_name')
                 )
             )
-            raise IncorrectConfigurationException(self)  # lint-amnesty, pylint: disable=raise-missing-from
+            raise IncorrectConfigurationException(self) from ex
 
     def generate_metadata_xml(self, idp_name=None):  # pylint: disable=arguments-differ
         """
@@ -130,11 +141,22 @@ class SAMLAuthBackend(SAMLAuth):  # pylint: disable=abstract-method
 
     def disconnect(self, *args, **kwargs):
         """
-        Override of SAMLAuth.disconnect to unlink the learner from enterprise customer if associated.
+        Override of SAMLAuth.disconnect to emit a signal when a user disconnects their SAML account.
         """
-        from openedx.features.enterprise_support.api import unlink_enterprise_user_from_idp
-        user = kwargs.get('user', None)
-        unlink_enterprise_user_from_idp(self.strategy.request, user, self.name)
+        from common.djangoapps.third_party_auth.signals import SAMLAccountDisconnected
+        # Emit the signal before super().disconnect() so that handlers (e.g. enterprise
+        # user unlinking) run while the social auth record still exists.
+        user = kwargs['user']  # Upstream social_core always passes a non-None user.
+        log.info(
+            '[THIRD_PARTY_AUTH] Emitting SAMLAccountDisconnected signal for user_id=%s, backend=%s',
+            user.id, self.name,
+        )
+        SAMLAccountDisconnected.send(
+            sender=self.__class__,
+            request=self.strategy.request,
+            user=user,
+            saml_backend=self,
+        )
         return super().disconnect(*args, **kwargs)
 
     def _check_entitlements(self, idp, attributes):
@@ -149,7 +171,7 @@ class SAMLAuthBackend(SAMLAuth):  # pylint: disable=abstract-method
             for expected in idp.conf['requiredEntitlements']:
                 if expected not in entitlements:
                     log.warning(
-                        '[THIRD_PARTY_AUTH] SAML user rejected due to missing eduPersonEntitlement. '
+                        '[THIRD_PARTY_AUTH] SAML user rejected due to missing eduPersonEntitlement. '  # noqa: UP032
                         'Provider: {provider}, Entitlement: {entitlement}'.format(
                             provider=idp.name,
                             entitlement=expected)
@@ -167,7 +189,6 @@ class SAMLAuthBackend(SAMLAuth):  # pylint: disable=abstract-method
         auth_inst = super()._create_saml_auth(idp)
         from .models import SAMLProviderConfig
         if SAMLProviderConfig.current(idp.name).debug_mode:
-
             def wrap_with_logging(method_name, action_description, xml_getter, request_data, next_url):
                 """ Wrap the request and response handlers to add debug mode logging """
                 method = getattr(auth_inst, method_name)
@@ -180,6 +201,7 @@ class SAMLAuthBackend(SAMLAuth):  # pylint: disable=abstract-method
                         action_description, idp.name, request_data, next_url, xml_getter()
                     )
                     return result
+
                 setattr(auth_inst, method_name, wrapped_method)
 
             request_data = self.strategy.request_data()
@@ -214,21 +236,47 @@ class EdXSAMLIdentityProvider(SAMLIdentityProvider):
         })
         return details
 
-    def get_attr(self, attributes, conf_key, default_attribute):
+    def get_attr(
+        self,
+        attributes: dict[str, str | list[str] | None],
+        conf_key: str,
+        default_attributes: tuple[str, ...],
+        *,
+        validate_defaults: bool = False,
+    ):
         """
-        Internal helper method.
-        Get the attribute 'default_attribute' out of the attributes,
-        unless self.conf[conf_key] overrides the default by specifying
-        another attribute to use.
+        This override is compatible with the new social-core base class
+        (which passes a tuple of default_attributes) and preserves the
+        'attr_defaults' fallback logic.
         """
-        key = self.conf.get(conf_key, default_attribute)
-        if key in attributes:
+        try:
+            key = self.conf[conf_key]
+        except KeyError:
+            for key in default_attributes:
+                if key in attributes:
+                    break  # Found a matching default
+            else:
+                key = None
+
+        if key is None:
+            return self.conf.get('attr_defaults', {}).get(conf_key) or None
+        try:
+            value = attributes[key]
+        except KeyError:
+            return self.conf.get('attr_defaults', {}).get(conf_key) or None
+
+        if isinstance(value, list):
             try:
-                return attributes[key][0]
+                return value[0]
             except IndexError:
-                log.warning('[THIRD_PARTY_AUTH] SAML attribute value not found. '
-                            'SamlAttribute: {attribute}'.format(attribute=key))
-        return self.conf['attr_defaults'].get(conf_key) or None
+                log.warning(
+                    '[THIRD_PARTY_AUTH] SAML attribute value not found. '
+                    'The attribute %s was present but the list was empty.',
+                    key
+                )
+        else:
+            return value
+        return self.conf.get('attr_defaults', {}).get(conf_key) or None
 
     @property
     def saml_sp_configuration(self):
@@ -271,15 +319,17 @@ class SapSuccessFactorsIdentityProvider(EdXSAMLIdentityProvider):
     # Define a simple mapping to relate SAPSF values to Open edX-compatible values for
     # any given field. By default, this only contains the Country field, as SAPSF supplies
     # a country name, which has to be translated to a country code.
-    default_value_mapping = {
-        'country': {name: code for code, name in countries}
-    }
+    country_mapping = {name: code for code, name in countries}
 
     # Unfortunately, not everything has a 1:1 name mapping between Open edX and SAPSF, so
     # we need some overrides. TODO: Fill in necessary mappings
-    default_value_mapping.update({
+    country_mapping.update({
         'United States': 'US',
     })
+
+    default_value_mapping = {
+        'country': country_mapping
+    }
 
     def get_registration_fields(self, response):
         """
@@ -374,14 +424,14 @@ class SapSuccessFactorsIdentityProvider(EdXSAMLIdentityProvider):
         if not all(var in self.conf for var in self.required_variables):
             missing = [var for var in self.required_variables if var not in self.conf]
             log.warning(
-                '[THIRD_PARTY_AUTH] To retrieve rich user data for a SAP SuccessFactors identity provider, '
+                '[THIRD_PARTY_AUTH] To retrieve rich user data for a SAP SuccessFactors identity provider, '  # noqa: UP032  # pylint: disable=line-too-long
                 'the following keys in other_settings are required, but were missing. MissingKeys: {keys}'.format(
                     keys=missing
                 )
             )
             return missing
 
-    def log_bizx_api_exception(self, transaction_data, err):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def log_bizx_api_exception(self, transaction_data, err):  # pylint: disable=missing-function-docstring
         try:
             sys_msg = err.response.content
         except AttributeError:
@@ -475,7 +525,7 @@ class SapSuccessFactorsIdentityProvider(EdXSAMLIdentityProvider):
             return None
         return token_response.json()
 
-    def get_bizx_odata_api_client(self, user_id):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def get_bizx_odata_api_client(self, user_id):  # pylint: disable=missing-function-docstring
         session = requests.Session()
         access_token_data = self.generate_bizx_oauth_api_access_token(user_id)
         if not access_token_data:
@@ -498,7 +548,7 @@ class SapSuccessFactorsIdentityProvider(EdXSAMLIdentityProvider):
         # endpoint_url is constructed from field_mappings setting of SAML Provider config.
         # We convert field_mappings to make comma separated list of the fields which needs to be pulled from BizX
         fields = ','.join(self.field_mappings)
-        endpoint_url = '{root_url}User(userId=\'{user_id}\')?$select={fields}'.format(
+        endpoint_url = '{root_url}User(userId=\'{user_id}\')?$select={fields}'.format(  # noqa: UP032
             root_url=self.odata_api_root_url,
             user_id=user_id,
             fields=fields,
@@ -551,7 +601,7 @@ def get_saml_idp_class(idp_identifier_string):
     }
     if idp_identifier_string not in choices:
         log.error(
-            '[THIRD_PARTY_AUTH] Invalid EdXSAMLIdentityProvider subclass--'
+            '[THIRD_PARTY_AUTH] Invalid EdXSAMLIdentityProvider subclass--'  # noqa: UP032
             'using EdXSAMLIdentityProvider base class. Provider: {provider}'.format(provider=idp_identifier_string)
         )
     return choices.get(idp_identifier_string, EdXSAMLIdentityProvider)

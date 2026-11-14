@@ -2,19 +2,20 @@
 Unit tests for bulk-email-related models.
 """
 
-
 import datetime
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch  # pylint: disable=wrong-import-order
 
-import pytest
 import ddt
+import pytest
+from dateutil.relativedelta import relativedelta
 from django.core.management import call_command
 from django.test import TestCase
+from django.test.utils import override_settings
 from opaque_keys.edx.keys import CourseKey
 from pytz import UTC
 
 from common.djangoapps.course_modes.models import CourseMode
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, StaffFactory, UserFactory
 from lms.djangoapps.bulk_email.api import is_bulk_email_feature_enabled
 from lms.djangoapps.bulk_email.models import (
     SEND_TO_COHORT,
@@ -24,15 +25,22 @@ from lms.djangoapps.bulk_email.models import (
     CourseAuthorization,
     CourseEmail,
     CourseEmailTemplate,
-    Optout
+    CourseModeTarget,
+    DisabledCourse,
+    Optout,
+    Target,
 )
+from lms.djangoapps.bulk_email.models_api import is_bulk_email_disabled_for_course
+from lms.djangoapps.bulk_email.tests.factories import TargetFactory
 from openedx.core.djangoapps.course_groups.models import CourseCohort
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
-@patch('lms.djangoapps.bulk_email.models.html_to_text', Mock(return_value='Mocking CourseEmail.text_message', autospec=True))  # lint-amnesty, pylint: disable=line-too-long
+@patch('lms.djangoapps.bulk_email.models.html_to_text', Mock(return_value='Mocking CourseEmail.text_message', autospec=True))  # pylint: disable=line-too-long
 class CourseEmailTest(ModuleStoreTestCase):
     """Test the CourseEmail model."""
 
@@ -74,7 +82,7 @@ class CourseEmailTest(ModuleStoreTestCase):
         to_option = "fake"
         subject = "dummy subject"
         html_message = "<html>dummy message</html>"
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             CourseEmail.create(course_id, sender, to_option, subject, html_message)
 
     @ddt.data(
@@ -149,7 +157,7 @@ class CourseEmailTest(ModuleStoreTestCase):
         assert target.long_display() == 'Cohort: test cohort'
 
 
-class OptoutTest(TestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
+class OptoutTest(TestCase):  # pylint: disable=missing-class-docstring
     def test_is_user_opted_out_for_course(self):
         user = UserFactory.create()
         course_id = CourseKey.from_string('abc/123/doremi')
@@ -310,3 +318,118 @@ class CourseAuthorizationTest(TestCase):
 
         # Now, course should STILL be authorized!
         assert is_bulk_email_feature_enabled(course_id)
+
+
+class DisabledCourseTest(TestCase):
+    """
+    Test DisabledCourse model and api
+    """
+    def tearDown(self):
+        super().tearDown()
+        BulkEmailFlag.objects.all().delete()
+
+    def test_is_email_disabled_for_course(self):
+        BulkEmailFlag.objects.create(enabled=True)
+        course_id = CourseKey.from_string('abc/123/doremi')
+        # Test that course is not disabled by default
+        assert not is_bulk_email_disabled_for_course(course_id)
+
+        # Disable the course
+        disabled_course = DisabledCourse(course_id=course_id)
+        disabled_course.save()
+        # Course should be disabled
+        assert is_bulk_email_disabled_for_course(course_id)
+
+
+class TargetFilterTest(ModuleStoreTestCase):
+    """
+    Tests for the optional filtering of recipients from the results of the `get_users` method of the Target model.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user1 = UserFactory(last_login=datetime.datetime.now())
+        self.user2 = UserFactory(last_login=datetime.datetime.now() - relativedelta(months=2))
+        self.user3 = UserFactory()
+        self.course = CourseFactory()
+        CourseEnrollmentFactory(
+            is_active=True,
+            mode='verified',
+            course_id=self.course.id,
+            user=self.user1
+        )
+        CourseEnrollmentFactory(
+            is_active=True,
+            mode='audit',
+            course_id=self.course.id,
+            user=self.user2
+        )
+        CourseEnrollmentFactory(
+            is_active=False,
+            mode='verified',
+            course_id=self.course.id,
+            user=self.user3
+        )
+        self.staff_user = StaffFactory.create(course_key=self.course.id)
+        self.target = TargetFactory()
+
+    @override_settings(BULK_COURSE_EMAIL_LAST_LOGIN_ELIGIBILITY_PERIOD=None)
+    def test_target_no_last_login_eligibility(self):
+        """
+        Verifies the default behavior stays the same if the `BULK_COURSE_EMAIL_LAST_LOGIN_ELIGIBILITY_PERIOD` is not
+        set.
+        """
+        result = self.target.get_users(self.course.id)
+
+        assert result.count() == 2
+        assert result.filter(id=self.user1.id).exists()
+        assert result.filter(id=self.user2.id).exists()
+
+    @override_settings(BULK_COURSE_EMAIL_LAST_LOGIN_ELIGIBILITY_PERIOD=1)
+    def test_target_last_login_eligibility_set(self):
+        """
+        Verifies that users with a `login_date` beyond the treshold set according to the
+        `BULK_COURSE_EMAIL_LAST_LOGIN_ELIGIBILITY_PERIOD` are excluded from the final results of the queryset returned
+        callers of the `get_users` method.
+        """
+        result = self.target.get_users(self.course.id)
+
+        assert result.count() == 1
+        assert result.filter(id=self.user1.id).exists()
+
+    def test_filtering_of_recipients_target_for_audit_track(self):
+        """
+        Verifies the default behavior.
+
+        This test ensures that when the `BULK_COURSE_EMAIL_LAST_LOGIN_ELIGIBILITY_PERIOD`
+        setting is not defined, all users enrolled in the course are included in the results.
+        """
+        target = Target.objects.create(target_type=SEND_TO_TRACK)
+        course_mode = CourseMode.objects.create(
+            mode_slug=CourseMode.AUDIT,
+            mode_display_name=CourseMode.AUDIT.capitalize(),
+            course_id=self.course.id,
+        )
+        course_mode_target = CourseModeTarget.objects.create(track=course_mode)
+        target.coursemodetarget = course_mode_target
+        result = target.get_users(self.course.id)
+
+        assert result.count() == 1
+        assert result.filter(id=self.user2.id).exists()
+
+        # Ensure staff user is not included
+        assert not result.filter(id=self.staff_user.id).exists()
+
+    def test_filtering_of_recipients_target_for_staff(self):
+        """
+        Test filtering of recipients for a target of type SEND_TO_STAFF.
+
+        This test verifies that only staff users are returned for the given target.
+        It creates a target of type SEND_TO_STAFF and ensures that the correct users
+        are retrieved.
+        """
+        self.target = TargetFactory(target_type=SEND_TO_STAFF)
+        result = self.target.get_users(self.course.id)
+
+        assert result.count() == 1
+        assert result.filter(id=self.staff_user.id).exists()

@@ -7,17 +7,20 @@
  */
 define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
     'js/views/modals/base_modal', 'date', 'js/views/utils/xblock_utils',
-    'js/utils/date_utils', 'edx-ui-toolkit/js/utils/html-utils',
+    'js/utils/date_utils', 'js/utils/copy_to_clipboard', 'edx-ui-toolkit/js/utils/html-utils',
     'edx-ui-toolkit/js/utils/string-utils'
 ], function(
-    $, Backbone, _, gettext, BaseView, BaseModal, date, XBlockViewUtils, DateUtils, HtmlUtils, StringUtils
+    $, Backbone, _, gettext, BaseView, BaseModal, date, XBlockViewUtils, DateUtils, ClipboardUtils, HtmlUtils, StringUtils
 ) {
     'use strict';
+
     var CourseOutlineXBlockModal, SettingsXBlockModal, PublishXBlockModal, HighlightsXBlockModal,
         AbstractEditor, BaseDateEditor,
         ReleaseDateEditor, DueDateEditor, SelfPacedDueDateEditor, GradingEditor, PublishEditor, AbstractVisibilityEditor,
         StaffLockEditor, UnitAccessEditor, ContentVisibilityEditor, TimedExaminationPreferenceEditor,
-        AccessEditor, ShowCorrectnessEditor, HighlightsEditor, HighlightsEnableXBlockModal, HighlightsEnableEditor;
+        AccessEditor, ShowCorrectnessEditor, HighlightsEditor, HighlightsEnableXBlockModal, HighlightsEnableEditor,
+        DiscussionEditor, SummaryConfigurationEditor, SubsectionShareLinkXBlockModal, FullPageShareLinkEditor,
+        EmbedLinkShareLinkEditor;
 
     CourseOutlineXBlockModal = BaseModal.extend({
         events: _.extend({}, BaseModal.prototype.events, {
@@ -108,7 +111,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         },
 
         keyHandler: function(event) {
-            if (event.which === 27) {  // escape key
+            if (event.which === 27) { // escape key
                 this.hide();
             }
         }
@@ -131,6 +134,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                     tabsTemplate = this.loadTemplate('settings-modal-tabs');
                     HtmlUtils.setHtml(this.$('.modal-section'), HtmlUtils.HTML(tabsTemplate({tabs: tabs})));
                     _.each(this.options.tabs, function(tab) {
+                        // eslint-disable-next-line prefer-spread
                         this.options.editors.push.apply(
                             this.options.editors,
                             _.map(tab.editors, function(Editor) {
@@ -183,7 +187,6 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             this.$('.modal-section .' + tab).show();
         }
     });
-
 
     PublishXBlockModal = CourseOutlineXBlockModal.extend({
         events: _.extend({}, CourseOutlineXBlockModal.prototype.events, {
@@ -296,6 +299,71 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         }
     });
 
+    SubsectionShareLinkXBlockModal = CourseOutlineXBlockModal.extend({
+
+        initializeEditors: function() {
+            var tabsTemplate;
+            var tabs = this.options.tabs;
+            if (tabs && tabs.length > 0) {
+                    tabsTemplate = this.loadTemplate('subsection-share-link-modal-tabs');
+                    HtmlUtils.setHtml(this.$('.modal-section'), HtmlUtils.HTML(tabsTemplate({tabs: tabs})));
+                    _.each(this.options.tabs, function(tab) {
+                        // eslint-disable-next-line prefer-spread
+                        this.options.editors.push.apply(
+                            this.options.editors,
+                            _.map(tab.editors, function(Editor) {
+                                return new Editor({
+                                    parent: this,
+                                    parentElement: this.$(`.modal-section .${tab.name}`),
+                                    model: this.model,
+                                    xblockType: this.options.xblockType,
+                                });
+                            }, this)
+                        );
+                    }, this);
+                    this.showTab(tabs[0].name);
+            } else {
+                CourseOutlineXBlockModal.prototype.initializeEditors.call(this);
+            }
+        },
+
+        events: _.extend({}, CourseOutlineXBlockModal.prototype.events, {
+            'click .subsection-share-link-tab-button': 'handleShowTab',
+            'click #full-page-link-button': 'copyToClipboard',
+            'click #embed-link-button': 'copyToClipboard',
+        }),
+
+        getTitle: function() {
+            return StringUtils.interpolate(
+                gettext('Share {display_name} subsection'),
+                {display_name: this.model.get('display_name')}
+            );
+        },
+
+        copyToClipboard: function(event) {
+            return ClipboardUtils.copyToClipboard(
+                $(event.currentTarget).attr('id'),
+                $(event.currentTarget).data('clipboard-text')
+            );
+        },
+
+        addActionButtons: function() {
+            this.addActionButton('cancel', gettext('Close'));
+        },
+
+        handleShowTab: function(event) {
+            event.preventDefault();
+            this.showTab($(event.target).data('tab'));
+        },
+
+        showTab: function(tab) {
+            this.$('.modal-section .subsection-share-link-tab-button').removeClass('active');
+            this.$(`.modal-section .subsection-share-link-tab-button[data-tab="${tab}"]`).addClass('active');
+            this.$('.modal-section .subsection-share-link-tab').hide();
+            this.$(`.modal-section .${tab}`).show();
+        }
+    });
+
     AbstractEditor = BaseView.extend({
         tagName: 'section',
         templateName: null,
@@ -305,13 +373,16 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             this.parentElement = this.options.parentElement;
             this.render();
         },
-
         render: function() {
             var xblockInfo = this.model;
             var isTimeLimited = xblockInfo.get('is_time_limited');
             var isProctoredExam = xblockInfo.get('is_proctored_exam');
             var isPracticeExam = xblockInfo.get('is_practice_exam');
             var isOnboardingExam = xblockInfo.get('is_onboarding_exam');
+            var enableHideFromTOCUI = xblockInfo.get('enable_hide_from_toc_ui');
+            var hideFromTOC = xblockInfo.get('hide_from_toc');
+            var lmsUrl = xblockInfo.get('lms_url');
+            var embedLmsUrl = xblockInfo.get('embed_lms_url');
             var html = this.template($.extend({}, {
                 xblockInfo: xblockInfo,
                 xblockType: this.options.xblockType,
@@ -321,11 +392,15 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 isProctoredExam: isProctoredExam,
                 isPracticeExam: isPracticeExam,
                 isOnboardingExam: isOnboardingExam,
+                enableHideFromTOCUI: enableHideFromTOCUI,
+                hideFromTOC: hideFromTOC,
+                lmsUrl: lmsUrl,
+                embedLmsUrl: embedLmsUrl,
                 isTimedExam: isTimeLimited && !(
                     isProctoredExam || isPracticeExam || isOnboardingExam
                 ),
-                specialExamLockedIn: (
-                    xblockInfo.get('released_to_students') && xblockInfo.get('was_ever_special_exam')
+                proctoredExamLockedIn: (
+                    xblockInfo.get('released_to_students') && xblockInfo.get('was_exam_ever_linked_with_external')
                 )
             }, this.getContext()));
 
@@ -404,31 +479,25 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         },
 
         showProjectedDate: function() {
-            if (!this.getValue() || !course.get('start')) return;
+            if (!this.getValue() || !course.get('start')) { return; }
             var startDate = new Date(course.get('start'));
             // The value returned by toUTCString() is a string in the form Www, dd Mmm yyyy hh:mm:ss GMT
-            var startDateList = startDate.toUTCString().split(' ')
+            var startDateList = startDate.toUTCString().split(' ');
             // This text will look like Mmm dd, yyyy (i.e. Jul 26, 2021)
-            this.$("#relative_weeks_due_start_date").text(startDateList[2] + ' ' + startDateList[1] + ', ' + startDateList[3]);
-            var projectedDate = new Date(startDate)
-            projectedDate.setDate(projectedDate.getDate() + this.getValue()*7);
+            this.$('#relative_weeks_due_start_date').text(startDateList[2] + ' ' + startDateList[1] + ', ' + startDateList[3]);
+            var projectedDate = new Date(startDate);
+            projectedDate.setDate(projectedDate.getDate() + this.getValue() * 7);
             var projectedDateList = projectedDate.toUTCString().split(' ');
-            this.$("#relative_weeks_due_projected_due_in").text(projectedDateList[2] + ' ' + projectedDateList[1] + ', ' + projectedDateList[3]);
+            this.$('#relative_weeks_due_projected_due_in').text(projectedDateList[2] + ' ' + projectedDateList[1] + ', ' + projectedDateList[3]);
             this.$('#relative_weeks_due_projected').show();
         },
 
         validateDueIn: function() {
             this.$('#relative_weeks_due_projected').hide();
-            if (this.getValue() > 18){
-                this.$('#relative_weeks_due_warning_max').show();
+            if (this.getValue() < 1) {
+                this.$('#relative_weeks_due_warning_min').show();
                 BaseModal.prototype.disableActionButton.call(this.parent, 'save');
-            }
-            else if (this.getValue() < 1){
-                this.$('#relative_weeks_due_warning_min').show()
-                BaseModal.prototype.disableActionButton.call(this.parent, 'save');
-            }
-            else {
-                this.$('#relative_weeks_due_warning_max').hide();
+            } else {
                 this.$('#relative_weeks_due_warning_min').hide();
                 this.showProjectedDate();
                 BaseModal.prototype.enableActionButton.call(this.parent, 'save');
@@ -438,10 +507,9 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         afterRender: function() {
             AbstractEditor.prototype.afterRender.call(this);
             if (this.model.get('graded')) {
-                this.$('#relative_date_input').show()
-            }
-            else {
-                this.$('#relative_date_input').hide()
+                this.$('#relative_date_input').show();
+            } else {
+                this.$('#relative_date_input').hide();
             }
             this.$('.field-due-in input').val(this.model.get('relative_weeks_due'));
             this.$('#relative_weeks_due_projected').hide();
@@ -450,12 +518,12 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
 
         getRequestData: function() {
             // Grab all the sections, map them to their block_ids, then return as an Array
-            var sectionIds = $('.outline-section').map(function(){return this.id;}).get()
+            var sectionIds = $('.outline-section').map(function() { return this.id; }).get();
             // Grab all the subsections, map them to their block_ids, then return as an Array
-            var subsectionIds = $('.outline-subsection').map(function(){return this.id;}).get()
+            var subsectionIds = $('.outline-subsection').map(function() { return this.id; }).get();
             var relative_weeks_due = null;
-            if (this.getValue() < 19 && this.getValue() > 0 && $('#grading_type').val() !== 'notgraded') {
-                relative_weeks_due = this.getValue()
+            if (this.getValue() > 0 && $('#grading_type').val() !== 'notgraded') {
+                relative_weeks_due = this.getValue();
             }
             window.analytics.track('edx.bi.studio.relative_date.saved', {
                 block_id: this.model.get('id'),
@@ -510,6 +578,16 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         }
     });
 
+    FullPageShareLinkEditor = AbstractEditor.extend({
+        templateName: 'full-page-share-link-editor',
+        className: 'edit-settings-full-page-share-link',
+    });
+
+    EmbedLinkShareLinkEditor = AbstractEditor.extend({
+        templateName: 'embed-link-share-link-editor',
+        className: 'edit-settings-embed-link-share-link',
+    });
+
     TimedExaminationPreferenceEditor = AbstractEditor.extend({
         templateName: 'timed-examination-preference-editor',
         className: 'edit-settings-timed-examination',
@@ -521,6 +599,8 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             'change input.onboarding_exam': 'setSpecialExamWithoutRules',
             'focusout .field-time-limit input': 'timeLimitFocusout'
         },
+        startingExamType: '',
+
         notTimedExam: function(event) {
             event.preventDefault();
             this.$('.exam-options').hide();
@@ -565,7 +645,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             });
 
             this.setExamType(this.model.get('is_time_limited'), this.model.get('is_proctored_exam'),
-                            this.model.get('is_practice_exam'), this.model.get('is_onboarding_exam'));
+                this.model.get('is_practice_exam'), this.model.get('is_onboarding_exam'));
             this.setExamTime(this.model.get('default_time_limit_minutes'));
 
             this.setReviewRules(this.model.get('exam_review_rules'));
@@ -575,6 +655,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             this.$('.field-exam-review-rules').hide();
 
             if (!isTimeLimited) {
+                this.startingExamType = 'no_special_exam';
                 this.$('input.no_special_exam').prop('checked', true);
                 return;
             }
@@ -583,10 +664,13 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
 
             if (this.options.enable_proctored_exams && isProctoredExam) {
                 if (isOnboardingExam) {
+                    this.startingExamType = 'onboarding_exam';
                     this.$('input.onboarding_exam').prop('checked', true);
                 } else if (isPracticeExam) {
+                    this.startingExamType = 'practice_exam';
                     this.$('input.practice_exam').prop('checked', true);
                 } else {
+                    this.startingExamType = 'proctored_exam';
                     this.$('input.proctored_exam').prop('checked', true);
                     this.$('.field-exam-review-rules').show();
                 }
@@ -594,6 +678,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 // Since we have an early exit at the top of the method
                 // if the subsection is not time limited, then
                 // here we rightfully assume that it just a timed exam
+                this.startingExamType = 'timed_exam';
                 this.$('input.timed_exam').prop('checked', true);
             }
         },
@@ -605,6 +690,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             this.$('.field-exam-review-rules textarea').val(value);
         },
         isValidTimeLimit: function(timeLimit) {
+            // eslint-disable-next-line prefer-regex-literals
             var pattern = new RegExp('^\\d{1,2}:[0-5][0-9]$');
             return pattern.test(timeLimit) && timeLimit !== '00:00';
         },
@@ -631,20 +717,27 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             var timeLimit = this.getExamTimeLimit();
             var examReviewRules = this.$('.field-exam-review-rules textarea').val();
 
+            var metadata = {
+                is_practice_exam: isPracticeExamChecked,
+                is_time_limited: !isNoSpecialExamChecked,
+                exam_review_rules: examReviewRules,
+                // We have to use the legacy field name
+                // as the Ajax handler directly populates
+                // the xBlocks fields. We will have to
+                // update this call site when we migrate
+                // seq_module.py to use 'is_proctored_exam'
+                is_proctored_enabled: isProctoredExamChecked || isPracticeExamChecked || isOnboardingExamChecked,
+                default_time_limit_minutes: this.convertTimeLimitToMinutes(timeLimit),
+                is_onboarding_exam: isOnboardingExamChecked
+            };
+
+            // If setting as a proctored exam, set to hide after due by default
+            if (isProctoredExamChecked && this.startingExamType !== 'proctored_exam') {
+                metadata.hide_after_due = true;
+            }
+
             return {
-                metadata: {
-                    is_practice_exam: isPracticeExamChecked,
-                    is_time_limited: !isNoSpecialExamChecked,
-                    exam_review_rules: examReviewRules,
-                    // We have to use the legacy field name
-                    // as the Ajax handler directly populates
-                    // the xBlocks fields. We will have to
-                    // update this call site when we migrate
-                    // seq_module.py to use 'is_proctored_exam'
-                    is_proctored_enabled: isProctoredExamChecked || isPracticeExamChecked || isOnboardingExamChecked,
-                    default_time_limit_minutes: this.convertTimeLimitToMinutes(timeLimit),
-                    is_onboarding_exam: isOnboardingExamChecked
-                }
+                metadata: metadata
             };
         }
     });
@@ -788,6 +881,10 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             return this.model.get('ancestor_has_staff_lock');
         },
 
+        isModelHiddenFromTOC: function() {
+            return this.model.get('hide_from_toc');
+        },
+
         getContext: function() {
             return {
                 hasExplicitStaffLock: this.isModelLocked(),
@@ -802,6 +899,8 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         afterRender: function() {
             AbstractVisibilityEditor.prototype.afterRender.call(this);
             this.setLock(this.isModelLocked());
+            this.setHideFromTOC(this.isModelHiddenFromTOC());
+            this.setVisibleToLearners(this.isVisibleToLearners());
         },
 
         setLock: function(value) {
@@ -812,8 +911,24 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
             return this.$('#staff_lock').is(':checked');
         },
 
+        setHideFromTOC: function(value) {
+            this.$('#hide_from_toc').prop('checked', value);
+        },
+
+        setVisibleToLearners: function(value) {
+            this.$('#visible_to_learners').prop('checked', value);
+        },
+
+        isVisibleToLearners: function() {
+            return this.$('#staff_lock').is(':not(:checked)') && this.$('#hide_from_toc').is(':not(:checked)');
+        },
+
+        isHiddenFromTOC: function() {
+            return this.$('#hide_from_toc').is(':checked');
+        },
+
         hasChanges: function() {
-            return this.isModelLocked() !== this.isLocked();
+            return this.isModelLocked() !== this.isLocked() || this.isModelHiddenFromTOC() !== this.isHiddenFromTOC();
         },
 
         getRequestData: function() {
@@ -821,7 +936,8 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 return {
                     publish: 'republish',
                     metadata: {
-                        visible_to_staff_only: this.isLocked() ? true : null
+                        visible_to_staff_only: this.isLocked() || null,
+                        hide_from_toc: this.isHiddenFromTOC() || null
                     }
                 };
             } else {
@@ -920,6 +1036,72 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         }
     });
 
+    DiscussionEditor = AbstractEditor.extend({
+        templateName: 'discussion-editor',
+        className: 'edit-discussion',
+        afterRender: function() {
+            AbstractEditor.prototype.afterRender.call(this);
+            this.setStatus(this.currentValue());
+            this.showTipText();
+        },
+
+        currentValue: function() {
+            var discussionEnabled = this.model.get('discussion_enabled');
+            return discussionEnabled === true || discussionEnabled === 'enabled';
+        },
+
+        showTipText: function() {
+            if (this.model.get('published')) {
+                $('.un-published-tip').hide();
+            } else {
+                $('.un-published-tip').show();
+            }
+            // eslint-disable-next-line prefer-const
+            let enabledForGraded = course.get('discussions_settings').enable_graded_units;
+            if (this.model.get('graded') && !enabledForGraded) {
+                $('#discussion_enabled').prop('disabled', true);
+                $('.graded-tip').show();
+            } else {
+                $('.graded-tip').hide();
+            }
+        },
+
+        setStatus: function(value) {
+            this.$('#discussion_enabled').prop('checked', value);
+        },
+
+        isEnabled: function() {
+            return this.$('#discussion_enabled').is(':checked');
+        },
+
+        hasChanges: function() {
+            return this.currentValue() !== this.isEnabled();
+        },
+
+        getRequestData: function() {
+            if (this.hasChanges()) {
+                return {
+                    publish: 'republish',
+                    metadata: {
+                        discussion_enabled: this.isEnabled()
+                    }
+                };
+            } else {
+                return {};
+            }
+        },
+        getContext: function() {
+            return $.extend(
+                {},
+                AbstractEditor.prototype.getContext.call(this),
+                {
+                    hasDiscussionEnabled: this.currentValue(),
+                    discussion_configuration_url: course.get('discussions_settings').discussion_configuration_url
+                }
+            );
+        }
+    });
+
     ContentVisibilityEditor = AbstractVisibilityEditor.extend({
         templateName: 'content-visibility-editor',
         className: 'edit-content-visibility',
@@ -964,6 +1146,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 } else {
                     display = 'none';
                 }
+                // eslint-disable-next-line no-shadow
                 $.each(warning, function(_, element) {
                     element.style.display = display;
                 });
@@ -978,12 +1161,20 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 if (this.currentVisibility() === 'staff_only') {
                     metadata.visible_to_staff_only = true;
                     metadata.hide_after_due = null;
+                    metadata.hide_from_toc = null;
                 } else if (this.currentVisibility() === 'hide_after_due') {
                     metadata.visible_to_staff_only = null;
                     metadata.hide_after_due = true;
-                } else {
+                    metadata.hide_from_toc = null;
+                } else if (this.currentVisibility() === 'hide_from_toc'){
                     metadata.visible_to_staff_only = null;
                     metadata.hide_after_due = null;
+                    metadata.hide_from_toc = true;
+                }
+                else {
+                    metadata.visible_to_staff_only = null;
+                    metadata.hide_after_due = null;
+                    metadata.hide_from_toc = null;
                 }
 
                 return {
@@ -1001,7 +1192,8 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 AbstractVisibilityEditor.prototype.getContext.call(this),
                 {
                     hide_after_due: this.modelVisibility() === 'hide_after_due',
-                    self_paced: course.get('self_paced') === true
+                    self_paced: course.get('self_paced') === true,
+                    enable_hide_from_toc_ui: this.model.get('enable_hide_from_toc_ui'),
                 }
             );
         }
@@ -1131,6 +1323,42 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         }
     });
 
+    SummaryConfigurationEditor = AbstractEditor.extend({
+        templateName: 'summary-configuration-editor',
+        className: 'summary-configuration',
+
+        afterRender: function() {
+            AbstractEditor.prototype.afterRender.call(this);
+            this.setEnabled(this.isModelEnabled());
+        },
+
+        isModelEnabled: function() {
+          return this.model.get('summary_configuration_enabled');
+        },
+
+        setEnabled: function(value) {
+            this.$('#summary_configuration_enabled').prop('checked', value);
+        },
+
+        isEnabled: function() {
+            return this.$('#summary_configuration_enabled').is(':checked');
+        },
+
+        hasChanges: function() {
+            return this.isModelEnabled() !== this.isEnabled();
+        },
+
+        getRequestData: function() {
+            if (this.hasChanges()) {
+                return {
+                    summary_configuration_enabled: this.isEnabled()
+                };
+            } else {
+                return {};
+            }
+        }
+    });
+
     return {
         getModal: function(type, xblockInfo, options) {
             if (type === 'edit') {
@@ -1141,7 +1369,10 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 return this.getHighlightsModal(xblockInfo, options);
             } else if (type === 'highlights_enable') {
                 return this.getHighlightsEnableModal(xblockInfo, options);
-            } else {
+            } else if (type === 'subsection_share_link') {
+                return this.getSubsectionShareLinkModal(xblockInfo, options);
+            }
+            else {
                 return null;
             }
         },
@@ -1155,7 +1386,10 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 editors: []
             };
             if (xblockInfo.isVertical()) {
-                editors = [StaffLockEditor, UnitAccessEditor];
+                editors = [StaffLockEditor, UnitAccessEditor, DiscussionEditor];
+                if (typeof xblockInfo.get('summary_configuration_enabled') === 'boolean') {
+                    editors.push(SummaryConfigurationEditor);
+                }
             } else {
                 tabs = [
                     {
@@ -1182,7 +1416,7 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                         advancedTab.editors.push(TimedExaminationPreferenceEditor);
                     }
 
-                    if (typeof(xblockInfo.get('is_prereq')) !== 'undefined') {
+                    if (typeof xblockInfo.get('is_prereq') !== 'undefined') {
                         advancedTab.editors.push(AccessEditor);
                     }
 
@@ -1201,6 +1435,23 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
                 });
             }
 
+            if (!options.unit_level_discussions) {
+                editors = _.without(editors, DiscussionEditor);
+            }
+
+            return new SettingsXBlockModal($.extend({
+                tabs: tabs,
+                editors: editors,
+                model: xblockInfo
+            }, options));
+        },
+
+        /**
+         * This function allows comprehensive themes to create custom editors without adding boilerplate code.
+         *
+         * A simple example theme for this can be found at https://github.com/open-craft/custom-unit-icons-theme
+         * */
+        getCustomEditModal: function(tabs, editors, xblockInfo, options) {
             return new SettingsXBlockModal($.extend({
                 tabs: tabs,
                 editors: editors,
@@ -1225,6 +1476,26 @@ define(['jquery', 'backbone', 'underscore', 'gettext', 'js/views/baseview',
         getHighlightsEnableModal: function(xblockInfo, options) {
             return new HighlightsEnableXBlockModal($.extend({
                 editors: [HighlightsEnableEditor],
+                model: xblockInfo
+            }, options));
+        },
+
+        getSubsectionShareLinkModal: function(xblockInfo, options) {
+            let tabs = [
+                {
+                    name: 'full_page',
+                    displayName: gettext('Full Page'),
+                    editors: [FullPageShareLinkEditor],
+                },
+                {
+                    name: 'embed_link',
+                    displayName: gettext('Embed Link'),
+                    editors: [EmbedLinkShareLinkEditor],
+                }
+            ]
+            return new SubsectionShareLinkXBlockModal($.extend({
+                tabs: tabs,
+                editors: [FullPageShareLinkEditor, EmbedLinkShareLinkEditor],
                 model: xblockInfo
             }, options));
         }

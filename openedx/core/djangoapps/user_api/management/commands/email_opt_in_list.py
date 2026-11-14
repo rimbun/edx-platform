@@ -23,10 +23,11 @@ The command will always use the read replica database if one is configured.
 
 import contextlib
 import csv
-import datetime
 import logging
 import os.path
 import time
+from datetime import datetime
+from datetime import timezone as dt_timezone
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -84,7 +85,7 @@ class Command(BaseCommand):
     QUERY_INTERVAL = 1000
 
     # Default datetime if the user has not set a preference
-    DEFAULT_DATETIME_STR = datetime.datetime(year=2014, month=12, day=1).isoformat(' ')
+    DEFAULT_DATETIME_STR = datetime(year=2014, month=12, day=1).isoformat(' ')
 
     def handle(self, *args, **options):
         """
@@ -240,9 +241,9 @@ class Command(BaseCommand):
             user_id, username, email, full_name, course_id, is_opted_in, pref_set_datetime = row
 
             if pref_set_datetime:
-                pref_set_datetime = timezone.make_aware(pref_set_datetime, timezone.utc)
+                pref_set_datetime = timezone.make_aware(pref_set_datetime, dt_timezone.utc)  # noqa: UP017
             else:
-                pref_set_datetime = self.DEFAULT_DATETIME_STR
+                pref_set_datetime = ""
 
             if not full_name:
                 full_name = ""
@@ -256,7 +257,7 @@ class Command(BaseCommand):
                 # of ECOM-1995.
                 "full_name": full_name,
                 "course_id": course_id,
-                "is_opted_in_for_email": is_opted_in if is_opted_in else "True",
+                "is_opted_in_for_email": is_opted_in if is_opted_in else "",
                 "preference_set_datetime": pref_set_datetime,
             })
             row_count += 1

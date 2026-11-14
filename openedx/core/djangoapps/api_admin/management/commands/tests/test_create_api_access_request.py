@@ -1,17 +1,19 @@
-import unittest
+# pylint: disable=missing-module-docstring
+
 from unittest.mock import patch
 
 import ddt
-from django.conf import settings
 from django.contrib.sites.models import Site
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
-from openedx.core.djangoapps.api_admin.models import ApiAccessConfig, ApiAccessRequest
+
 from common.djangoapps.student.tests.factories import UserFactory
+from openedx.core.djangoapps.api_admin.models import ApiAccessConfig, ApiAccessRequest
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Tests only valid in lms')
+@skip_unless_lms
 @ddt.ddt
 class TestCreateApiAccessRequest(TestCase):
     """ Test create_api_access_request command """
@@ -53,7 +55,7 @@ class TestCreateApiAccessRequest(TestCase):
         self.assert_models_exist(True, True)
 
     def test_user_not_found(self):
-        with self.assertRaisesRegex(CommandError, r'User .*? not found'):
+        with self.assertRaisesRegex(CommandError, r'User .*? not found'):  # noqa: PT027
             call_command(self.command, 'not-a-user-notfound-nope')
 
     @patch('openedx.core.djangoapps.api_admin.models.ApiAccessRequest.objects.create')
@@ -62,7 +64,7 @@ class TestCreateApiAccessRequest(TestCase):
 
         self.assert_models_exist(False, False)
 
-        with self.assertRaisesRegex(CommandError, r'Unable to create ApiAccessRequest .*'):
+        with self.assertRaisesRegex(CommandError, r'Unable to create ApiAccessRequest .*'):  # noqa: PT027
             call_command(self.command, self.user.username)
 
         self.assert_models_exist(False, False)
@@ -90,7 +92,7 @@ class TestCreateApiAccessRequest(TestCase):
 
         self.assert_models_exist(False, False)
 
-        with self.assertRaisesRegex(CommandError, 'out of disk space'):
+        with self.assertRaisesRegex(CommandError, 'out of disk space'):  # noqa: PT027
             call_command(self.command, self.user.username)
 
         self.assert_models_exist(False, False)
@@ -100,7 +102,7 @@ class TestCreateApiAccessRequest(TestCase):
         mocked_method.side_effect = Exception()
         self.assert_models_exist(False, False)
 
-        with self.assertRaisesRegex(CommandError, r'Unable to create ApiAccessConfig\. .*'):
+        with self.assertRaisesRegex(CommandError, r'Unable to create ApiAccessConfig\. .*'):  # noqa: PT027
             call_command(self.command, self.user.username, create_config=True)
 
         self.assert_models_exist(False, False)

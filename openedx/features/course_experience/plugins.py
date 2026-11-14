@@ -6,12 +6,11 @@ This includes any locally defined CourseTools.
 
 
 from django.urls import reverse
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from common.djangoapps.student.models import CourseEnrollment
 from openedx.core.lib.courses import get_course_by_id
 
-from . import DISABLE_UNIFIED_COURSE_TAB_FLAG
 from .course_tools import CourseTool
 from .views.course_updates import CourseUpdatesFragmentView
 
@@ -28,14 +27,14 @@ class CourseUpdatesTool(CourseTool):
         return 'edx.updates'
 
     @classmethod
-    def title(cls):  # lint-amnesty, pylint: disable=arguments-differ
+    def title(cls):  # pylint: disable=arguments-differ
         """
         Returns the title of this tool.
         """
         return _('Updates')
 
     @classmethod
-    def icon_classes(cls):  # lint-amnesty, pylint: disable=arguments-differ
+    def icon_classes(cls):  # pylint: disable=arguments-differ
         """
         Returns icon classes needed to represent this tool.
         """
@@ -46,8 +45,6 @@ class CourseUpdatesTool(CourseTool):
         """
         Returns True if the user should be shown course updates for this course.
         """
-        if DISABLE_UNIFIED_COURSE_TAB_FLAG.is_enabled(course_key):
-            return False
         if not CourseEnrollment.is_enrolled(request.user, course_key):
             return False
         course = get_course_by_id(course_key)

@@ -4,6 +4,7 @@ Test helpers for Comprehensive Theming.
 
 
 from unittest.mock import Mock, patch
+
 from django.conf import settings
 from django.test import TestCase, override_settings
 
@@ -14,14 +15,24 @@ from openedx.core.djangoapps.theming.helpers import (
     get_template_path_with_theme,
     get_theme_base_dir,
     get_themes,
-    strip_site_theme_templates_path
+    strip_site_theme_templates_path,
 )
+from openedx.core.djangoapps.theming.helpers_dirs import get_theme_dirs
 from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
 from openedx.core.djangolib.testing.utils import skip_unless_cms, skip_unless_lms
 
 
 class TestHelpers(TestCase):
     """Test comprehensive theming helper functions."""
+
+    def setUp(self):
+        """
+        Clear cache on get_theme methods.
+        """
+        super().setUp()
+
+        get_themes.cache_clear()
+        get_theme_dirs.cache_clear()
 
     def test_get_themes(self):
         """
@@ -30,14 +41,14 @@ class TestHelpers(TestCase):
         expected_themes = [
             Theme('dark-theme', 'dark-theme', get_theme_base_dir('dark-theme'), settings.PROJECT_ROOT),
             Theme('edge.edx.org', 'edge.edx.org', get_theme_base_dir('edge.edx.org'), settings.PROJECT_ROOT),
-            Theme('edx.org', 'edx.org', get_theme_base_dir('edx.org'), settings.PROJECT_ROOT),
             Theme('open-edx', 'open-edx', get_theme_base_dir('open-edx'), settings.PROJECT_ROOT),
             Theme('red-theme', 'red-theme', get_theme_base_dir('red-theme'), settings.PROJECT_ROOT),
             Theme('stanford-style', 'stanford-style', get_theme_base_dir('stanford-style'), settings.PROJECT_ROOT),
             Theme('test-theme', 'test-theme', get_theme_base_dir('test-theme'), settings.PROJECT_ROOT),
+            Theme('empty-theme', 'empty-theme', get_theme_base_dir('empty-theme'), settings.PROJECT_ROOT),
         ]
         actual_themes = get_themes()
-        self.assertCountEqual(expected_themes, actual_themes)
+        self.assertCountEqual(expected_themes, actual_themes)  # noqa: PT009
 
     @override_settings(COMPREHENSIVE_THEME_DIRS=[settings.TEST_THEME.dirname()])
     def test_get_themes_2(self):
@@ -48,7 +59,7 @@ class TestHelpers(TestCase):
             Theme('test-theme', 'test-theme', get_theme_base_dir('test-theme'), settings.PROJECT_ROOT),
         ]
         actual_themes = get_themes()
-        self.assertCountEqual(expected_themes, actual_themes)
+        self.assertCountEqual(expected_themes, actual_themes)  # noqa: PT009
 
     def test_get_value_returns_override(self):
         """

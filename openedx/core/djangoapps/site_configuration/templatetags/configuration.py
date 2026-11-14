@@ -9,8 +9,8 @@ from django.conf import settings
 from django.templatetags.static import static
 
 from lms.djangoapps.branding.api import get_favicon_url
-from openedx.core.djangoapps.theming import helpers as theming_helpers
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from openedx.core.djangoapps.theming import helpers as theming_helpers
 from openedx.core.djangolib.markup import HTML
 
 register = template.Library()  # pylint: disable=invalid-name
@@ -65,3 +65,12 @@ def microsite_template_path(template_name):
     """
     template_name = theming_helpers.get_template_path(template_name)
     return template_name[1:] if template_name[0] == '/' else template_name
+
+
+@register.simple_tag
+def google_analytics_4_id():
+    """
+    Django template tag that outputs the GOOGLE_ANALYTICS_4_ID:
+    {% google_analytics_4_id %}
+    """
+    return configuration_helpers.get_value("GOOGLE_ANALYTICS_4_ID", settings.GOOGLE_ANALYTICS_4_ID)

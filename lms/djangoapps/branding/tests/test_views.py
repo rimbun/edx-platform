@@ -7,8 +7,8 @@ from unittest import mock
 import ddt
 import six
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
-from django.test import TestCase
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from common.djangoapps.student.tests.factories import UserFactory
@@ -35,11 +35,6 @@ class TestFooter(CacheIsolationTestCase):
         (None, "application/json", "application/json; charset=utf-8", "Open edX"),
         (None, "text/html", "text/html; charset=utf-8", "lms-footer.css"),
         (None, "text/html", "text/html; charset=utf-8", "Open edX"),
-
-        # EdX.org version
-        ("edx.org", "application/json", "application/json; charset=utf-8", "edX Inc"),
-        ("edx.org", "text/html", "text/html; charset=utf-8", "lms-footer-edx.css"),
-        ("edx.org", "text/html", "text/html; charset=utf-8", "edX Inc"),
     )
     @ddt.unpack
     def test_footer_content_types(self, theme, accepts, content_type, content):
@@ -50,11 +45,10 @@ class TestFooter(CacheIsolationTestCase):
         assert resp['Content-Type'] == content_type
         self.assertContains(resp, content)
 
-    @mock.patch.dict(settings.FEATURES, {'ENABLE_FOOTER_MOBILE_APP_LINKS': True})
-    @ddt.data("edx.org", None)
-    def test_footer_json(self, theme):
+    @override_settings(ENABLE_FOOTER_MOBILE_APP_LINKS=True)
+    def test_footer_json(self):
         self._set_feature_flag(True)
-        with with_comprehensive_theme_context(theme):
+        with with_comprehensive_theme_context(None):
             resp = self._get_footer()
 
         assert resp.status_code == 200
@@ -145,10 +139,6 @@ class TestFooter(CacheIsolationTestCase):
         # OpenEdX
         (None, "en", "lms-footer.css"),
         (None, "ar", "lms-footer-rtl.css"),
-
-        # EdX.org
-        ("edx.org", "en", "lms-footer-edx.css"),
-        ("edx.org", "ar", "lms-footer-edx-rtl.css"),
     )
     @ddt.unpack
     def test_language_rtl(self, theme, language, static_path):
@@ -163,10 +153,6 @@ class TestFooter(CacheIsolationTestCase):
         # OpenEdX
         (None, True),
         (None, False),
-
-        # EdX.org
-        ("edx.org", True),
-        ("edx.org", False),
     )
     @ddt.unpack
     def test_show_openedx_logo(self, theme, show_logo):
@@ -185,10 +171,6 @@ class TestFooter(CacheIsolationTestCase):
         # OpenEdX
         (None, False),
         (None, True),
-
-        # EdX.org
-        ("edx.org", False),
-        ("edx.org", True),
     )
     @ddt.unpack
     def test_include_dependencies(self, theme, include_dependencies):
@@ -207,11 +189,6 @@ class TestFooter(CacheIsolationTestCase):
         (None, None, '1'),
         (None, 'eo', '1'),
         (None, None, ''),
-
-        # EdX.org
-        ('edx.org', None, '1'),
-        ('edx.org', 'eo', '1'),
-        ('edx.org', None, '')
     )
     @ddt.unpack
     def test_include_language_selector(self, theme, language, include_language_selector):
@@ -249,7 +226,7 @@ class TestFooter(CacheIsolationTestCase):
         url = reverse("branding_footer")
 
         if params is not None:
-            url = "{url}?{params}".format(
+            url = "{url}?{params}".format(  # noqa: UP032
                 url=url,
                 params=six.moves.urllib.parse.urlencode(params)
             )
@@ -272,6 +249,7 @@ class TestFooter(CacheIsolationTestCase):
             assert f'<option value="{language.code}">' in content
 
 
+@ddt.ddt
 class TestIndex(SiteMixin, TestCase):
     """ Test the index view """
 
@@ -279,7 +257,7 @@ class TestIndex(SiteMixin, TestCase):
         """ Set up a user """
         super().setUp()
 
-        patcher = mock.patch("common.djangoapps.student.models.tracker")
+        patcher = mock.patch("common.djangoapps.student.models.course_enrollment.tracker")
         self.mock_tracker = patcher.start()
         self.user = UserFactory.create()
         self.user.set_password("password")
@@ -289,6 +267,18 @@ class TestIndex(SiteMixin, TestCase):
         """ Test index view does not redirect if MKTG_URLS['ROOT'] is not set """
         response = self.client.get(reverse("root"))
         assert response.status_code == 200
+
+    @override_settings(MKTG_URLS={'ROOT': 'https://foo.bar/'})
+    @override_settings(LMS_ROOT_URL='https://foo.bar/')
+    def test_index_wont_redirect_to_marketing_root_if_it_matches_lms_root(self):
+        response = self.client.get(reverse("root"))
+        assert response.status_code == 200
+
+    @override_settings(MKTG_URLS={'ROOT': 'https://home.foo.bar/'})
+    @override_settings(LMS_ROOT_URL='https://foo.bar/')
+    def test_index_will_redirect_to_new_root_if_mktg_site_is_enabled(self):
+        response = self.client.get(reverse("root"))
+        assert response.status_code == 302
 
     def test_index_redirects_to_marketing_site_with_site_override(self):
         """ Test index view redirects if MKTG_URLS['ROOT'] is set in SiteConfiguration """
@@ -309,3 +299,66 @@ class TestIndex(SiteMixin, TestCase):
         self.client.login(username=self.user.username, password="password")
         response = self.client.get(reverse("dashboard"))
         assert self.site_configuration_other.site_values['MKTG_URLS']['ROOT'] in response.content.decode('utf-8')
+
+    @ddt.data(
+        (True, True),
+        (True, False),
+        (False, False),
+        (False, False),
+    )
+    @ddt.unpack
+    def test_index_redirects_to_mfe(self, catalog_mfe_enabled, expected_redirect):
+        """Test that index view redirects to MFE when both flags are enabled."""
+        new_settings = {
+            "ENABLE_CATALOG_MICROFRONTEND": catalog_mfe_enabled,
+            "CATALOG_MICROFRONTEND_URL": "http://example.com/catalog",
+        }
+        with override_settings(**new_settings):
+            response = self.client.get(reverse("root"))
+
+            if expected_redirect:
+                expected_url = f'{settings.CATALOG_MICROFRONTEND_URL}/'
+                self.assertRedirects(
+                    response,
+                    expected_url,
+                    status_code=301,
+                    fetch_redirect_response=False
+                )
+            else:
+                assert response.status_code in [200, 301, 302]
+
+
+@ddt.ddt
+class TestCourses(SiteMixin, TestCase):
+    """Test the courses view"""
+
+    def setUp(self):
+        super().setUp()
+        self.courses_url = reverse("courses")
+
+    @ddt.data(
+        (True, True),
+        (True, False),
+        (False, False),
+        (False, False),
+    )
+    @ddt.unpack
+    def test_courses_redirect_to_mfe(self, catalog_mfe_enabled, expected_redirect):
+        """Test that courses view redirects to MFE when both flags are enabled"""
+        new_settings = {
+            "ENABLE_CATALOG_MICROFRONTEND": catalog_mfe_enabled,
+            "CATALOG_MICROFRONTEND_URL": "http://example.com/catalog",
+        }
+        with override_settings(**new_settings):
+            response = self.client.get(self.courses_url)
+
+            if expected_redirect:
+                expected_url = f'{settings.CATALOG_MICROFRONTEND_URL}/courses'
+                self.assertRedirects(
+                    response,
+                    expected_url,
+                    status_code=301,
+                    fetch_redirect_response=False
+                )
+            else:
+                assert response.status_code in [200, 301, 302]

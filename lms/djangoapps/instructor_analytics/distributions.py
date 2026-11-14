@@ -52,7 +52,7 @@ class ProfileDistribution:
 
     class ValidationError(ValueError):
         """ Error thrown if validation fails. """
-        pass  # lint-amnesty, pylint: disable=unnecessary-pass
+        pass  # pylint: disable=unnecessary-pass
 
     def __init__(self, feature):
         self.feature = feature
@@ -96,7 +96,7 @@ def profile_distribution(course_id, feature):
 
     if feature not in AVAILABLE_PROFILE_FEATURES:
         raise ValueError(
-            "unsupported feature requested for distribution u'{}'".format(
+            "unsupported feature requested for distribution u'{}'".format(  # noqa: UP032
                 feature)
         )
 
@@ -111,8 +111,7 @@ def profile_distribution(course_id, feature):
             raw_choices = UserProfile.LEVEL_OF_EDUCATION_CHOICES
 
         # short name and display name (full) of the choices.
-        choices = [(short, full)
-                   for (short, full) in raw_choices] + [('no_data', 'No Data')]  # lint-amnesty, pylint: disable=unnecessary-comprehension
+        choices = list(raw_choices) + [('no_data', 'No Data')]
 
         def get_filter(feature, value):
             """ Get the orm filter parameters for a feature. """
@@ -130,7 +129,7 @@ def profile_distribution(course_id, feature):
             ).count()
 
         distribution = {}
-        for (short, full) in choices:  # lint-amnesty, pylint: disable=unused-variable
+        for (short, full) in choices:  # pylint: disable=unused-variable  # noqa: B007
             # handle no data case
             if short == 'no_data':
                 distribution['no_data'] = 0

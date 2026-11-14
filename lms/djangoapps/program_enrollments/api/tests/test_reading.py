@@ -4,8 +4,9 @@ Tests for program enrollment reading Python API.
 
 
 from uuid import UUID
-import pytest
+
 import ddt
+import pytest
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase
@@ -22,13 +23,13 @@ from lms.djangoapps.program_enrollments.constants import ProgramEnrollmentStatus
 from lms.djangoapps.program_enrollments.exceptions import (
     OrganizationDoesNotExistException,
     ProgramDoesNotExistException,
-    ProviderDoesNotExistException
+    ProviderDoesNotExistException,
 )
 from lms.djangoapps.program_enrollments.models import ProgramCourseEnrollment, ProgramEnrollment
 from lms.djangoapps.program_enrollments.tests.factories import (
     CourseAccessRoleAssignmentFactory,
     ProgramCourseEnrollmentFactory,
-    ProgramEnrollmentFactory
+    ProgramEnrollmentFactory,
 )
 from openedx.core.djangoapps.catalog.cache import PROGRAM_CACHE_KEY_TPL
 from openedx.core.djangoapps.catalog.tests.factories import OrganizationFactory as CatalogOrganizationFactory
@@ -45,8 +46,9 @@ from ..reading import (
     get_external_key_by_user_and_course,
     get_program_course_enrollment,
     get_program_enrollment,
+    get_provider_slug,
     get_users_by_external_keys,
-    is_course_staff_enrollment
+    is_course_staff_enrollment,
 )
 
 User = get_user_model()
@@ -157,6 +159,10 @@ class ProgramEnrollmentReadingTests(TestCase):
         # enrollments in one curriculum, so it's not ambiguous).
         (program_uuid_y, None, None, ext_6, 6),
         (program_uuid_y, None, username_2, None, 10),
+        # use mixed casing for external_user_id
+        (program_uuid_x, curriculum_uuid_b, None, 'STUDENT-4', 4),
+        (program_uuid_x, curriculum_uuid_b, None, 'STUDent-5', 5),
+        (program_uuid_y, None, None, 'STudENT-6', 6),
     )
     @ddt.unpack
     def test_get_program_enrollment(
@@ -193,6 +199,10 @@ class ProgramEnrollmentReadingTests(TestCase):
         # because each user-course pairing can only have one
         # program-course enrollment.
         (program_uuid_y, curriculum_uuid_c, course_key_r, None, ext_6, 10),
+        # Use mixed casing for external_user_key
+        (program_uuid_x, None, course_key_p, username_3, 'stuDENT-3', 5),
+        (program_uuid_y, None, course_key_p, None, 'STudenT-4', 7),
+        (program_uuid_x, None, course_key_p, None, 'STUDENT-5', 6),
     )
     @ddt.unpack
     def test_get_program_course_enrollment(
@@ -253,6 +263,15 @@ class ProgramEnrollmentReadingTests(TestCase):
             {'program_uuid': program_uuid_x, 'waiting_only': True},
             {5},
         ),
+        # Use mixed casing on external_user_key
+        (
+            {
+                'program_uuid': program_uuid_x,
+                'usernames': {username_1, username_2, username_3, username_4},
+                'external_user_keys': {'studeNT-3', 'STUdent-4', 'STudenT-5'}
+            },
+            {3, 4},
+        ),
     )
     @ddt.unpack
     def test_fetch_program_enrollments(self, kwargs, expected_enrollment_ids):
@@ -312,6 +331,16 @@ class ProgramEnrollmentReadingTests(TestCase):
             },
             {10},
         ),
+        # Use mixed casing on external_user_key
+        (
+            {
+                'program_uuid': program_uuid_x,
+                'course_key': course_key_p,
+                'usernames': {username_2, username_3},
+                'external_user_keys': {'STudENt-3', 'stuDENt-5'}
+            },
+            {5},
+        ),
     )
     @ddt.unpack
     def test_fetch_program_course_enrollments(self, kwargs, expected_enrollment_ids):
@@ -363,6 +392,11 @@ class ProgramEnrollmentReadingTests(TestCase):
             {'external_user_key': ext_4, 'waiting_only': True},
             {8},
         ),
+        # Use mixed casing on external_user_key
+        (
+            {'external_user_key': 'STudeNT-4', 'realized_only': True},
+            {4},
+        ),
     )
     @ddt.unpack
     def test_fetch_program_enrollments_by_student(self, kwargs, expected_enrollment_ids):
@@ -406,6 +440,11 @@ class ProgramEnrollmentReadingTests(TestCase):
         # Waiting-only filter
         (
             {'external_user_keys': [ext_4], 'waiting_only': True},
+            {8},
+        ),
+        # Use mixed casing on external_user_key
+        (
+            {'external_user_keys': ['STUdenT-4'], 'waiting_only': True},
             {8},
         ),
     )
@@ -460,6 +499,11 @@ class ProgramEnrollmentReadingTests(TestCase):
                 'inactive_only': True,
             },
             {8},
+        ),
+        # Use mixed casing on external_user_key
+        (
+            {'external_user_keys': ['STUDENT-4'], 'realized_only': True},
+            set(),
         ),
     )
     @ddt.unpack
@@ -760,3 +804,11 @@ class IsCourseStaffEnrollmentTest(TestCase):
             id=program_course_enrollment_id
         )
         assert is_course_staff == is_course_staff_enrollment(program_course_enrollment)
+
+    def test_get_provider_slug_correctly_strips(self):
+        list_of_providers = []
+        for num_provider in range(1000):
+            list_of_providers.append(SAMLProviderConfigFactory(entity_id=str(num_provider)))
+
+        for provider in list_of_providers:
+            assert provider.slug == get_provider_slug(provider)

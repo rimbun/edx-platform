@@ -12,7 +12,7 @@ from common.djangoapps.student.tests.factories import UserFactory
 from xmodule.contentstore.content import StaticContent
 from xmodule.contentstore.django import contentstore
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
 from xmodule.modulestore.tests.factories import CourseFactory
 
 
@@ -20,24 +20,23 @@ class DeleteCourseTests(ModuleStoreTestCase):
     """
     Test for course deleting functionality of the 'delete_course' command
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
     YESNO_PATCH_LOCATION = 'cms.djangoapps.contentstore.management.commands.delete_course.query_yes_no'
 
     def test_invalid_course_key(self):
         course_run_key = 'foo/TestX/TS01/2015_Q7'
         expected_error_message = 'Invalid course_key: ' + course_run_key
-        with self.assertRaisesRegex(CommandError, expected_error_message):
+        with self.assertRaisesRegex(CommandError, expected_error_message):  # noqa: PT027
             call_command('delete_course', course_run_key)
 
     def test_course_not_found(self):
         course_run_key = 'TestX/TS01/2015_Q7'
         expected_error_message = 'Course not found: ' + course_run_key
-        with self.assertRaisesRegex(CommandError, expected_error_message):
+        with self.assertRaisesRegex(CommandError, expected_error_message):  # noqa: PT027
             call_command('delete_course', course_run_key)
 
     def test_asset_and_course_deletion(self):
         course_run = CourseFactory()
-        self.assertIsNotNone(modulestore().get_course(course_run.id))
+        self.assertIsNotNone(modulestore().get_course(course_run.id))  # noqa: PT009
 
         store = contentstore()
         asset_key = course_run.id.make_asset_key('asset', 'test.txt')

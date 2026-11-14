@@ -15,14 +15,12 @@ from opaque_keys.edx.django.models import CourseKeyField
 from opaque_keys.edx.keys import CourseKey, UsageKey
 from xblock.core import XBlock
 
+from common.djangoapps.student.models import CourseAccessRole
+from common.djangoapps.student.roles import CourseRole, OrgRole, strict_role_checking
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.enrollments.api import is_enrollment_valid_for_proctoring
-from common.djangoapps.student.models import CourseAccessRole
-from common.djangoapps.student.roles import CourseRole, OrgRole
-from xmodule.course_module import CourseBlock
-from xmodule.error_module import ErrorBlock
-from xmodule.x_module import XModule
-
+from xmodule.course_block import CourseBlock  # pylint: disable=wrong-import-order
+from xmodule.error_block import ErrorBlock  # pylint: disable=wrong-import-order
 
 from .access import has_access
 
@@ -48,10 +46,14 @@ class HasAccessRule(Rule):
     """
     A rule that calls `has_access` to determine whether it passes
     """
-    def __init__(self, action):
+    def __init__(self, action, strict=False):
         self.action = action
+        self.strict = strict
 
     def check(self, user, instance=None):
+        if self.strict:
+            with strict_role_checking():
+                return has_access(user, self.action, instance)
         return has_access(user, self.action, instance)
 
     def query(self, user):
@@ -62,7 +64,7 @@ class HasAccessRule(Rule):
         return Q(pk__in=[])
 
 
-class StaffAccessExperiment(laboratory.Experiment):  # lint-amnesty, pylint: disable=missing-class-docstring
+class StaffAccessExperiment(laboratory.Experiment):  # pylint: disable=missing-class-docstring
     def compare(self, control, candidate):
         return bool(control.value) == candidate.value
 
@@ -106,7 +108,7 @@ class HasStaffAccessToContent(Rule):
         # (start with more specific types, then get more general)
         if isinstance(instance, (CourseBlock, CourseOverview)):
             course_key = instance.id
-        elif isinstance(instance, (ErrorBlock, XModule, XBlock)):
+        elif isinstance(instance, (ErrorBlock, XBlock)):
             course_key = instance.scope_ids.usage_id.course_key
         elif isinstance(instance, CourseKey):
             course_key = instance
@@ -153,7 +155,7 @@ class HasStaffAccessToContent(Rule):
         return query
 
 
-class HasRolesRule(Rule):  # lint-amnesty, pylint: disable=abstract-method, missing-class-docstring
+class HasRolesRule(Rule):  # pylint: disable=abstract-method, missing-class-docstring
     def __init__(self, *roles):
         self.roles = roles
 
@@ -164,7 +166,7 @@ class HasRolesRule(Rule):  # lint-amnesty, pylint: disable=abstract-method, miss
             course_key = instance
         elif isinstance(instance, (CourseBlock, CourseOverview)):
             course_key = instance.id
-        elif isinstance(instance, (ErrorBlock, XModule, XBlock)):
+        elif isinstance(instance, (ErrorBlock, XBlock)):
             course_key = instance.scope_ids.usage_id.course_key
         else:
             course_key = CourseKey.from_string(str(instance))

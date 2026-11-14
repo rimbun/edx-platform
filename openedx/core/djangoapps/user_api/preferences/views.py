@@ -7,7 +7,7 @@ https://openedx.atlassian.net/wiki/display/TNL/User+API
 
 
 from django.db import transaction
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from edx_rest_framework_extensions.auth.session.authentication import SessionAuthenticationAllowInactiveUser
 from rest_framework import permissions, status
@@ -24,7 +24,7 @@ from .api import (
     get_user_preference,
     get_user_preferences,
     set_user_preference,
-    update_user_preferences
+    update_user_preferences,
 )
 
 

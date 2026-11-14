@@ -9,18 +9,18 @@ from django.template.context_processors import csrf
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.decorators import method_decorator
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from django.views.decorators.cache import cache_control
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.generic import View
 from opaque_keys.edx.keys import CourseKey
 from web_fragments.fragment import Fragment
 
+from common.djangoapps.util.views import ensure_valid_course_key
 from lms.djangoapps.courseware.courses import get_course_with_access
 from openedx.core.djangoapps.plugin_api.views import EdxFragmentView
 from openedx.core.djangoapps.user_api.models import UserPreference
-from openedx.features.course_experience import default_course_url_name
-from common.djangoapps.util.views import ensure_valid_course_key
+from openedx.features.course_experience import default_course_url
 
 
 class CourseBookmarksView(View):
@@ -41,8 +41,7 @@ class CourseBookmarksView(View):
         """
         course_key = CourseKey.from_string(course_id)
         course = get_course_with_access(request.user, 'load', course_key, check_if_enrolled=True)
-        course_url_name = default_course_url_name(course.id)
-        course_url = reverse(course_url_name, kwargs={'course_id': str(course.id)})
+        course_url = default_course_url(course.id)
 
         # Render the bookmarks list as a fragment
         bookmarks_fragment = CourseBookmarksFragmentView().render_to_fragment(request, course_id=course_id)
@@ -65,7 +64,7 @@ class CourseBookmarksFragmentView(EdxFragmentView):
     Fragment view that shows a user's bookmarks for a course.
     """
 
-    def render_to_fragment(self, request, course_id=None, **kwargs):  # lint-amnesty, pylint: disable=arguments-differ
+    def render_to_fragment(self, request, course_id=None, **kwargs):  # pylint: disable=arguments-differ
         """
         Renders the user's course bookmarks as a fragment.
         """

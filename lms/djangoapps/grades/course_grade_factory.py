@@ -7,10 +7,9 @@ from logging import getLogger
 from openedx.core.djangoapps.signals.signals import (
     COURSE_GRADE_CHANGED,
     COURSE_GRADE_NOW_FAILED,
-    COURSE_GRADE_NOW_PASSED
+    COURSE_GRADE_NOW_PASSED,
 )
 
-from .config import assume_zero_if_absent, should_persist_grades
 from .course_data import CourseData
 from .course_grade import CourseGrade, ZeroCourseGrade
 from .models import PersistentCourseGrade
@@ -36,10 +35,7 @@ class CourseGradeFactory:
     ):
         """
         Returns the CourseGrade for the given user in the course.
-        Reads the value from storage.
-        If not in storage, returns a ZeroGrade if ASSUME_ZERO_GRADE_IF_ABSENT.
-        Else if create_if_needed, computes and returns a new value.
-        Else, returns None.
+        Reads the value from storage or creates an initial value of zero.
 
         At least one of course, collected_block_structure, course_structure,
         or course_key should be provided.
@@ -48,12 +44,7 @@ class CourseGradeFactory:
         try:
             return self._read(user, course_data)
         except PersistentCourseGrade.DoesNotExist:
-            if assume_zero_if_absent(course_data.course_key):
-                return self._create_zero(user, course_data)
-            elif create_if_needed:
-                return self._update(user, course_data)
-            else:
-                return None
+            return self._create_zero(user, course_data)
 
     def update(
             self,
@@ -103,11 +94,10 @@ class CourseGradeFactory:
         course_data = CourseData(
             user=None, course=course, collected_block_structure=collected_block_structure, course_key=course_key,
         )
-        stats_tags = [f'action:{course_data.course_key}']  # lint-amnesty, pylint: disable=unused-variable
         for user in users:
             yield self._iter_grade_result(user, course_data, force_update)
 
-    def _iter_grade_result(self, user, course_data, force_update):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _iter_grade_result(self, user, course_data, force_update):  # pylint: disable=missing-function-docstring
         try:
             kwargs = {
                 'user': user,
@@ -146,9 +136,6 @@ class CourseGradeFactory:
         Returns a CourseGrade object based on stored grade information
         for the given user and course.
         """
-        if not should_persist_grades(course_data.course_key):
-            raise PersistentCourseGrade.DoesNotExist
-
         persistent_grade = PersistentCourseGrade.read(user.id, course_data.course_key)
         log.debug('Grades: Read, %s, User: %s, %s', str(course_data), user.id, persistent_grade)
 
@@ -157,7 +144,8 @@ class CourseGradeFactory:
             course_data,
             persistent_grade.percent_grade,
             persistent_grade.letter_grade,
-            persistent_grade.letter_grade != ''
+            persistent_grade.letter_grade != '',
+            last_updated=persistent_grade.modified
         )
 
     @staticmethod
@@ -169,8 +157,7 @@ class CourseGradeFactory:
         COURSE_GRADE_NOW_PASSED if learner has passed course or
         COURSE_GRADE_NOW_FAILED if learner is now failing course
         """
-        should_persist = should_persist_grades(course_data.course_key)
-        if should_persist and force_update_subsections:
+        if force_update_subsections:
             prefetch_grade_overrides_and_visible_blocks(user, course_data.course_key)
 
         course_grade = CourseGrade(
@@ -180,9 +167,9 @@ class CourseGradeFactory:
         )
         course_grade = course_grade.update()
 
-        should_persist = should_persist and course_grade.attempted
+        should_persist = course_grade.attempted
         if should_persist:
-            course_grade._subsection_grade_factory.bulk_create_unsaved()  # lint-amnesty, pylint: disable=protected-access
+            course_grade._subsection_grade_factory.bulk_create_unsaved()  # pylint: disable=protected-access
             PersistentCourseGrade.update_or_create(
                 user_id=user.id,
                 course_id=course_data.course_key,

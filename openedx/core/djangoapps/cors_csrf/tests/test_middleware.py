@@ -3,17 +3,17 @@ Tests for the CORS CSRF middleware
 """
 
 
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch
+
 import ddt
 import pytest
-from django.test import TestCase
-from django.test.utils import override_settings
-from django.core.exceptions import MiddlewareNotUsed, ImproperlyConfigured
+from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
 from django.http import HttpResponse
 from django.middleware.csrf import CsrfViewMiddleware
+from django.test import TestCase
+from django.test.utils import override_settings
 
 from ..middleware import CorsCSRFMiddleware, CsrfCrossDomainCookieMiddleware
-
 
 SENTINEL = object()
 
@@ -32,10 +32,10 @@ class TestCorsMiddlewareProcessRequest(TestCase):
         request.is_secure = lambda: is_secure
         return request
 
-    @override_settings(FEATURES={'ENABLE_CORS_HEADERS': True})
+    @override_settings(ENABLE_CORS_HEADERS=True)
     def setUp(self):
         super().setUp()
-        self.middleware = CorsCSRFMiddleware()
+        self.middleware = CorsCSRFMiddleware(get_response=lambda request: None)
 
     def check_not_enabled(self, request):
         """
@@ -69,6 +69,7 @@ class TestCorsMiddlewareProcessRequest(TestCase):
         'https://foo.com', 'https://www.foo.com', 'https://learning.edge.foo.bar']
     )
     @ddt.data(
+        'https://foo.com', 'https://foo.com/',
         'https://foo.com/bar/', 'https://foo.com/bar/baz/', 'https://www.foo.com/bar/baz/',
         'https://learning.edge.foo.bar', 'https://learning.edge.foo.bar/foo'
     )
@@ -77,12 +78,12 @@ class TestCorsMiddlewareProcessRequest(TestCase):
         self.check_enabled(request)
 
     @override_settings(
-        FEATURES={'ENABLE_CORS_HEADERS': False},
-        CORS_ORIGIN_WHITELIST=['https://foo.com']
+        ENABLE_CORS_HEADERS=False,
+        CORS_ORIGIN_WHITELIST=['https://foo.com'],
     )
     def test_disabled_no_cors_headers(self):
         with pytest.raises(MiddlewareNotUsed):
-            CorsCSRFMiddleware()
+            CorsCSRFMiddleware(get_response=lambda request: None)
 
     @override_settings(CORS_ORIGIN_WHITELIST=['https://bar.com'])
     def test_disabled_wrong_cors_domain(self):
@@ -115,23 +116,23 @@ class TestCsrfCrossDomainCookieMiddleware(TestCase):
     COOKIE_DOMAIN = '.edx.org'
 
     @override_settings(
-        FEATURES={'ENABLE_CROSS_DOMAIN_CSRF_COOKIE': True},
+        ENABLE_CROSS_DOMAIN_CSRF_COOKIE=True,
         CROSS_DOMAIN_CSRF_COOKIE_NAME=COOKIE_NAME,
-        CROSS_DOMAIN_CSRF_COOKIE_DOMAIN=COOKIE_DOMAIN
+        CROSS_DOMAIN_CSRF_COOKIE_DOMAIN=COOKIE_DOMAIN,
     )
     def setUp(self):
         super().setUp()
-        self.middleware = CsrfCrossDomainCookieMiddleware()
+        self.middleware = CsrfCrossDomainCookieMiddleware(get_response=lambda request: None)
 
-    @override_settings(FEATURES={'ENABLE_CROSS_DOMAIN_CSRF_COOKIE': False})
+    @override_settings(ENABLE_CROSS_DOMAIN_CSRF_COOKIE=False)
     def test_disabled_by_feature_flag(self):
         with pytest.raises(MiddlewareNotUsed):
-            CsrfCrossDomainCookieMiddleware()
+            CsrfCrossDomainCookieMiddleware(get_response=lambda request: None)
 
     @ddt.data('CROSS_DOMAIN_CSRF_COOKIE_NAME', 'CROSS_DOMAIN_CSRF_COOKIE_DOMAIN')
     def test_improperly_configured(self, missing_setting):
         settings = {
-            'FEATURES': {'ENABLE_CROSS_DOMAIN_CSRF_COOKIE': True},
+            'ENABLE_CROSS_DOMAIN_CSRF_COOKIE': True,
             'CROSS_DOMAIN_CSRF_COOKIE_NAME': self.COOKIE_NAME,
             'CROSS_DOMAIN_CSRF_COOKIE_DOMAIN': self.COOKIE_DOMAIN
         }
@@ -139,7 +140,7 @@ class TestCsrfCrossDomainCookieMiddleware(TestCase):
 
         with override_settings(**settings):
             with pytest.raises(ImproperlyConfigured):
-                CsrfCrossDomainCookieMiddleware()
+                CsrfCrossDomainCookieMiddleware(get_response=lambda request: None)
 
     @override_settings(
         CROSS_DOMAIN_CSRF_COOKIE_NAME=COOKIE_NAME,
@@ -257,7 +258,6 @@ class TestCsrfCrossDomainCookieMiddleware(TestCase):
             del request.META['HTTP_REFERER']
 
         if csrf_cookie_used:
-            request.META['CSRF_COOKIE_USED'] = True
             request.META['CSRF_COOKIE'] = self.COOKIE_VALUE
 
         if cross_domain_decorator:
@@ -270,14 +270,13 @@ class TestCsrfCrossDomainCookieMiddleware(TestCase):
         if is_set:
             assert self.COOKIE_NAME in response.cookies
             cookie_header = str(response.cookies[self.COOKIE_NAME])
-            # lint-amnesty, pylint: disable=bad-option-value, unicode-format-string
-            expected = 'Set-Cookie: {name}={value}; Domain={domain};'.format(
+
+            expected = 'Set-Cookie: {name}={value}; Domain={domain};'.format(  # noqa: UP032
                 name=self.COOKIE_NAME,
                 value=self.COOKIE_VALUE,
                 domain=self.COOKIE_DOMAIN
             )
             assert expected in cookie_header
-            # added lower function because in python 3 the value of cookie_header has Secure and secure in python 2
-            assert 'Max-Age=31449600; Path=/; secure'.lower() in cookie_header.lower()
+            assert 'Max-Age=31449600; Path=/; Secure' in cookie_header
         else:
             assert self.COOKIE_NAME not in response.cookies

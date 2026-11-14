@@ -5,6 +5,7 @@ Base test classes for LMS instructor-initiated background tasks
 
 
 import json
+
 # pylint: disable=attribute-defined-outside-init
 import os
 import shutil
@@ -14,12 +15,12 @@ from uuid import uuid4
 
 import unicodecsv
 from celery.states import FAILURE, SUCCESS
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.urls import reverse
 from opaque_keys.edx.keys import CourseKey
 from opaque_keys.edx.locations import Location
+from xblock_problem.capa.testing.response_xml_factory import OptionResponseXMLFactory
 
-from capa.tests.response_xml_factory import OptionResponseXMLFactory
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
 from lms.djangoapps.courseware.model_data import StudentModule
 from lms.djangoapps.courseware.tests.tests import LoginEnrollmentTestCase
@@ -31,13 +32,13 @@ from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
 from openedx.core.lib.url_utils import quote_slashes
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 TEST_COURSE_ORG = 'edx'
 TEST_COURSE_NAME = 'test_course'
 TEST_COURSE_NUMBER = '1.23x'
-TEST_COURSE_KEY = CourseKey.from_string('/'.join([TEST_COURSE_ORG, TEST_COURSE_NUMBER, TEST_COURSE_NAME]))
+TEST_COURSE_KEY = CourseKey.from_string(f'course-v1:{TEST_COURSE_ORG}+{TEST_COURSE_NUMBER}+{TEST_COURSE_NAME}')
 TEST_CHAPTER_NAME = "Section"
 TEST_SECTION_NAME = "Subsection"
 
@@ -108,6 +109,7 @@ class InstructorTaskCourseTestCase(LoginEnrollmentTestCase, ModuleStoreTestCase)
     Base test class for InstructorTask-related tests that require
     the setup of a course.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
     course = None
     current_user = None
 
@@ -137,13 +139,13 @@ class InstructorTaskCourseTestCase(LoginEnrollmentTestCase, ModuleStoreTestCase)
         Add a chapter and a sequential to the current course.
         """
         # Add a chapter to the course
-        self.chapter = ItemFactory.create(
+        self.chapter = BlockFactory.create(
             parent_location=self.course.location,
             display_name=TEST_CHAPTER_NAME,
         )
 
         # add a sequence to the course to which the problems can be added
-        self.problem_section = ItemFactory.create(
+        self.problem_section = BlockFactory.create(
             parent_location=self.chapter.location,
             category='sequential',
             metadata={'graded': True, 'format': 'Homework'},
@@ -160,7 +162,7 @@ class InstructorTaskCourseTestCase(LoginEnrollmentTestCase, ModuleStoreTestCase)
         if self.current_user != username:
             self.logout()
             user_email = User.objects.get(username=username).email
-            self.login(user_email, "test")
+            self.login(user_email, self.TEST_PASSWORD)
             self.current_user = username
 
     def _create_user(self, username, email=None, is_staff=False, mode='honor', enrollment_active=True):
@@ -234,12 +236,12 @@ class InstructorTaskModuleTestCase(InstructorTaskCourseTestCase):
         factory = OptionResponseXMLFactory()
         factory_args = self._option_problem_factory_args()
         problem_xml = factory.build_xml(**factory_args)
-        return ItemFactory.create(parent_location=parent.location,
-                                  parent=parent,
-                                  category="problem",
-                                  display_name=problem_url_name,
-                                  data=problem_xml,
-                                  **kwargs)
+        return BlockFactory.create(parent_location=parent.location,
+                                   parent=parent,
+                                   category="problem",
+                                   display_name=problem_url_name,
+                                   data=problem_xml,
+                                   **kwargs)
 
     def redefine_option_problem(self, problem_url_name, correct_answer=OPTION_1, num_inputs=1, num_responses=2):
         """Change the problem definition so the answer is Option 2"""
@@ -253,12 +255,12 @@ class InstructorTaskModuleTestCase(InstructorTaskCourseTestCase):
             self.module_store.update_item(item, self.user.id)
             self.module_store.publish(location, self.user.id)
 
-    def get_student_module(self, username, descriptor):
-        """Get StudentModule object for test course, given the `username` and the problem's `descriptor`."""
+    def get_student_module(self, username, block):
+        """Get StudentModule object for test course, given the `username` and the problem's `block`."""
         return StudentModule.objects.get(course_id=self.course.id,
                                          student=User.objects.get(username=username),
-                                         module_type=descriptor.location.block_type,
-                                         module_state_key=descriptor.location,
+                                         module_type=block.location.block_type,
+                                         module_state_key=block.location,
                                          )
 
     def submit_student_answer(self, username, problem_url_name, responses):
@@ -272,10 +274,7 @@ class InstructorTaskModuleTestCase(InstructorTaskCourseTestCase):
             # Note that this is a capa-specific convention.  The form is a version of the problem's
             # URL, modified so that it can be easily stored in html, prepended with "input-" and
             # appended with a sequence identifier for the particular response the input goes to.
-            course_key = self.course.id
-            return 'input_i4x-{}-{}-problem-{}_{}'.format(
-                course_key.org.replace('.', '_'),
-                course_key.course.replace('.', '_'),
+            return 'input_{}_{}'.format(  # noqa: UP032
                 problem_url_name,
                 response_id
             )
@@ -354,7 +353,7 @@ class TestReportMixin:
         report_path = report_store.path_to(self.course.id, report_csv_filename)
         with report_store.storage.open(report_path) as csv_file:
             # Expand the dict reader generator so we don't lose it's content
-            csv_rows = [row for row in unicodecsv.DictReader(csv_file, encoding='utf-8-sig')]  # lint-amnesty, pylint: disable=unnecessary-comprehension
+            csv_rows = list(unicodecsv.DictReader(csv_file, encoding='utf-8-sig'))
 
             if ignore_other_columns:
                 csv_rows = [
@@ -368,23 +367,21 @@ class TestReportMixin:
                 assert csv_rows == expected_rows
                 assert numeric_csv_rows == numeric_expected_rows
             else:
-                self.assertCountEqual(csv_rows, expected_rows)
-                self.assertCountEqual(numeric_csv_rows, numeric_expected_rows)
+                self.assertCountEqual(csv_rows, expected_rows)  # noqa: PT009
+                self.assertCountEqual(numeric_csv_rows, numeric_expected_rows)  # noqa: PT009
 
     @staticmethod
     def _extract_and_round_numeric_items(dictionary):
         """
         csv data may contain numeric values that are converted to strings, and fractional
         numbers can be imprecise (e.g. 1 / 6 is sometimes '0.16666666666666666' and other times
-        '0.166666666667').  This function mutates the provided input (sorry) and returns
-        a new dictionary that contains only the numerically-valued items from it, rounded
-        to four decimal places.
+        '0.166666666667'). This function returns a new dictionary that contains only the
+        numerically-valued items from it, rounded to four decimal places.
         """
         extracted = {}
         for key in list(dictionary):
             try:
-                float(dictionary[key])
-                extracted[key] = round(float(dictionary.pop(key)), 4)
+                extracted[key] = round(float(dictionary[key]), 4)
             except ValueError:
                 pass
         return extracted

@@ -19,8 +19,8 @@ from lms.djangoapps.courseware.field_overrides import OverrideFieldData
 from lms.djangoapps.courseware.tests.test_field_overrides import inject_field_overrides
 from lms.djangoapps.courseware.testutils import FieldOverrideTestMixin
 from openedx.core.lib.courses import get_course_by_id
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 @override_settings(
@@ -31,8 +31,6 @@ class TestFieldOverrides(FieldOverrideTestMixin, SharedModuleStoreTestCase):
     """
     Make sure field overrides behave in the expected manner.
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     @classmethod
     def setUpClass(cls):
         """
@@ -45,16 +43,16 @@ class TestFieldOverrides(FieldOverrideTestMixin, SharedModuleStoreTestCase):
         # Create a course outline
         start = datetime.datetime(2010, 5, 12, 2, 42, tzinfo=pytz.UTC)
         due = datetime.datetime(2010, 7, 7, 0, 0, tzinfo=pytz.UTC)
-        chapters = [ItemFactory.create(start=start, parent=cls.course)
+        chapters = [BlockFactory.create(start=start, parent=cls.course)
                     for _ in range(2)]
         sequentials = flatten([
-            [ItemFactory.create(parent=chapter) for _ in range(2)]
+            [BlockFactory.create(parent=chapter) for _ in range(2)]
             for chapter in chapters])
         verticals = flatten([
-            [ItemFactory.create(due=due, parent=sequential) for _ in range(2)]
+            [BlockFactory.create(due=due, parent=sequential) for _ in range(2)]
             for sequential in sequentials])
-        blocks = flatten([  # pylint: disable=unused-variable
-            [ItemFactory.create(parent=vertical) for _ in range(2)]
+        blocks = flatten([  # pylint: disable=unused-variable  # noqa: F841
+            [BlockFactory.create(parent=vertical) for _ in range(2)]
             for vertical in verticals])
 
     def setUp(self):

@@ -1,18 +1,31 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 import logging
 
 import dateutil
+from drf_spectacular.utils import OpenApiResponse, extend_schema
+from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
+from edx_rest_framework_extensions.auth.session.authentication import SessionAuthenticationAllowInactiveUser
+from openedx_authz.authz import COURSES_VIEW_COURSE
 from pytz import UTC
+from rest_framework import serializers, status
 from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
+from user_tasks.models import UserTaskStatus
+from user_tasks.views import StatusViewSet
 
 from cms.djangoapps.contentstore.course_info_model import get_course_updates
+from cms.djangoapps.contentstore.tasks import migrate_course_legacy_library_blocks_to_item_bank
 from cms.djangoapps.contentstore.views.certificates import CertificateManager
+from common.djangoapps.util.proctoring import requires_escalation_email
+from openedx.core.djangoapps.authz.constants import LegacyAuthoringPermission
+from openedx.core.djangoapps.authz.decorators import authz_permission_required
+from openedx.core.lib.api.authentication import BearerAuthenticationAllowInactiveUser
+from openedx.core.lib.api.serializers import StatusSerializerWithUuid
 from openedx.core.lib.api.view_utils import DeveloperErrorViewMixin, view_auth_classes
-from xmodule.course_metadata_utils import DEFAULT_GRADING_POLICY
-from xmodule.modulestore.django import modulestore
+from xmodule.course_metadata_utils import DEFAULT_GRADING_POLICY  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
-from .utils import course_author_access_required, get_bool_param
+from .utils import course_author_access_required, get_bool_param, get_ready_to_migrate_legacy_library_content_blocks
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +78,12 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
             * has_proctoring_escalation_email - whether the course has a proctoring escalation email
 
     """
-    @course_author_access_required
+    # TODO: ARCH-91
+    # This view is excluded from Swagger doc generation because it
+    # does not specify a serializer class.
+    swagger_schema = None
+
+    @authz_permission_required(COURSES_VIEW_COURSE.identifier, LegacyAuthoringPermission.READ)
     def get(self, request, course_key):
         """
         Returns validation information for the given course.
@@ -118,7 +136,7 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
             has_end_date=course.end is not None,
         )
 
-    def _assignments_validation(self, course, request):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _assignments_validation(self, course, request):  # pylint: disable=missing-function-docstring
         assignments, visible_assignments = self._get_assignments(course)
         assignments_with_dates = [
             a for a in visible_assignments if a.due
@@ -212,7 +230,7 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
 
     def _certificates_validation(self, course):
         is_activated, certificates = CertificateManager.is_activated(course)
-        certificates_enabled = certificates is not None
+        certificates_enabled = CertificateManager.is_enabled(course)
         return dict(
             is_activated=is_activated,
             has_certificate=certificates_enabled and len(certificates) > 0,
@@ -226,7 +244,7 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
             has_update=len(updates) > 0,
         )
 
-    def _get_assignments(self, course):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _get_assignments(self, course):  # pylint: disable=missing-function-docstring
         store = modulestore()
         sections = [store.get_item(section_usage_key) for section_usage_key in course.children]
         assignments = [
@@ -253,7 +271,7 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
         oras = modulestore().get_items(course.id, qualifiers={'category': 'openassessment'})
         return oras if not graded_only else [ora for ora in oras if ora.graded]
 
-    def _has_date_before_start(self, ora, start):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _has_date_before_start(self, ora, start):  # pylint: disable=missing-function-docstring
         if ora.submission_start:
             if dateutil.parser.parse(ora.submission_start).replace(tzinfo=UTC) < start:
                 return True
@@ -270,7 +288,7 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
 
         return False
 
-    def _has_date_after_end(self, ora, end):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _has_date_after_end(self, ora, end):  # pylint: disable=missing-function-docstring
         if ora.submission_start:
             if dateutil.parser.parse(ora.submission_start).replace(tzinfo=UTC) > end:
                 return True
@@ -289,7 +307,7 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
     def _has_start_date(self, course):
         return not course.start_date_is_still_default
 
-    def _has_grading_policy(self, course):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _has_grading_policy(self, course):  # pylint: disable=missing-function-docstring
         grading_policy_formatted = {}
         default_grading_policy_formatted = {}
 
@@ -335,8 +353,58 @@ class CourseValidationView(DeveloperErrorViewMixin, GenericAPIView):
         return False
 
     def _proctoring_validation(self, course):
-        # A proctoring escalation email is currently only required for courses using Proctortrack
+        # A proctoring escalation email is required if 'required_escalation_email' is set on the proctoring backend
         return dict(
-            needs_proctoring_escalation_email=course.proctoring_provider == 'proctortrack',
+            needs_proctoring_escalation_email=requires_escalation_email(course.proctoring_provider),
             has_proctoring_escalation_email=bool(course.proctoring_escalation_email)
         )
+
+
+class CourseLegacyLibraryContentSerializer(serializers.Serializer):
+    usage_key = serializers.CharField()
+
+
+class CourseLegacyLibraryContentMigratorView(DeveloperErrorViewMixin, StatusViewSet):
+    """
+    This endpoint is used for migrating legacy library content to the new item bank block library v2.
+    """
+    # DELETE is not allowed, as we want to preserve all task status objects.
+    # Instead, users can POST to /cancel to cancel running tasks.
+    http_method_names = ["get", "post"]
+    authentication_classes = (
+        BearerAuthenticationAllowInactiveUser,
+        JwtAuthentication,
+        SessionAuthenticationAllowInactiveUser,
+    )
+    serializer_class = StatusSerializerWithUuid
+
+    @extend_schema(
+        responses={
+            200: CourseLegacyLibraryContentSerializer(many=True),
+            401: OpenApiResponse(description="The requester is not authenticated."),
+        },
+    )
+    @authz_permission_required(COURSES_VIEW_COURSE.identifier, LegacyAuthoringPermission.WRITE)
+    def list(self, _, course_key):  # pylint: disable=arguments-differ
+        """
+        Returns all legacy library content blocks ready to be migrated to new item bank block.
+        """
+        blocks = get_ready_to_migrate_legacy_library_content_blocks(course_key)
+        serializer = CourseLegacyLibraryContentSerializer(blocks, many=True)
+        return Response(serializer.data)
+
+    @extend_schema(
+        responses={
+            200: OpenApiResponse(description="In case of success, a 200."),
+            401: OpenApiResponse(description="The requester is not authenticated."),
+        },
+    )
+    @course_author_access_required
+    def create(self, request, course_key):
+        """
+        Migrate all legacy library content blocks to new item bank block.
+        """
+        task = migrate_course_legacy_library_blocks_to_item_bank.delay(request.user.id, str(course_key))
+        task_status = UserTaskStatus.objects.get(task_id=task.id)
+        serializer = self.get_serializer(task_status)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)

@@ -7,11 +7,11 @@ import json
 import operator
 
 import dateutil
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.conf import settings
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.http import HttpResponseBadRequest
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from edx_when import api
-from opaque_keys.edx.keys import UsageKey
 from pytz import UTC
 
 from common.djangoapps.student.models import CourseEnrollment, get_user_by_username_or_email
@@ -76,7 +76,7 @@ def require_student_from_identifier(unique_student_identifier):
     try:
         return get_student_from_identifier(unique_student_identifier)
     except User.DoesNotExist:
-        raise DashboardError(  # lint-amnesty, pylint: disable=raise-missing-from
+        raise DashboardError(  # pylint: disable=raise-missing-from  # noqa: B904
             _("Could not find student matching identifier: {student_identifier}").format(
                 student_identifier=unique_student_identifier
             )
@@ -91,14 +91,13 @@ def parse_datetime(datestr):
     try:
         return dateutil.parser.parse(datestr).replace(tzinfo=UTC)
     except ValueError:
-        raise DashboardError(_("Unable to parse date: ") + datestr)  # lint-amnesty, pylint: disable=raise-missing-from
+        raise DashboardError(_("Unable to parse date: ") + datestr)  # pylint: disable=raise-missing-from  # noqa: B904
 
 
 def find_unit(course, url):
     """
-    Finds the unit (block, module, whatever the terminology is) with the given
-    url in the course tree and returns the unit.  Raises DashboardError if no
-    unit is found.
+    Finds the unit/block with the given url in the course tree and returns the unit.
+    Raises DashboardError if no unit is found.
     """
     def find(node, url):
         """
@@ -204,17 +203,27 @@ def set_due_date_extension(course, unit, student, due_date, actor=None, reason='
         else:
             api.set_date_for_block(course.id, block.location, 'due', None, user=student, reason=reason, actor=actor)
 
+    # edx-proctoring is checking cached course dates, so the overrides made above will not be enforced until the
+    # TieredCache is reloaded. This can lead to situations when a student's extension is revoked, but they can still
+    # complete an exam for some time. The instructors don't have a way of checking whether the cache has been
+    # regenerated because the Instructor Dashboard simply lists all extensions. Therefore, to avoid having a confusing
+    # user experience, we want trigger cache regeneration after changing the due date.
+    api.get_dates_for_course(course.id, user=student, published_version=version, use_cached=False)
+    if version:
+        # edx-proctoring is not using the course version while checking its dates.
+        api.get_dates_for_course(course.id, user=student, use_cached=False)
 
-def dump_module_extensions(course, unit):
+
+def dump_block_extensions(course, unit):
     """
-    Dumps data about students with due date extensions for a particular module,
+    Dumps data about students with due date extensions for a particular block,
     specified by 'url', in a particular course.
     """
     header = [_("Username"), _("Full Name"), _("Extended Due Date")]
     data = []
-    for username, fullname, due_date in api.get_overrides_for_block(course.id, unit.location):
+    for username, fullname, due_date, *unused in api.get_overrides_for_block(course.id, unit.location):  # noqa: B007
         due_date = due_date.strftime('%Y-%m-%d %H:%M')
-        data.append(dict(list(zip(header, (username, fullname, due_date)))))
+        data.append(dict(list(zip(header, (username, fullname, due_date)))))  # noqa: B905
     data.sort(key=operator.itemgetter(_("Username")))
     return {
         "header": header,
@@ -241,7 +250,7 @@ def dump_student_extensions(course, student):
         due = override['actual_date']
         due = due.strftime("%Y-%m-%d %H:%M")
         title = title_or_url(units[location])
-        data.append(dict(list(zip(header, (title, due)))))
+        data.append(dict(list(zip(header, (title, due)))))  # noqa: B905
     data.sort(key=operator.itemgetter(_("Unit")))
     return {
         "header": header,
@@ -250,11 +259,20 @@ def dump_student_extensions(course, student):
         "data": data}
 
 
-def add_block_ids(payload):
-    """
-    rather than manually parsing block_ids from module_ids on the client, pass the block_ids explicitly in the payload
-    """
-    if 'data' in payload:
-        for ele in payload['data']:
-            if 'module_id' in ele:
-                ele['block_id'] = UsageKey.from_string(ele['module_id']).block_id
+def keep_field_private(query_features, field_name):
+    '''
+    Utility to remove a field from a list of field names requested of a report
+    Keeps the specified field_name private (excluded from report)
+    '''
+    if (query_features is None) or (field_name is None):
+        raise DashboardError("Missing private field specification")
+
+    try:
+        query_features.remove(field_name)
+    except ValueError:
+        pass
+
+
+def proctored_exams_enabled(course):
+    """ Whether the proctored exam results report is available for the course """
+    return settings.ENABLE_SPECIAL_EXAMS and course.enable_proctored_exams

@@ -8,8 +8,10 @@ from django.test.client import RequestFactory
 
 from lms.djangoapps.courseware.exceptions import Redirect
 from lms.djangoapps.courseware.middleware import RedirectMiddleware
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 class CoursewareMiddlewareTestCase(SharedModuleStoreTestCase):
@@ -36,7 +38,7 @@ class CoursewareMiddlewareTestCase(SharedModuleStoreTestCase):
     def test_process_404(self):
         """A 404 should not trigger anything"""
         request = RequestFactory().get("dummy_url")
-        response = RedirectMiddleware().process_exception(
+        response = RedirectMiddleware(get_response=lambda request: None).process_exception(
             request, Http404()
         )
         assert response is None
@@ -48,7 +50,7 @@ class CoursewareMiddlewareTestCase(SharedModuleStoreTestCase):
         request = RequestFactory().get("dummy_url")
         test_url = '/test_url'
         exception = Redirect(test_url)
-        response = RedirectMiddleware().process_exception(
+        response = RedirectMiddleware(get_response=lambda request: None).process_exception(
             request, exception
         )
         assert response.status_code == 302

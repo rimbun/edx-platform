@@ -5,8 +5,7 @@ Content Type Gating Configuration Models
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
-
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 from openedx.core.djangoapps.config_model_utils.models import StackedConfigurationModel
 from openedx.features.content_type_gating.helpers import correct_modes_for_fbe, enrollment_date_for_fbe
@@ -31,14 +30,15 @@ class ContentTypeGatingConfig(StackedConfigurationModel):
             'created after this date and time (user local time) will be affected.'
         )
     )
-    studio_override_enabled = models.NullBooleanField(
+    studio_override_enabled = models.BooleanField(
         default=None,
         verbose_name=_('Studio Override Enabled'),
         blank=True,
         help_text=_(
             'Allow Feature Based Enrollment visibility to be overriden '
             'on a per-component basis in Studio.'
-        )
+        ),
+        null=True
     )
 
     @classmethod
@@ -101,7 +101,7 @@ class ContentTypeGatingConfig(StackedConfigurationModel):
         return bool(self.enabled and self.enabled_as_of <= target_datetime)
 
     def __str__(self):
-        return "ContentTypeGatingConfig(enabled={!r}, enabled_as_of={!r}, studio_override_enabled={!r})".format(
+        return "ContentTypeGatingConfig(enabled={!r}, enabled_as_of={!r}, studio_override_enabled={!r})".format(  # noqa: UP032  # pylint: disable=line-too-long
             self.enabled,
             self.enabled_as_of,
             self.studio_override_enabled,

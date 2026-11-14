@@ -8,11 +8,13 @@ from collections import namedtuple
 from contextlib import contextmanager
 from functools import wraps
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db.models import Case, Exists, F, OuterRef, Q, When
+from django.http import Http404
 from django.urls import reverse
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey, UsageKey
 from rest_framework import status
@@ -20,35 +22,46 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from common.djangoapps.student.auth import has_course_author_access
+from common.djangoapps.student.auth import has_course_author_access, is_ccx_course
 from common.djangoapps.student.models import CourseAccessRole, CourseEnrollment, CourseMode
-from common.djangoapps.student.roles import BulkRoleCache
+from common.djangoapps.student.roles import (
+    BulkRoleCache,
+    CourseCcxCoachRole,
+    CourseInstructorRole,
+    CourseStaffRole,
+)
 from common.djangoapps.track.event_transaction_utils import (
     create_new_event_transaction_id,
     get_event_transaction_id,
     get_event_transaction_type,
-    set_event_transaction_type
+    set_event_transaction_type,
 )
 from common.djangoapps.util.date_utils import to_timestamp
+from lms.djangoapps.ccx.permissions import VIEW_CCX_COACH_DASHBOARD
 from lms.djangoapps.course_blocks.api import get_course_blocks
-from lms.djangoapps.grades.api import CourseGradeFactory, clear_prefetched_course_and_subsection_grades
+from lms.djangoapps.grades.api import (
+    CourseGradeFactory,
+    clear_prefetched_course_and_subsection_grades,
+    gradebook_bulk_management_enabled,
+    is_writable_gradebook_enabled,
+    prefetch_course_and_subsection_grades,
+)
 from lms.djangoapps.grades.api import constants as grades_constants
 from lms.djangoapps.grades.api import context as grades_context
 from lms.djangoapps.grades.api import events as grades_events
-from lms.djangoapps.grades.api import gradebook_bulk_management_enabled
-from lms.djangoapps.grades.api import is_writable_gradebook_enabled, prefetch_course_and_subsection_grades
 from lms.djangoapps.grades.course_data import CourseData
 from lms.djangoapps.grades.grade_utils import are_grades_frozen
+
 # TODO these imports break abstraction of the core Grades layer. This code needs
 # to be refactored so Gradebook views only access public Grades APIs.
 from lms.djangoapps.grades.models import (
     PersistentCourseGrade,
     PersistentSubsectionGrade,
-    PersistentSubsectionGradeOverride
+    PersistentSubsectionGradeOverride,
 )
 from lms.djangoapps.grades.rest_api.serializers import (
     StudentGradebookEntrySerializer,
-    SubsectionGradeResponseSerializer
+    SubsectionGradeResponseSerializer,
 )
 from lms.djangoapps.grades.rest_api.v1.utils import USER_MODEL, CourseEnrollmentPagination, GradeViewMixin
 from lms.djangoapps.grades.subsection_grade import CreateSubsectionGrade
@@ -63,12 +76,12 @@ from openedx.core.lib.api.view_utils import (
     PaginatedAPIView,
     get_course_key,
     verify_course_exists,
-    view_auth_classes
+    view_auth_classes,
 )
 from openedx.core.lib.cache_utils import request_cached
 from openedx.core.lib.courses import get_course_by_id
-from xmodule.modulestore.django import modulestore
-from xmodule.util.misc import get_default_short_labeler
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.util.misc import get_default_short_labeler  # pylint: disable=wrong-import-order
 
 log = logging.getLogger(__name__)
 
@@ -207,6 +220,39 @@ def get_bool_param(request, param_name, default):
         return bool_value
 
 
+def _has_ccx_gradebook_access(user, course_key):
+    """
+    Return True if `user` is allowed to hit the gradebook for a CCX course.
+
+    Mirrors the platform-level and course-level guards from
+    `lms.djangoapps.ccx.api.v2.permissions.IsCCXCoach` so both surfaces agree:
+
+    * `CUSTOM_COURSES_EDX` must be enabled.
+    * The master course must have `enable_ccx = True`.
+    * The user must either have the canonical staff perm on the master
+      (`VIEW_CCX_COACH_DASHBOARD`, which resolves to `HasAccessRule('staff')`),
+      hold the CCX coach role on the master, or be site staff / hold a
+      staff/instructor role directly on the CCX (which `create_ccx_course`
+      grants to the coach via `assign_staff_role_to_ccx`).
+    """
+    if not settings.CUSTOM_COURSES_EDX:
+        return False
+    master_course_key = course_key.to_course_locator()
+    try:
+        master_course = get_course_by_id(master_course_key)
+    except Http404:
+        return False
+    if not master_course.enable_ccx:
+        return False
+    return (
+        user.is_staff
+        or user.has_perm(VIEW_CCX_COACH_DASHBOARD, master_course)
+        or CourseCcxCoachRole(master_course_key).has_user(user)
+        or CourseStaffRole(course_key).has_user(user)
+        or CourseInstructorRole(course_key).has_user(user)
+    )
+
+
 def course_author_access_required(view):
     """
     Ensure the user making the API request has course author access to the given course.
@@ -226,7 +272,11 @@ def course_author_access_required(view):
         Calls the view function if has access, otherwise raises a 403.
         """
         course_key = CourseKey.from_string(course_id)
-        if not has_course_author_access(request.user, course_key):
+        if is_ccx_course(course_key):
+            has_access = _has_ccx_gradebook_access(request.user, course_key)
+        else:
+            has_access = has_course_author_access(request.user, course_key)
+        if not has_access:
             raise DeveloperErrorViewMixin.api_error(
                 status_code=status.HTTP_403_FORBIDDEN,
                 developer_message='The requesting user does not have course author permissions.',
@@ -292,7 +342,7 @@ class CourseGradingView(BaseCourseView):
         master's track or is enabled with the grades.bulk_management course waffle flag.
         """
         course_modes = get_course_enrollment_details(str(course_key), include_expired=True).get('course_modes', [])
-        course_has_masters_track = any((course_mode['slug'] == CourseMode.MASTERS for course_mode in course_modes))
+        course_has_masters_track = any((course_mode['slug'] == CourseMode.MASTERS for course_mode in course_modes))  # noqa: UP034  # pylint: disable=line-too-long
         return course_has_masters_track or gradebook_bulk_management_enabled(course_key)
 
     def _get_assignment_types(self, course):
@@ -442,7 +492,7 @@ class GradebookView(GradeViewMixin, PaginatedAPIView):
         returns a list of grade data broken down by subsection.
 
         Args:
-            course: A Course Descriptor object
+            course: A CourseBlock object
             graded_subsections: A list of graded subsection objects in the given course.
             course_grade: A CourseGrade object.
         """
@@ -494,7 +544,7 @@ class GradebookView(GradeViewMixin, PaginatedAPIView):
 
         Args:
             user: A User object.
-            course: A Course Descriptor object.
+            course: A CourseBlock object.
             graded_subsections: A list of graded subsections in the given course.
             course_grade: A CourseGrade object.
         """
@@ -507,7 +557,19 @@ class GradebookView(GradeViewMixin, PaginatedAPIView):
             kwargs=dict(course_id=str(course.id), student_id=user.id)
         )
         user_entry['user_id'] = user.id
-        user_entry['full_name'] = user.profile.name
+
+        def is_masters_student():
+            # If this is a multiple-user lookup (didn't use the username param) we insert
+            # user.enrollment_mode in _get_enrolled_users. If it is a single-user lookup
+            # (did use username) then we'll need to look up the single user's enrollment mode
+            if hasattr(user, 'enrollment_mode'):
+                return user.enrollment_mode == CourseMode.MASTERS
+            else:
+                mode, _ = CourseEnrollment.enrollment_mode_for_user(user, str(course.id))
+                return mode == CourseMode.MASTERS
+
+        if is_masters_student():
+            user_entry['full_name'] = user.profile.name
 
         external_user_key = get_external_key_by_user_and_course(user, course.id)
         if external_user_key:
@@ -518,7 +580,7 @@ class GradebookView(GradeViewMixin, PaginatedAPIView):
     @verify_course_exists("Requested grade for unknown course {course}")
     @verify_writable_gradebook_enabled
     @course_author_access_required
-    def get(self, request, course_key):  # lint-amnesty, pylint: disable=too-many-statements
+    def get(self, request, course_key):  # pylint: disable=too-many-statements
         """
         Returns a gradebook entry/entries (i.e. both course and subsection-level grade data)
         for all users enrolled in a course, or a single user enrolled in a course
@@ -669,7 +731,7 @@ class GradebookView(GradeViewMixin, PaginatedAPIView):
             queryset = queryset.annotate(**annotations)
         queryset = queryset.filter(*query_args)
 
-        cache_key = 'usercount.%s' % queryset.query
+        cache_key = 'usercount.%s' % queryset.query  # noqa: UP031
         user_count = cache.get(cache_key, None)
         if user_count is None:
             user_count = queryset.count()
@@ -847,11 +909,6 @@ class GradebookBulkUpdateView(GradeViewMixin, PaginatedAPIView):
                 subsection = course.get_child(usage_key)
                 if subsection:
                     subsection_grade_model = self._create_subsection_grade(user, course, subsection)
-                    # TODO: Remove as part of EDUCATOR-4602.
-                    if str(course_key) == 'course-v1:UQx+BUSLEAD5x+2T2019':
-                        log.info('PersistentSubsectionGrade ***{}*** created for'
-                                 ' subsection ***{}*** in course ***{}*** for user ***{}***.'
-                                 .format(subsection_grade_model, subsection.location, course, user.id))
                 else:
                     self._log_update_result(request.user, requested_user_id, requested_usage_id, success=False)
                     result.append(GradebookUpdateResponseItem(
@@ -926,7 +983,7 @@ class GradebookBulkUpdateView(GradeViewMixin, PaginatedAPIView):
         return override
 
     @staticmethod
-    def _log_update_result(  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _log_update_result(  # pylint: disable=missing-function-docstring
         request_user,
         user_id, usage_id,
         subsection_grade_model=None,
@@ -1051,7 +1108,7 @@ class SubsectionGradeView(GradeViewMixin, APIView):
         try:
             usage_key = UsageKey.from_string(subsection_id)
         except InvalidKeyError:
-            raise self.api_error(  # lint-amnesty, pylint: disable=raise-missing-from
+            raise self.api_error(  # pylint: disable=raise-missing-from  # noqa: B904
                 status_code=status.HTTP_404_NOT_FOUND,
                 developer_message='Invalid UsageKey',
                 error_code='invalid_usage_key'
@@ -1067,7 +1124,7 @@ class SubsectionGradeView(GradeViewMixin, APIView):
         try:
             user_id = int(request.GET.get('user_id'))
         except ValueError:
-            raise self.api_error(  # lint-amnesty, pylint: disable=raise-missing-from
+            raise self.api_error(  # pylint: disable=raise-missing-from  # noqa: B904
                 status_code=status.HTTP_404_NOT_FOUND,
                 developer_message='Invalid UserID',
                 error_code='invalid_user_id'
@@ -1088,9 +1145,9 @@ class SubsectionGradeView(GradeViewMixin, APIView):
             if original_grade is not None and hasattr(original_grade, 'override'):
                 override = original_grade.override
                 # pylint: disable=no-member
-                history = list(PersistentSubsectionGradeOverride.history.filter(grade_id=original_grade.id).order_by(
-                    'history_date'
-                )[:history_record_limit])
+                history = list(reversed(PersistentSubsectionGradeOverride.history.filter(
+                    grade_id=original_grade.id
+                ).order_by('-history_date')[:history_record_limit]))
             grade_data = {
                 'earned_all': original_grade.earned_all,
                 'possible_all': original_grade.possible_all,

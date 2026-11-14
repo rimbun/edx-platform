@@ -3,13 +3,13 @@ URLs for bulk_email app
 """
 
 from django.conf import settings
-from django.conf.urls import url
+from django.urls import re_path
 
 from . import views
 
 urlpatterns = [
-    url(
-        r'^email/optout/(?P<token>[a-zA-Z0-9-_=]+)/{}/$'.format(
+    re_path(
+        r'^email/optout/(?P<token>[a-zA-Z0-9-_=]+)/{}/$'.format(  # noqa: UP032
             settings.COURSE_ID_PATTERN,
         ),
         views.opt_out_email_updates,

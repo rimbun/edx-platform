@@ -7,11 +7,11 @@ tasks.
 import json
 import logging
 
-from django.utils.translation import ugettext as _
-from django.utils.translation import ungettext
+from django.utils.translation import gettext as _
+from django.utils.translation import ngettext
 
-from common.djangoapps.util.date_utils import get_default_time_display
 from lms.djangoapps.bulk_email.models import CourseEmail
+from lms.djangoapps.instructor_task.models import InstructorTaskSchedule
 from lms.djangoapps.instructor_task.views import get_task_completion_info
 
 log = logging.getLogger(__name__)
@@ -60,10 +60,16 @@ def extract_email_features(email_task):
 
     email = CourseEmail.objects.get(id=task_input_information['email_id'])
     email_feature_dict = {
-        'created': get_default_time_display(email.created),
+        'created': email.created,
         'sent_to': [target.long_display() for target in email.targets.all()],
         'requester': str(email_task.requester),
     }
+    try:
+        instructor_task_schedule = InstructorTaskSchedule.objects.get(task__task_id=email_task.task_id)
+        scheduled_time = instructor_task_schedule.task_due
+        email_feature_dict['created'] = scheduled_time
+    except InstructorTaskSchedule.DoesNotExist:
+        pass
     features = ['subject', 'html_message', 'id']
     email_info = {feature: str(getattr(email, feature)) for feature in features}
 
@@ -80,7 +86,7 @@ def extract_email_features(email_task):
         else:
             if 'succeeded' in task_output and task_output['succeeded'] > 0:
                 num_emails = task_output['succeeded']
-                number_sent = ungettext(
+                number_sent = ngettext(
                     "{num_emails} sent",
                     "{num_emails} sent",
                     num_emails
@@ -89,7 +95,7 @@ def extract_email_features(email_task):
             if 'failed' in task_output and task_output['failed'] > 0:
                 num_emails = task_output['failed']
                 number_sent += ", "
-                number_sent += ungettext(
+                number_sent += ngettext(
                     "{num_emails} failed",
                     "{num_emails} failed",
                     num_emails

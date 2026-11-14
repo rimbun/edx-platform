@@ -12,20 +12,32 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.http import HttpResponse
 from django.test.client import Client, RequestFactory
 from django.urls import reverse
-from django.utils.translation import LANGUAGE_SESSION_KEY
 from django.utils.translation.trans_real import parse_accept_lang_header
+
+from common.djangoapps.student.tests.factories import AnonymousUserFactory, UserFactory
 from openedx.core.djangoapps.lang_pref import COOKIE_DURATION, LANGUAGE_KEY
 from openedx.core.djangoapps.lang_pref.middleware import LanguagePreferenceMiddleware
+from openedx.core.djangoapps.site_configuration.tests.test_util import (
+    with_site_configuration,
+    with_site_configuration_context,
+)
 from openedx.core.djangoapps.user_api.preferences.api import (
     delete_user_preference,
     get_user_preference,
-    set_user_preference
+    set_user_preference,
 )
 from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
-from common.djangoapps.student.tests.factories import AnonymousUserFactory, UserFactory
+from openedx.core.lib.api.test_utils import override_settings
 
 
 @ddt.ddt
+# HIBP settings are only defined in lms envs but needed for common tests.
+@override_settings(
+    ENABLE_AUTHN_LOGIN_BLOCK_HIBP_POLICY=False,
+    ENABLE_AUTHN_LOGIN_NUDGE_HIBP_POLICY=False,
+    ENABLE_AUTHN_REGISTER_HIBP_POLICY=False,
+    HIBP_REGISTRATION_PASSWORD_FREQUENCY_THRESHOLD=100000,
+)
 class TestUserPreferenceMiddleware(CacheIsolationTestCase):
     """
     Tests to make sure user preferences are getting properly set in the middleware.
@@ -33,8 +45,8 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
 
     def setUp(self):
         super().setUp()
-        self.middleware = LanguagePreferenceMiddleware()
-        self.session_middleware = SessionMiddleware()
+        self.middleware = LanguagePreferenceMiddleware(get_response=lambda request: None)
+        self.session_middleware = SessionMiddleware(get_response=lambda request: None)
         self.user = UserFactory.create()
         self.anonymous_user = AnonymousUserFactory()
         self.request = RequestFactory().get('/somewhere')
@@ -75,14 +87,13 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
                 domain=settings.SESSION_COOKIE_DOMAIN,
                 max_age=COOKIE_DURATION,
                 secure=self.request.is_secure(),
+                samesite="Lax"
             )
         else:
             response.delete_cookie.assert_called_with(
                 settings.LANGUAGE_COOKIE_NAME,
                 domain=settings.SESSION_COOKIE_DOMAIN,
             )
-
-        assert LANGUAGE_SESSION_KEY not in self.request.session
 
     @ddt.data(*itertools.product(
         (None, 'eo', 'es'),  # LANGUAGE_COOKIE_NAME
@@ -109,32 +120,26 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
         (logged_in, ) + test_def
         for logged_in in (True, False)
         for test_def in [
-            # (LANGUAGE_COOKIE_NAME, LANGUAGE_SESSION_KEY, Accept-Language In,
-            #  Accept-Language Out, Session Lang Out)
-            (None, None, None, None, None),
-            (None, 'eo', None, None, 'eo'),
-            (None, 'en', None, None, 'en'),
-            (None, 'eo', 'en', 'en', 'eo'),
-            (None, None, 'en', 'en', None),
-            ('en', None, None, 'en', None),
-            ('en', 'en', None, 'en', 'en'),
-            ('en', None, 'eo', 'en;q=1.0,eo', None),
-            ('en', None, 'en', 'en', None),
-            ('en', 'eo', 'en', 'en', None),
-            ('en', 'eo', 'eo', 'en;q=1.0,eo', None)
+            # (LANGUAGE_COOKIE_NAME, Accept-Language In, Accept-Language Out)
+            (None, None, None),
+            (None, None, None),
+            (None, None, None),
+            (None, 'en', 'en'),
+            (None, 'en', 'en'),
+            ('en', None, 'en'),
+            ('en', None, 'en'),
+            ('en', 'eo', 'en;q=1.0,eo'),
+            ('en', 'en', 'en'),
+            ('en', 'en', 'en'),
+            ('en', 'eo', 'en;q=1.0,eo')
         ]
     ))
     @ddt.unpack
-    def test_preference_cookie_overrides_browser(
-            self, logged_in, lang_cookie, lang_session_in, accept_lang_in, accept_lang_out,
-            lang_session_out,
-    ):
+    def test_preference_cookie_overrides_browser(self, logged_in, lang_cookie, accept_lang_in, accept_lang_out):
         if not logged_in:
             self.request.user = self.anonymous_user
         if lang_cookie:
             self.request.COOKIES[settings.LANGUAGE_COOKIE_NAME] = lang_cookie
-        if lang_session_in:
-            self.request.session[LANGUAGE_SESSION_KEY] = lang_session_in
         if accept_lang_in:
             self.request.META['HTTP_ACCEPT_LANGUAGE'] = accept_lang_in
         else:
@@ -150,11 +155,9 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
             accept_lang_out = parse_accept_lang_header(accept_lang_out)
 
         if accept_lang_out and accept_lang_result:
-            self.assertCountEqual(accept_lang_result, accept_lang_out)
+            self.assertCountEqual(accept_lang_result, accept_lang_out)  # noqa: PT009
         else:
             assert accept_lang_result == accept_lang_out
-
-        assert self.request.session.get(LANGUAGE_SESSION_KEY) == lang_session_out
 
     @ddt.data(None, 'es', 'en')
     def test_logout_preserves_cookie(self, lang_cookie):
@@ -212,7 +215,7 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
         result = self.middleware.process_response(self.request, response)
 
         assert result is response
-        assert response.mock_calls == []
+        assert not response.mock_calls
 
     def test_preference_update_noop(self):
         self.request.COOKIES[settings.LANGUAGE_COOKIE_NAME] = 'es'
@@ -230,7 +233,7 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
 
         # Preference is the same as the cookie, shouldn't write to the database
 
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(2):
             self.middleware.process_request(self.request)
 
         assert get_user_preference(self.user, LANGUAGE_KEY) == 'es'
@@ -266,3 +269,27 @@ class TestUserPreferenceMiddleware(CacheIsolationTestCase):
         mock_is_mobile_request.return_value = True
         response = self.middleware.process_response(self.request, response)
         response.delete_cookie.assert_called()
+
+    @with_site_configuration(configuration={'LANGUAGE_CODE': 'eo'})
+    @ddt.data(None, 'es', 'en')
+    def test_site_language_ignores_user_preferences(self, user_preference):
+        """
+        Test that the language set in SiteConfiguration has a higher priority than user preferences.
+        It also does not create or update user preferences.
+        """
+        self.request.COOKIES[settings.LANGUAGE_COOKIE_NAME] = user_preference
+        self.middleware.process_request(self.request)
+
+        # Do not alter user preferences.
+        assert get_user_preference(self.user, LANGUAGE_KEY) == user_preference
+        # Change the request's cookie instead.
+        assert self.request.COOKIES[settings.LANGUAGE_COOKIE_NAME] == 'eo'
+
+        # Use an actual call to determine the language of the response.
+        response = self.client.get('/')
+
+        assert get_user_preference(self.user, LANGUAGE_KEY) == user_preference
+        assert response['Content-Language'] == 'eo'
+        # Clean up by making a request to a Site without specific configuration.
+        with with_site_configuration_context():
+            self.client.get('/')

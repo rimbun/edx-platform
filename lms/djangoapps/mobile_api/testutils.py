@@ -13,11 +13,10 @@ Test utilities for mobile API tests:
 
 
 import datetime
-from unittest.mock import patch
 
 import ddt
 import pytz
-from django.conf import settings
+from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from opaque_keys.edx.keys import CourseKey
@@ -50,7 +49,7 @@ class MobileAPITestCase(ModuleStoreTestCase, APITestCase):
             certificate_available_date=datetime.datetime.now(pytz.UTC)
         )
         self.user = UserFactory.create()
-        self.password = 'test'
+        self.password = self.TEST_PASSWORD
         self.username = self.user.username
         self.api_version = API_V1
         IgnoreMobileAvailableFlagConfig(enabled=False).save()
@@ -164,7 +163,6 @@ class MobileCourseAccessTestMixin(MobileAPIMilestonesMixin):
         """Base implementation of initializing the user for each test."""
         self.login_and_enroll(course_id)
 
-    @patch.dict(settings.FEATURES, {'ENABLE_MKTG_SITE': True})
     def test_success(self):
         self.init_course_access()
 
@@ -172,13 +170,13 @@ class MobileCourseAccessTestMixin(MobileAPIMilestonesMixin):
         self.verify_success(response)  # allow subclasses to override verification
 
     def test_course_not_found(self):
-        non_existent_course_id = CourseKey.from_string('a/b/c')
+        non_existent_course_id = CourseKey.from_string('course-v1:a+b+c')
         self.init_course_access(course_id=non_existent_course_id)
 
         response = self.api_response(expected_response_code=None, course_id=non_existent_course_id)
         self.verify_failure(response)  # allow subclasses to override verification
 
-    @patch.dict('django.conf.settings.FEATURES', {'DISABLE_START_DATES': False, 'ENABLE_MKTG_SITE': True})
+    @override_settings(DISABLE_START_DATES=False)
     def test_unreleased_course(self):
         # ensure the course always starts in the future
         self.course = CourseFactory.create(mobile_available=True, static_asset_path="needed_for_split")
@@ -194,7 +192,6 @@ class MobileCourseAccessTestMixin(MobileAPIMilestonesMixin):
         (None, False)
     )
     @ddt.unpack
-    @patch.dict(settings.FEATURES, {'ENABLE_MKTG_SITE': True})
     def test_non_mobile_available(self, role, should_succeed):
         """
         Tests that the MobileAvailabilityError() is raised for certain user
@@ -205,7 +202,7 @@ class MobileCourseAccessTestMixin(MobileAPIMilestonesMixin):
         self.init_course_access()
         # set mobile_available to False for the test course
         self.course.mobile_available = False
-        self.store.update_item(self.course, self.user.id)
+        self.course = self.update_course(self.course, self.user.id)
         self._verify_response(should_succeed, MobileAvailabilityError(), role)
 
         IgnoreMobileAvailableFlagConfig(enabled=True).save()
@@ -222,11 +219,10 @@ class MobileCourseAccessTestMixin(MobileAPIMilestonesMixin):
         (None, False)
     )
     @ddt.unpack
-    @patch.dict(settings.FEATURES, {'ENABLE_MKTG_SITE': True})
     def test_visible_to_staff_only_course(self, role, should_succeed):
         self.init_course_access()
         self.course.visible_to_staff_only = True
-        self.store.update_item(self.course, self.user.id)
+        self.course = self.update_course(self.course, self.user.id)
         if self.ALLOW_ACCESS_TO_NON_VISIBLE_COURSE:
             should_succeed = True
         self._verify_response(should_succeed, VisibilityError(), role)

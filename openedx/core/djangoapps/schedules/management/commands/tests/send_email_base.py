@@ -8,12 +8,12 @@ import logging
 from collections import namedtuple
 from copy import deepcopy
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import attr
 import ddt
-import pytz
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.db.models import Max
 from edx_ace.channel import ChannelMap, ChannelType
 from edx_ace.test_utils import StubPolicy, patch_policies
@@ -23,8 +23,10 @@ from opaque_keys.edx.keys import CourseKey
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
-from lms.djangoapps.courseware.models import DynamicUpgradeDeadlineConfiguration
+from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.commerce.models import CommerceConfiguration
+from lms.djangoapps.courseware.models import DynamicUpgradeDeadlineConfiguration
 from openedx.core.djangoapps.schedules import resolvers, tasks
 from openedx.core.djangoapps.schedules.resolvers import _get_datetime_beginning_of_day
 from openedx.core.djangoapps.schedules.tests.factories import ScheduleConfigFactory, ScheduleFactory
@@ -32,8 +34,6 @@ from openedx.core.djangoapps.site_configuration.tests.factories import SiteConfi
 from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
 from openedx.core.djangoapps.waffle_utils.testutils import WAFFLE_TABLES
 from openedx.core.djangolib.testing.utils import FilteredQueryCountMixin
-from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import UserFactory
 
 SITE_QUERY = 1  # django_site
 SITE_CONFIG_QUERY = 1  # site_configuration_siteconfiguration
@@ -82,7 +82,7 @@ ExperienceTest = namedtuple('ExperienceTest', 'experience offset email_sent')
 
 @ddt.ddt
 @freeze_time('2017-08-01 00:00:00', tz_offset=0, tick=True)
-class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pylint: disable=missing-class-docstring
+class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # pylint: disable=missing-class-docstring
 
     __test__ = False
 
@@ -118,8 +118,8 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
         num_bins = self.task.num_bins
         return max_user_id + num_bins - (max_user_id % num_bins)
 
-    def _get_dates(self, offset=None):  # lint-amnesty, pylint: disable=missing-function-docstring
-        current_day = _get_datetime_beginning_of_day(datetime.datetime.now(pytz.UTC))
+    def _get_dates(self, offset=None):  # pylint: disable=missing-function-docstring
+        current_day = _get_datetime_beginning_of_day(datetime.datetime.now(ZoneInfo("UTC")))
         offset = offset or self.expected_offsets[0]
         target_day = current_day + datetime.timedelta(days=offset)
         if self.resolver.schedule_date_field == 'upgrade_deadline':
@@ -133,7 +133,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
         templates_override[0]['OPTIONS']['string_if_invalid'] = "TEMPLATE WARNING - MISSING VARIABLE [%s]"
         return templates_override
 
-    def _schedule_factory(self, offset=None, **factory_kwargs):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _schedule_factory(self, offset=None, **factory_kwargs):  # pylint: disable=missing-function-docstring
         _, _, target_day, upgrade_deadline = self._get_dates(offset=offset)
         factory_kwargs.setdefault('start_date', target_day)
         factory_kwargs.setdefault('upgrade_deadline', upgrade_deadline)
@@ -148,7 +148,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
             CourseModeFactory(
                 course_id=course_id,
                 mode_slug=CourseMode.VERIFIED,
-                expiration_datetime=datetime.datetime.now(pytz.UTC) + datetime.timedelta(days=30),
+                expiration_datetime=datetime.datetime.now(ZoneInfo("UTC")) + datetime.timedelta(days=30),
             )
             self._courses_with_verified_modes.add(course_id)
         return schedule
@@ -158,7 +158,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
         Updates the schedule config model by making sure the new entry
         has a later timestamp.
         """
-        later_time = datetime.datetime.now(pytz.UTC) + datetime.timedelta(minutes=1)
+        later_time = datetime.datetime.now(ZoneInfo("UTC")) + datetime.timedelta(minutes=1)
         with freeze_time(later_time):
             ScheduleConfigFactory.create(**schedule_config_kwargs)
 
@@ -167,7 +167,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
 
     def test_handle(self):
         with patch.object(self.command, 'async_send_task') as mock_send:
-            test_day = datetime.datetime(2017, 8, 1, tzinfo=pytz.UTC)
+            test_day = datetime.datetime(2017, 8, 1, tzinfo=ZoneInfo("UTC"))
             self.command().handle(date='2017-08-01', site_domain_name=self.site_config.site.domain)
 
             for offset in self.expected_offsets:
@@ -198,7 +198,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
     @patch.object(resolvers, 'set_custom_attribute')
     def test_schedule_bin(self, schedule_count, mock_attribute, mock_ace):
         with patch.object(self.task, 'async_send_task') as mock_schedule_send:
-            current_day, offset, target_day, upgrade_deadline = self._get_dates()  # lint-amnesty, pylint: disable=unused-variable
+            current_day, offset, target_day, upgrade_deadline = self._get_dates()  # pylint: disable=unused-variable
             schedules = [
                 self._schedule_factory() for _ in range(schedule_count)
             ]
@@ -220,7 +220,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
                         )
                         is_first_match = False
 
-                with self.assertNumQueries(expected_queries, table_blacklist=WAFFLE_TABLES):
+                with self.assertNumQueries(expected_queries, table_ignorelist=WAFFLE_TABLES):
                     self.task().apply(kwargs=dict(
                         site_id=self.site_config.site.id, target_day_str=target_day_str, day_offset=offset, bin_num=b,
                     ))
@@ -235,7 +235,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
             assert not mock_ace.send.called
 
     def test_no_course_overview(self):
-        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # lint-amnesty, pylint: disable=unused-variable
+        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # pylint: disable=unused-variable
         # Don't use CourseEnrollmentFactory since it creates a course overview
         enrollment = CourseEnrollment.objects.create(
             course_id=CourseKey.from_string('edX/toy/Not_2012_Fall'),
@@ -287,7 +287,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
         }
         self._update_schedule_config(schedule_config_kwargs)
 
-        current_datetime = datetime.datetime(2017, 8, 1, tzinfo=pytz.UTC)
+        current_datetime = datetime.datetime(2017, 8, 1, tzinfo=ZoneInfo("UTC"))
         with patch.object(self.task, 'apply_async') as mock_apply_async:
             self.task.enqueue(self.site_config.site, current_datetime, 3)
 
@@ -317,7 +317,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
 
         user1 = UserFactory.create(id=self._next_user_id())
         user2 = UserFactory.create(id=user1.id + self.task.num_bins)
-        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # lint-amnesty, pylint: disable=unused-variable
+        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # pylint: disable=unused-variable
 
         self._schedule_factory(
             enrollment__course__org=filtered_org,
@@ -343,7 +343,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
     @ddt.data(True, False)
     def test_course_end(self, has_course_ended):
         user1 = UserFactory.create(id=self._next_user_id())
-        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # lint-amnesty, pylint: disable=unused-variable
+        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # pylint: disable=unused-variable
 
         end_date_offset = -2 if has_course_ended else 2
         self._schedule_factory(
@@ -365,7 +365,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
     @patch.object(tasks, 'ace')
     def test_multiple_target_schedules(self, mock_ace):
         user = UserFactory.create()
-        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # lint-amnesty, pylint: disable=unused-variable
+        current_day, offset, target_day, upgrade_deadline = self._get_dates()  # pylint: disable=unused-variable
         num_courses = 3
         for course_index in range(num_courses):
             self._schedule_factory(
@@ -377,7 +377,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
         # one query for course modes for the first schedule if we aren't checking the deadline for each course
         additional_course_queries = (num_courses * 2) - 1 if self.queries_deadline_for_each_course else 1
         expected_query_count = NUM_QUERIES_FIRST_MATCH + additional_course_queries
-        with self.assertNumQueries(expected_query_count, table_blacklist=WAFFLE_TABLES):
+        with self.assertNumQueries(expected_query_count, table_ignorelist=WAFFLE_TABLES):
             with patch.object(self.task, 'async_send_task') as mock_schedule_send:
                 self.task().apply(kwargs=dict(
                     site_id=self.site_config.site.id, target_day_str=serialize(target_day), day_offset=offset,
@@ -396,8 +396,8 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
             self._assert_template_for_offset(offset, message_count)
             self.clear_caches()
 
-    def _assert_template_for_offset(self, offset, message_count):  # lint-amnesty, pylint: disable=missing-function-docstring
-        current_day, offset, target_day, upgrade_deadline = self._get_dates(offset)  # lint-amnesty, pylint: disable=unused-variable
+    def _assert_template_for_offset(self, offset, message_count):  # pylint: disable=missing-function-docstring
+        current_day, offset, target_day, upgrade_deadline = self._get_dates(offset)  # pylint: disable=unused-variable
 
         user = UserFactory.create()
         for course_index in range(message_count):
@@ -431,7 +431,7 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
                 else:
                     num_expected_queries += 1
 
-                with self.assertNumQueries(num_expected_queries, table_blacklist=WAFFLE_TABLES):
+                with self.assertNumQueries(num_expected_queries, table_ignorelist=WAFFLE_TABLES):
                     self.task().apply(kwargs=dict(
                         site_id=self.site_config.site.id, target_day_str=serialize(target_day), day_offset=offset,
                         bin_num=self._calculate_bin_for_user(user),
@@ -454,8 +454,8 @@ class ScheduleSendEmailTestMixin(FilteredQueryCountMixin):  # lint-amnesty, pyli
 
             return mock_channel.deliver.mock_calls
 
-    def _check_if_email_sent_for_experience(self, test_config):  # lint-amnesty, pylint: disable=missing-function-docstring
-        current_day, offset, target_day, _ = self._get_dates(offset=test_config.offset)  # lint-amnesty, pylint: disable=unused-variable
+    def _check_if_email_sent_for_experience(self, test_config):  # pylint: disable=missing-function-docstring
+        current_day, offset, target_day, _ = self._get_dates(offset=test_config.offset)  # pylint: disable=unused-variable
 
         kwargs = {
             'offset': offset

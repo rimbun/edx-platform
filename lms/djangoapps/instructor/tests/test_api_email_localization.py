@@ -8,12 +8,13 @@ from django.test.utils import override_settings
 from django.urls import reverse
 
 from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import InstructorFactory
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import InstructorFactory, UserFactory
 from openedx.core.djangoapps.lang_pref import LANGUAGE_KEY
 from openedx.core.djangoapps.user_api.preferences.api import delete_user_preference, set_user_preference
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 class TestInstructorAPIEnrollmentEmailLocalization(SharedModuleStoreTestCase):
@@ -35,7 +36,7 @@ class TestInstructorAPIEnrollmentEmailLocalization(SharedModuleStoreTestCase):
         # Esperanto.
         self.instructor = InstructorFactory(course_key=self.course.id)
         set_user_preference(self.instructor, LANGUAGE_KEY, 'zh-cn')
-        self.client.login(username=self.instructor.username, password='test')
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
 
         self.student = UserFactory.create()
         set_user_preference(self.student, LANGUAGE_KEY, 'eo')

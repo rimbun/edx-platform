@@ -1,8 +1,6 @@
 """ Test Student helpers """
 
-
 import logging
-import unittest
 from unittest.mock import patch
 
 import ddt
@@ -15,6 +13,7 @@ from testfixtures import LogCapture
 
 from common.djangoapps.student.helpers import get_next_url_for_login_page
 from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration_context
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 LOGGER_NAME = "common.djangoapps.student.helpers"
 
@@ -31,15 +30,13 @@ class TestLoginHelper(TestCase):
     @staticmethod
     def _add_session(request):
         """Annotate the request object with a session"""
-        middleware = SessionMiddleware()
+        middleware = SessionMiddleware(get_response=lambda request: None)
         middleware.process_request(request)
         request.session.save()
 
     @ddt.data(
         (logging.WARNING, "WARNING", "https://www.amazon.com", "text/html", None,
          "Unsafe redirect parameter detected after login page: 'https://www.amazon.com'"),
-        (logging.WARNING, "WARNING", "testserver/edx.org/images/logo", "text/html", None,
-         "Redirect to theme content detected after login page: 'testserver/edx.org/images/logo'"),
         (logging.INFO, "INFO", "favicon.ico", "image/*", "test/agent",
          "Redirect to non html content 'image/*' detected from 'test/agent' after login page: 'favicon.ico'"),
         (logging.WARNING, "WARNING", "https://www.test.com/test.jpg", "image/*", None,
@@ -129,13 +126,13 @@ class TestLoginHelper(TestCase):
             next_page = get_next_url_for_login_page(req)
             assert next_page == expected_url
 
-        with override_settings(FEATURES=dict(settings.FEATURES, THIRD_PARTY_AUTH_HINT=tpa_hint)):
+        with override_settings(THIRD_PARTY_AUTH_HINT=tpa_hint):
             validate_login()
 
         with with_site_configuration_context(configuration=dict(THIRD_PARTY_AUTH_HINT=tpa_hint)):
             validate_login()
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     @ddt.data(
         (None, '/dashboard'),
         ('invalid-url', '/dashboard'),

@@ -9,7 +9,7 @@ import logging
 from openedx.core.djangoapps.course_date_signals.utils import spaced_out_sections
 from openedx.core.djangoapps.schedules.exceptions import CourseUpdateDoesNotExist
 from openedx.core.lib.request_utils import get_request_or_stub
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def course_has_highlights(course):
     inaccessible content.
 
     Arguments:
-        course (CourseDescriptor): course object to check
+        course (CourseBlock): course block to check
     """
     if not course.highlights_enabled_for_messaging:
         return False
@@ -83,8 +83,8 @@ def get_week_highlights(user, course_key, week_num):
             the requested week_num.
     """
     course_descriptor = _get_course_with_highlights(course_key)
-    course_module = _get_course_module(course_descriptor, user)
-    sections_with_highlights = _get_sections_with_highlights(course_module)
+    course_block = _get_course_block(course_descriptor, user)
+    sections_with_highlights = _get_sections_with_highlights(course_block)
     highlights = _get_highlights_for_week(
         sections_with_highlights,
         week_num,
@@ -101,12 +101,12 @@ def get_next_section_highlights(user, course_key, start_date, target_date):
         CourseUpdateDoeNotExist: if highlights do not exist for the requested date
     """
     course_descriptor = _get_course_with_highlights(course_key)
-    course_module = _get_course_module(course_descriptor, user)
-    return _get_highlights_for_next_section(course_module, start_date, target_date)
+    course_block = _get_course_block(course_descriptor, user)
+    return _get_highlights_for_next_section(course_block, start_date, target_date)
 
 
 def _get_course_with_highlights(course_key):
-    """ Gets Course descriptor iff highlights are enabled for the course """
+    """ Gets Course descriptor if highlights are enabled for the course """
     course_descriptor = _get_course_descriptor(course_key)
     if not course_descriptor.highlights_enabled_for_messaging:
         raise CourseUpdateDoesNotExist(
@@ -118,36 +118,37 @@ def _get_course_with_highlights(course_key):
 
 def _get_course_descriptor(course_key):
     """ Gets course descriptor from modulestore """
-    course_descriptor = modulestore().get_course(course_key, depth=1)
-    if course_descriptor is None:
+    descriptor = modulestore().get_course(course_key, depth=1)
+    if descriptor is None:
         raise CourseUpdateDoesNotExist(
             f'Course {course_key} not found.'
         )
-    return course_descriptor
+    return descriptor
 
 
-def _get_course_module(course_descriptor, user):
-    """ Gets course module that takes into account user state and permissions """
+def _get_course_block(course_descriptor, user):
+    """ Gets course block that takes into account user state and permissions """
     # Adding courseware imports here to insulate other apps (e.g. schedules) to
     # avoid import errors.
+    # TODO remove the LMS dependency https://github.com/openedx/edx-platform/issues/37659
+    from lms.djangoapps.courseware.block_render import get_block_for_descriptor
     from lms.djangoapps.courseware.model_data import FieldDataCache
-    from lms.djangoapps.courseware.module_render import get_module_for_descriptor
 
     # Fake a request to fool parts of the courseware that want to inspect it.
     request = get_request_or_stub()
     request.user = user
 
-    # Now evil modulestore magic to inflate our descriptor with user state and
+    # Now evil modulestore magic to inflate our block with user state and
     # permissions checks.
-    field_data_cache = FieldDataCache.cache_for_descriptor_descendents(
+    field_data_cache = FieldDataCache.cache_for_block_descendents(
         course_descriptor.id, user, course_descriptor, depth=1, read_only=True,
     )
-    course_module = get_module_for_descriptor(
+    course_block = get_block_for_descriptor(
         user, request, course_descriptor, field_data_cache, course_descriptor.id, course=course_descriptor,
     )
-    if not course_module:
-        raise CourseUpdateDoesNotExist(f'Course module {course_descriptor.id} not found')
-    return course_module
+    if not course_block:
+        raise CourseUpdateDoesNotExist(f'Course block {course_descriptor.id} not found')
+    return course_block
 
 
 def _section_has_highlights(section):
@@ -155,9 +156,9 @@ def _section_has_highlights(section):
     return section.highlights and not section.hide_from_toc
 
 
-def _get_sections_with_highlights(course_module):
+def _get_sections_with_highlights(course_block):
     """ Returns all sections that have highlights in a course """
-    return list(filter(_section_has_highlights, course_module.get_children()))
+    return list(filter(_section_has_highlights, course_block.get_children()))
 
 
 def _get_highlights_for_week(sections, week_num, course_key):
@@ -166,7 +167,7 @@ def _get_highlights_for_week(sections, week_num, course_key):
     num_sections = len(sections)
     if not 1 <= week_num <= num_sections:
         raise CourseUpdateDoesNotExist(
-            'Requested week {} but {} has only {} sections.'.format(
+            'Requested week {} but {} has only {} sections.'.format(  # noqa: UP032
                 week_num, course_key, num_sections
             )
         )

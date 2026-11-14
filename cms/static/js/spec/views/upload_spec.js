@@ -1,6 +1,6 @@
-define(["underscore", "sinon", "js/models/uploads", "js/views/uploads", "js/models/chapter",
+define(["underscore", "sinon", "js/models/uploads", "js/views/uploads",
         "edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers", "js/spec_helpers/modal_helpers"],
-    (_, sinon, FileUpload, UploadDialog, Chapter, AjaxHelpers, modal_helpers) =>
+    (_, sinon, FileUpload, UploadDialog, AjaxHelpers, modal_helpers) =>
 
         describe("UploadDialog", function() {
             const tpl = readFixtures("upload-dialog.underscore"),
@@ -117,17 +117,23 @@ define(["underscore", "sinon", "js/models/uploads", "js/views/uploads", "js/mode
             });
 
             describe("Uploads", function() {
+                var requests, xhrFactory;
                 beforeEach(function() {
+                    xhrFactory = sinon.useFakeXMLHttpRequest();
+                    requests = [];
+                    requests.currentIndex = 0;
+                    requests.restore = function() { xhrFactory.restore(); };
+                    xhrFactory.onCreate = function(req) { requests.push(req); };
                     this.clock = sinon.useFakeTimers();
                 });
 
                 afterEach(function() {
+                    requests.restore();
                     modal_helpers.cancelModalIfShowing();
                     this.clock.restore();
                 });
 
                 it("can upload correctly", function() {
-                    const requests = AjaxHelpers.requests(this);
                     const view = createTestView(this);
                     view.render();
                     view.upload();
@@ -143,7 +149,6 @@ define(["underscore", "sinon", "js/models/uploads", "js/views/uploads", "js/mode
                 });
 
                 it("can handle upload errors", function() {
-                    const requests = AjaxHelpers.requests(this);
                     const view = createTestView(this);
                     view.render();
                     view.upload();
@@ -153,7 +158,6 @@ define(["underscore", "sinon", "js/models/uploads", "js/views/uploads", "js/mode
                 });
 
                 it("removes itself after two seconds on successful upload", function() {
-                    const requests = AjaxHelpers.requests(this);
                     const view = createTestView(this);
                     view.render();
                     view.upload();

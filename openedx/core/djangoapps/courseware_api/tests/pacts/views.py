@@ -8,20 +8,19 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from opaque_keys.edx.keys import CourseKey, UsageKey
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreIsolationMixin
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory, ToyCourseFactory
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from common.djangoapps.student.models import CourseEnrollment
 from openedx.features.course_duration_limits.models import CourseDurationLimitConfig
+from xmodule.modulestore.tests.django_utils import ModuleStoreIsolationMixin
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory, ToyCourseFactory
 
 
 class ProviderState(ModuleStoreIsolationMixin):
     """ Provider State Setup """
 
     COURSE_KEY = "course-v1:edX+DemoX+Demo_Course"
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     def clean_db(self, user, course_key):
         """ Utility method to clean db """
@@ -91,19 +90,19 @@ class ProviderState(ModuleStoreIsolationMixin):
             enrollment_start=datetime(2020, 1, 1, 1, 1, 1),
             enrollment_end=datetime(2028, 1, 1, 1, 1, 1),
         )
-        section = ItemFactory.create(
+        section = BlockFactory.create(
             parent=demo_course,
             category="chapter",
             display_name="Example Week 1: Getting Started"
         )
-        subsection = ItemFactory.create(
+        subsection = BlockFactory.create(
             location=UsageKey.from_string('block-v1:edX+DemoX+Demo_Course+type@sequential+block@basic_questions'),
             parent=section,
             category="sequential",
             display_name="Homework - Question Styles",
             metadata={'graded': True, 'format': 'Homework'}
         )
-        ItemFactory.create(
+        BlockFactory.create(
             location=UsageKey.from_string(
                 'block-v1:edX+DemoX+Demo_Course+type@vertical+block@2152d4a4aadc4cb0af5256394a3d1fc7'
             ),
@@ -130,7 +129,7 @@ def provider_state(request):
     state = request_body.get('state')
 
     if state in state_setup_mapping:
-        print('Setting up provider state for state value: {}'.format(state))
+        print('Setting up provider state for state value: {}'.format(state))  # noqa: UP032
         state_setup_mapping[state](request)
 
     return JsonResponse({'result': state})

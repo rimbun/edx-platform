@@ -1,9 +1,8 @@
-name: CI
+name: Javascript tests
 
 on:
   pull_request:
-    branches:
-      - master
+  merge_group:
   push:
     branches:
       - master
@@ -11,73 +10,65 @@ on:
 jobs:
   run_tests:
     name: JS
-    runs-on: ${{ matrix.os }}
+    # Pinned to ubuntu-24.04: video specs time out on ubuntu-26.04, which ubuntu-latest
+    # is migrating to by 2026-11-19. See https://github.com/openedx/openedx-platform/issues/39346
+    # matrix.os stays ubuntu-latest so the job name (and any required check) is unchanged.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
-        node-version: [ 12 ]
-        python-version: [ 3.8 ]
+        os: [ubuntu-latest]
+        node-version: [20]
+        python-version:
+          - "3.12"
 
     steps:
+      - uses: actions/checkout@v7
+      - name: Fetch master to compare coverage
+        run: git fetch --depth=1 origin master
 
-    - uses: actions/checkout@v2
-    - name: Fetch master to compare coverage
-      run: git fetch --depth=1 origin master
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
 
-    - name: Setup Node
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+      - name: Setup npm
+        run: npm i -g npm@10.7.x
 
-    - name: Install Firefox 61.0
-      run: |
-        sudo apt-get purge firefox
-        wget "https://ftp.mozilla.org/pub/firefox/releases/61.0/linux-x86_64/en-US/firefox-61.0.tar.bz2"
-        tar -xjf firefox-61.0.tar.bz2
-        sudo mv firefox /opt/firefox
-        sudo ln -s /opt/firefox/firefox /usr/bin/firefox
+      - name: Install Firefox 123.0
+        run: |
+          sudo apt-get purge firefox
+          wget "https://ftp.mozilla.org/pub/firefox/releases/123.0/linux-x86_64/en-US/firefox-123.0.tar.bz2"
+          tar -xjf firefox-123.0.tar.bz2
+          sudo mv firefox /opt/firefox
+          sudo ln -s /opt/firefox/firefox /usr/bin/firefox
 
-    - name: Install Required System Packages
-      run: sudo apt-get update && sudo apt-get install libxmlsec1-dev ubuntu-restricted-extras xvfb
+      - name: Install Required System Packages
+        run: sudo apt-get update && sudo apt-get install libxmlsec1-dev ubuntu-restricted-extras xvfb
 
-    - name: Setup Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
 
-    - name: Get pip cache dir
-      id: pip-cache-dir
-      run: |
-        echo "::set-output name=dir::$(pip cache dir)"
+      - name: Install Required Python Dependencies
+        run: make base-requirements
 
-    - name: Cache pip dependencies
-      id: cache-dependencies
-      uses: actions/cache@v2
-      with:
-        path: ${{ steps.pip-cache-dir.outputs.dir }}
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements/edx/base.txt') }}
-        restore-keys: ${{ runner.os }}-pip-
+      - name: Install npm
+        run: npm ci  
 
-    - name: Install Required Python Dependencies
-      run: |
-        pip install -r requirements/pip.txt
-        pip install -r requirements/edx/base.txt
+      - name: Run JS Tests
+        run: |
+          npm run test
 
-    - uses: c-hive/gha-npm-cache@v1
-    - name: Run JS Tests
-      env:
-        TEST_SUITE: js-unit
-        SCRIPT_TO_RUN: ./scripts/generic-ci-tests.sh
-      run: |
-        npm install -g jest
-        xvfb-run --auto-servernum ./scripts/all-tests.sh
-
-    - name: Save Job Artifacts
-      uses: actions/upload-artifact@v2
-      with:
-        name: Build-Artifacts
-        path: |
-          reports/**/*
-          test_root/log/*.png
-          test_root/log/*.log
-          **/TEST-*.xml
+      - name: Save Job Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: Build-Artifacts
+          path: |
+            reports/**/*
+            test_root/log/*.png
+            test_root/log/*.log
+            **/TEST-*.xml
+          overwrite: true

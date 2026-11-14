@@ -2,69 +2,116 @@
 URL configuration for Studio's Content Libraries REST API
 """
 
-from django.conf.urls import include, url
-
+from django.urls import include, path, register_converter
 from rest_framework import routers
 
-from . import views
-
+from .rest_api import blocks, collections, containers, libraries, url_converters
 
 # Django application name.
 
 app_name = 'openedx.core.djangoapps.content_libraries'
 
-# Router for importing blocks from courseware.
+# URL converters
 
-import_blocks_router = routers.DefaultRouter()
-import_blocks_router.register(r'tasks', views.LibraryImportTaskViewSet, basename='import-block-task')
+register_converter(url_converters.LibraryContainerLocatorConverter, "lib_container_key")
+
+library_collections_router = routers.DefaultRouter()
+library_collections_router.register(
+    r'collections', collections.LibraryCollectionsView, basename="library-collections"
+)
 
 # These URLs are only used in Studio. The LMS already provides all the
 # API endpoints needed to serve XBlocks from content libraries using the
 # standard XBlock REST API (see openedx.core.django_apps.xblock.rest_api.urls)
 
 urlpatterns = [
-    url(r'^api/libraries/v2/', include([
+    path('api/libraries/v2/', include([
         # list of libraries / create a library:
-        url(r'^$', views.LibraryRootView.as_view()),
-        url(r'^(?P<lib_key_str>[^/]+)/', include([
+        path('', libraries.LibraryRootView.as_view()),
+        path('restore/', libraries.LibraryRestoreView.as_view()),
+        path('<str:lib_key_str>/', include([
             # get data about a library, update a library, or delete a library:
-            url(r'^$', views.LibraryDetailsView.as_view()),
+            path('', libraries.LibraryDetailsView.as_view()),
             # Get the list of XBlock types that can be added to this library
-            url(r'^block_types/$', views.LibraryBlockTypesView.as_view()),
-            # Get the list of Blockstore Bundle Links for this library, or add a new one:
-            url(r'^links/$', views.LibraryLinksView.as_view()),
-            # Update or delete a link:
-            url(r'^links/(?P<link_id>[^/]+)/$', views.LibraryLinkDetailView.as_view()),
+            path('block_types/', libraries.LibraryBlockTypesView.as_view()),
             # Get the list of XBlocks in this library, or add a new one:
-            url(r'^blocks/$', views.LibraryBlocksView.as_view()),
-            # Commit (POST) or revert (DELETE) all pending changes to this library:
-            url(r'^commit/$', views.LibraryCommitView.as_view()),
+            path('blocks/', blocks.LibraryBlocksView.as_view()),
+            # Add a new container (unit etc.) to this library:
+            path('containers/', containers.LibraryContainersView.as_view()),
+            # Publish (POST) or revert (DELETE) all pending changes to this library:
+            path('commit/', libraries.LibraryCommitView.as_view()),
             # Get the list of users/groups who have permission to view/edit/administer this library:
-            url(r'^team/$', views.LibraryTeamView.as_view()),
+            path('team/', libraries.LibraryTeamView.as_view()),
             # Add/Edit (PUT) or remove (DELETE) a user's permission to use this library
-            url(r'^team/user/(?P<username>[^/]+)/$', views.LibraryTeamUserView.as_view()),
+            path('team/user/<str:username>/', libraries.LibraryTeamUserView.as_view()),
             # Add/Edit (PUT) or remove (DELETE) a group's permission to use this library
-            url(r'^team/group/(?P<group_name>[^/]+)/$', views.LibraryTeamGroupView.as_view()),
-            # Import blocks into this library.
-            url(r'^import_blocks/', include(import_blocks_router.urls)),
+            path('team/group/<str:group_name>/', libraries.LibraryTeamGroupView.as_view()),
+            # Get draft change entries for a specific publish event (component or container)
+            path('publish_history_entries/', blocks.LibraryPublishHistoryEntriesView.as_view()),
+            # Paste contents of clipboard into library
+            path('paste_clipboard/', libraries.LibraryPasteClipboardView.as_view()),
+            # Start a backup task for this library
+            path('backup/', libraries.LibraryBackupView.as_view()),
+            # Library Collections
+            path('', include(library_collections_router.urls)),
         ])),
-        url(r'^blocks/(?P<usage_key_str>[^/]+)/', include([
+        path('blocks/<str:usage_key_str>/', include([
             # Get metadata about a specific XBlock in this library, or delete the block:
-            url(r'^$', views.LibraryBlockView.as_view()),
-            # Get the LTI URL of a specific XBlock
-            url(r'^lti/$', views.LibraryBlockLtiUrlView.as_view(), name='lti-url'),
+            path('', blocks.LibraryBlockView.as_view()),
+            # Restore a soft-deleted block
+            path('restore/', blocks.LibraryBlockRestore.as_view()),
+            # Update collections for a given component
+            path('collections/', blocks.LibraryBlockCollectionsView.as_view(), name='update-collections'),
+            # Get the full hierarchy that the block belongs to
+            path('hierarchy/', blocks.LibraryBlockHierarchy.as_view()),
             # Get the OLX source code of the specified block:
-            url(r'^olx/$', views.LibraryBlockOlxView.as_view()),
+            path('olx/', blocks.LibraryBlockOlxView.as_view()),
             # CRUD for static asset files associated with a block in the library:
-            url(r'^assets/$', views.LibraryBlockAssetListView.as_view()),
-            url(r'^assets/(?P<file_path>.+)$', views.LibraryBlockAssetView.as_view()),
-            # Future: publish/discard changes for just this one block
-            # Future: set a block's tags (tags are stored in a Tag bundle and linked in)
+            path('assets/', blocks.LibraryBlockAssetListView.as_view()),
+            path('assets/<path:file_path>', blocks.LibraryBlockAssetView.as_view()),
+            path('publish/', blocks.LibraryBlockPublishView.as_view()),
+            # Get the draft change history for this block
+            path('draft_history/', blocks.LibraryComponentDraftHistoryView.as_view()),
+            # Get the publish history for this block (list of publish events)
+            path('publish_history/', blocks.LibraryComponentPublishHistoryView.as_view()),
+            # Get the creation entry for this block
+            path('creation_entry/', blocks.LibraryComponentCreationEntryView.as_view()),
+            # Future: discard changes for just this one block
         ])),
-        url(r'^lti/1.3/', include([
-            url(r'^login/$', views.LtiToolLoginView.as_view(), name='lti-login'),
-            url(r'^launch/$', views.LtiToolLaunchView.as_view(), name='lti-launch'),
-            url(r'^pub/jwks/$', views.LtiToolJwksView.as_view(), name='lti-pub-jwks'),
+        # Containers are Sections, Subsections, and Units
+        path('containers/<lib_container_key:container_key>/', include([
+            # Get metadata about a specific container in this library, update or delete the container:
+            path('', containers.LibraryContainerView.as_view()),
+            # update components under container
+            path('children/', containers.LibraryContainerChildrenView.as_view()),
+            # Get the full hierarchy that the container belongs to
+            path('hierarchy/', containers.LibraryContainerHierarchy.as_view()),
+            # Restore a soft-deleted container
+            path('restore/', containers.LibraryContainerRestore.as_view()),
+            # Update collections for a given container
+            path('collections/', containers.LibraryContainerCollectionsView.as_view(), name='update-collections-ct'),
+            # Publish a container (or reset to last published)
+            path('publish/', containers.LibraryContainerPublishView.as_view()),
+            path('copy/', containers.LibraryContainerCopyView.as_view()),
+            # Get the draft change history for this container
+            path('draft_history/', containers.LibraryContainerDraftHistoryView.as_view()),
+            # Get the publish history for this container (list of publish events)
+            path('publish_history/', containers.LibraryContainerPublishHistoryView.as_view()),
+            # Get the creation entry for this container
+            path('creation_entry/', containers.LibraryContainerCreationEntryView.as_view()),
         ])),
     ])),
+    path('library_assets/', include([
+        path(
+            'component_versions/<uuid:component_version_uuid>/<path:asset_path>',
+            blocks.LibraryComponentAssetView.as_view(),
+            name='library-assets',
+        ),
+        path(
+            'blocks/<usage_v2:usage_key>/<path:asset_path>',
+            blocks.LibraryComponentDraftAssetView.as_view(),
+            name='library-draft-assets',
+        ),
+    ])
+    ),
 ]

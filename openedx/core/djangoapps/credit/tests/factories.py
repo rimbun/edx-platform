@@ -4,21 +4,21 @@
 import datetime
 import json
 import uuid
+from zoneinfo import ZoneInfo
 
 import factory
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from factory.fuzzy import FuzzyText
-import pytz
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
 
+from common.djangoapps.util.date_utils import to_timestamp
 from openedx.core.djangoapps.credit.models import (
     CreditCourse,
     CreditEligibility,
     CreditProvider,
     CreditRequest,
     CreditRequirement,
-    CreditRequirementStatus
+    CreditRequirementStatus,
 )
-from common.djangoapps.util.date_utils import to_timestamp
 
 
 class CreditCourseFactory(factory.django.DjangoModelFactory):
@@ -80,7 +80,7 @@ class CreditRequestFactory(factory.django.DjangoModelFactory):
 
             obj.parameters = json.dumps({
                 "request_uuid": obj.uuid,
-                "timestamp": to_timestamp(datetime.datetime.now(pytz.UTC)),
+                "timestamp": to_timestamp(datetime.datetime.now(ZoneInfo("UTC"))),
                 "course_org": course_key.org,
                 "course_num": course_key.course,
                 "course_run": course_key.run,
@@ -89,7 +89,7 @@ class CreditRequestFactory(factory.django.DjangoModelFactory):
                 "user_email": user.email,
                 "user_full_name": user_profile.name,
                 "user_mailing_address": "",
-                "user_country": user_profile.country.code or "",
+                "user_country": user_profile.country.code if user_profile.country else "",
             })
 
         obj.save()

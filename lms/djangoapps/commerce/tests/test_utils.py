@@ -22,8 +22,10 @@ from lms.djangoapps.commerce.models import CommerceConfiguration
 from lms.djangoapps.commerce.utils import EcommerceService, refund_entitlement, refund_seat
 from openedx.core.djangolib.testing.utils import skip_unless_lms
 from openedx.core.lib.log_utils import audit_log
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 # Entitlements is not in CMS' INSTALLED_APPS so these imports will error during test collection
 if settings.ROOT_URLCONF == 'lms.urls':
@@ -49,7 +51,7 @@ class AuditLogTests(TestCase):
         # Verify that the logged message contains comma-separated
         # key-value pairs ordered alphabetically by key.
         message = 'foo: bar="baz", qux="quux"'
-        assert mock_log.info.called_with(message)
+        mock_log.info.assert_called_with(message)
 
 
 @ddt.ddt
@@ -74,6 +76,9 @@ class EcommerceServiceTests(TestCase):
         is_not_enabled = EcommerceService().is_enabled(self.user)
         assert not is_not_enabled
 
+    # TODO: replace override_switch with override_waffle_switch when the
+    # DISABLE_ACCOUNT_ACTIVATION_REQUIREMENT_SWITCH will be defined as actual WaffleSwitch. Now
+    # we have only switch name defined in the settings
     @override_switch(settings.DISABLE_ACCOUNT_ACTIVATION_REQUIREMENT_SWITCH, active=True)
     def test_is_enabled_activation_requirement_disabled(self):
         """Verify that is_enabled() returns True when ecomm checkout is enabled. """
@@ -142,7 +147,7 @@ class EcommerceServiceTests(TestCase):
             skus=urlencode({'sku': skus}, doseq=True),
         )
         if program_uuid:
-            expected_url = '{expected_url}&basket={program_uuid}'.format(
+            expected_url = '{expected_url}&basket={program_uuid}'.format(  # noqa: UP032
                 expected_url=expected_url,
                 program_uuid=program_uuid
             )
@@ -172,7 +177,7 @@ class EcommerceServiceTests(TestCase):
         if enterprise_catalog_uuid:
             query.update({'catalog': enterprise_catalog_uuid})
 
-        expected_url = '{root}{basket_url}?{skus}'.format(
+        expected_url = '{root}{basket_url}?{skus}'.format(  # noqa: UP032
             basket_url=config.basket_checkout_page,
             root=settings.ECOMMERCE_PUBLIC_URL_ROOT,
             skus=urlencode(query, doseq=True),

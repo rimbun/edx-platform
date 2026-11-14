@@ -18,26 +18,31 @@ from pytz import UTC
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.edxmako.shortcuts import render_to_response
 from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.roles import CourseFinanceAdminRole  # lint-amnesty, pylint: disable=unused-import
-from common.djangoapps.student.tests.factories import AdminFactory, CourseAccessRoleFactory, CourseEnrollmentFactory
-from common.djangoapps.student.tests.factories import StaffFactory
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import (
+    AdminFactory,
+    CourseAccessRoleFactory,
+    CourseEnrollmentFactory,
+    StaffFactory,
+    UserFactory,
+)
 from common.test.utils import XssTestMixin
+from lms.djangoapps.courseware.courses import get_studio_url
+from lms.djangoapps.courseware.masquerade import CourseMasquerade
 from lms.djangoapps.courseware.tabs import get_course_tab_list
 from lms.djangoapps.courseware.tests.factories import StudentModuleFactory
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
-from lms.djangoapps.grades.config.waffle import WRITABLE_GRADEBOOK, waffle_flags
-from lms.djangoapps.instructor.toggles import DATA_DOWNLOAD_V2
+from lms.djangoapps.grades.config.waffle import WRITABLE_GRADEBOOK
+from lms.djangoapps.instructor.toggles import DATA_DOWNLOAD_V2, LEGACY_INSTRUCTOR_DASHBOARD
 from lms.djangoapps.instructor.views.gradebook_api import calculate_page_info
 from openedx.core.djangoapps.course_groups.cohorts import set_course_cohorted
 from openedx.core.djangoapps.discussions.config.waffle import (
     ENABLE_PAGES_AND_RESOURCES_MICROFRONTEND,
-    OVERRIDE_DISCUSSION_LEGACY_SETTINGS_FLAG
+    OVERRIDE_DISCUSSION_LEGACY_SETTINGS_FLAG,
 )
 from openedx.core.djangoapps.site_configuration.models import SiteConfiguration
 from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory, check_mongo_calls
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory, check_mongo_calls
 
 
 def intercept_renderer(path, context):
@@ -55,6 +60,10 @@ def intercept_renderer(path, context):
 
 
 @ddt.ddt
+# Tests for legacy views. When DEPR-38432 is picked up, these tests will require the following changes:
+# Either remove or leave the specific parts that reference the legacy instructor dashboard,
+# and remove the override_waffle_flag for LEGACY_INSTRUCTOR_DASHBOARD.
+@override_waffle_flag(LEGACY_INSTRUCTOR_DASHBOARD, active=True)
 class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssTestMixin):
     """
     Tests for the instructor dashboard (not legacy).
@@ -80,12 +89,12 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
             org="ACME",
             number="001",
             run="2017",
-            name="How to defeat the Road Runner"
+            display_name="How to defeat the Road Runner"
         )
         self.course_mode.save()
         # Create instructor account
         self.instructor = AdminFactory.create()
-        self.client.login(username=self.instructor.username, password="test")
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
 
         # URL for instructor dash
         self.url = reverse('instructor_dashboard', kwargs={'course_id': str(self.course.id)})
@@ -95,14 +104,15 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         Returns expected dashboard enrollment message with link to Insights.
         """
         return 'Enrollment data is now available in <a href="http://example.com/courses/{}" ' \
-               'rel="noopener" target="_blank">Example</a>.'.format(str(self.course.id))
+               'rel="noopener" target="_blank">Example</a>.'.format(str(self.course.id))  # noqa: UP032
 
     def get_dashboard_analytics_message(self):
         """
         Returns expected dashboard demographic message with link to Insights.
         """
         return 'For analytics about your course, go to <a href="http://example.com/courses/{}" ' \
-               'rel="noopener" target="_blank">Example</a>.'.format(str(self.course.id))
+               'rel="noopener" target="_blank">Example<span class="sr-only">Opens in a new tab</span>' \
+               '</a>.'.format(str(self.course.id))  # noqa: UP032
 
     def test_instructor_tab(self):
         """
@@ -118,6 +128,11 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
 
         staff = StaffFactory(course_key=self.course.id)
         assert has_instructor_tab(staff, self.course)
+
+        masquerade_staff = StaffFactory(course_key=self.course.id)
+        masquerade = CourseMasquerade(self.course.id, role='student')
+        masquerade_staff.masquerade_settings = {self.course.id: masquerade}
+        assert not has_instructor_tab(masquerade_staff, self.course)
 
         student = UserFactory.create()
         assert not has_instructor_tab(student, self.course)
@@ -169,9 +184,9 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
                     org=self.course.id.org
                 )
                 set_course_cohorted(self.course.id, True)
-                self.client.login(username=self.user.username, password='test')
+                self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
                 response = self.client.get(self.url).content.decode('utf-8')
-                self.assertEqual(discussion_section in response, is_discussion_tab_available)
+                self.assertEqual(discussion_section in response, is_discussion_tab_available)  # noqa: PT009
 
     @ddt.data(
         (False, False, True),
@@ -192,9 +207,9 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
             with override_waffle_flag(OVERRIDE_DISCUSSION_LEGACY_SETTINGS_FLAG, is_legacy_discussion_setting_enabled):
                 user = UserFactory.create(is_staff=True)
                 set_course_cohorted(self.course.id, True)
-                self.client.login(username=user.username, password='test')
+                self.client.login(username=user.username, password=self.TEST_PASSWORD)
                 response = self.client.get(self.url).content.decode('utf-8')
-                self.assertEqual(discussion_section in response, is_discussion_tab_available)
+                self.assertEqual(discussion_section in response, is_discussion_tab_available)  # noqa: PT009
 
     @ddt.data(
         ('staff', False, False),
@@ -224,7 +239,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
                 role=access_role,
                 org=self.course.id.org
             )
-            self.client.login(username=user.username, password="test")
+            self.client.login(username=user.username, password=self.TEST_PASSWORD)
             response = self.client.get(self.url)
             if can_access:
                 self.assertContains(response, download_section)
@@ -244,7 +259,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
             role='data_researcher',
             org=self.course.id.org
         )
-        self.client.login(username=user.username, password="test")
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.get(self.url)
         matches = re.findall(
             rb'<li class="nav-item"><button type="button" class="btn-link .*" data-section=".*">.*',
@@ -320,7 +335,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
 
         # But staff user can only see specific grades
         staff = StaffFactory(course_key=self.course.id)
-        self.client.login(username=staff.username, password="test")
+        self.client.login(username=staff.username, password=self.TEST_PASSWORD)
         response = self.client.get(self.url)
         self.assertNotContains(response, '<h4 class="hd hd-4">Adjust all enrolled learners')
         self.assertContains(response, '<h4 class="hd hd-4">View a specific learner&#39;s grades and progress')
@@ -334,8 +349,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         Test that, when the writable gradebook feature is enabled and
         deployed in another domain, a staff member can see it.
         """
-        waffle_flag = waffle_flags()[WRITABLE_GRADEBOOK]
-        with override_waffle_flag(waffle_flag, active=True):
+        with override_waffle_flag(WRITABLE_GRADEBOOK, active=True):
             response = self.client.get(self.url)
 
         expected_gradebook_url = f'http://gradebook.local.edx.org/{self.course.id}'
@@ -356,8 +370,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         Test that, when the writable gradebook feature is enabled and
         deployed in a subdirectory, a staff member can see it.
         """
-        waffle_flag = waffle_flags()[WRITABLE_GRADEBOOK]
-        with override_waffle_flag(waffle_flag, active=True):
+        with override_waffle_flag(WRITABLE_GRADEBOOK, active=True):
             response = self.client.get(self.url)
 
         expected_gradebook_url = f'{settings.WRITABLE_GRADEBOOK_URL}/{self.course.id}'
@@ -392,8 +405,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         a message that the feature is only available for courses with small
         numbers of learners.
         """
-        waffle_flag = waffle_flags()[WRITABLE_GRADEBOOK]
-        with override_waffle_flag(waffle_flag, active=True):
+        with override_waffle_flag(WRITABLE_GRADEBOOK, active=True):
             response = self.client.get(self.url)
         assert TestInstructorDashboard.GRADEBOOK_LEARNER_COUNT_MESSAGE not in response.content.decode('utf-8')
         self.assertContains(response, 'View Gradebook')
@@ -405,7 +417,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         response = self.client.get(self.url)
         self.assert_no_xss(response, '<script>alert("XSS")</script>')
 
-    @patch.dict(settings.FEATURES, {'DISPLAY_ANALYTICS_ENROLLMENTS': False})
+    @override_settings(DISPLAY_ANALYTICS_ENROLLMENTS=False)
     @override_settings(ANALYTICS_DASHBOARD_URL='')
     def test_no_enrollments(self):
         """
@@ -415,7 +427,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         # no enrollment information should be visible
         self.assertNotContains(response, '<h3 class="hd hd-3">Enrollment Information</h3>')
 
-    @patch.dict(settings.FEATURES, {'DISPLAY_ANALYTICS_ENROLLMENTS': True})
+    @override_settings(DISPLAY_ANALYTICS_ENROLLMENTS=True)
     @override_settings(ANALYTICS_DASHBOARD_URL='')
     def test_show_enrollments_data(self):
         """
@@ -433,7 +445,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         # dashboard link hidden
         self.assertNotContains(response, self.get_dashboard_enrollment_message())
 
-    @patch.dict(settings.FEATURES, {'DISPLAY_ANALYTICS_ENROLLMENTS': True})
+    @override_settings(DISPLAY_ANALYTICS_ENROLLMENTS=True)
     @override_settings(ANALYTICS_DASHBOARD_URL='')
     def test_show_enrollment_data_for_prof_ed(self):
         # Create both "professional" (meaning professional + verification)
@@ -447,7 +459,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         # Check that the number of professional enrollments is two
         self.assertContains(response, '<th scope="row">Professional</th><td>2</td>')
 
-    @patch.dict(settings.FEATURES, {'DISPLAY_ANALYTICS_ENROLLMENTS': False})
+    @override_settings(DISPLAY_ANALYTICS_ENROLLMENTS=False)
     @override_settings(ANALYTICS_DASHBOARD_URL='http://example.com')
     @override_settings(ANALYTICS_DASHBOARD_NAME='Example')
     def test_show_dashboard_enrollment_message(self):
@@ -504,7 +516,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         """
         Test whether the "CCX Coaches" option is visible or hidden depending on the value of course.enable_ccx.
         """
-        with patch.dict(settings.FEATURES, {'CUSTOM_COURSES_EDX': ccx_feature_flag}):
+        with override_settings(CUSTOM_COURSES_EDX=ccx_feature_flag):
             self.course.enable_ccx = enable_ccx
             self.store.update_item(self.course, self.instructor.id)
 
@@ -533,7 +545,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
     @patch('lms.djangoapps.instructor.views.gradebook_api.MAX_STUDENTS_PER_PAGE_GRADE_BOOK', 1)
     def test_spoc_gradebook_pages(self):
         for i in range(2):
-            username = "user_%d" % i
+            username = "user_%d" % i  # noqa: UP031
             student = UserFactory.create(username=username)
             CourseEnrollmentFactory.create(user=student, course_id=self.course.id)
         url = reverse(
@@ -560,7 +572,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         response = self.client.get(self.url)
         self.assertNotContains(response, ora_section)
 
-        ItemFactory.create(parent_location=self.course.location, category="openassessment")
+        BlockFactory.create(parent_location=self.course.location, category="openassessment")
         response = self.client.get(self.url)
         self.assertContains(response, ora_section)
 
@@ -570,7 +582,7 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         orphaned openassessment block
         """
         # create non-orphaned openassessment block
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=self.course.location,
             category="openassessment",
         )
@@ -582,14 +594,27 @@ class TestInstructorDashboard(ModuleStoreTestCase, LoginEnrollmentTestCase, XssT
         # assert we don't get a 500 error
         assert 200 == response.status_code
 
+    @patch("lms.djangoapps.instructor.views.instructor_dashboard.get_plugins_view_context")
+    def test_external_plugin_integration(self, mock_get_plugins_view_context):
+        """
+        Tests that whether context from plugins is being reflected/added in instructor dashboard.
+        """
+        test_studio_url = get_studio_url(self.course, 'course')
+
+        context = {
+            'studio_url': test_studio_url
+        }
+        mock_get_plugins_view_context.return_value = context
+
+        response = self.client.get(self.url)
+        self.assertContains(response, test_studio_url)
+
 
 @ddt.ddt
 class TestInstructorDashboardPerformance(ModuleStoreTestCase, LoginEnrollmentTestCase, XssTestMixin):
     """
     Tests for the instructor dashboard from the performance point of view.
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     def setUp(self):
         """
         Set up tests
@@ -610,14 +635,14 @@ class TestInstructorDashboardPerformance(ModuleStoreTestCase, LoginEnrollmentTes
         self.course_mode.save()
         # Create instructor account
         self.instructor = AdminFactory.create()
-        self.client.login(username=self.instructor.username, password="test")
+        self.client.login(username=self.instructor.username, password=self.TEST_PASSWORD)
 
     def test_spoc_gradebook_mongo_calls(self):
         """
         Test that the MongoDB cache is used in API to return grades
         """
         # prepare course structure
-        course = ItemFactory.create(
+        course = BlockFactory.create(
             parent_location=self.course.location,
             category="course",
             display_name="Test course",
@@ -625,19 +650,19 @@ class TestInstructorDashboardPerformance(ModuleStoreTestCase, LoginEnrollmentTes
 
         students = []
         for i in range(20):
-            username = "user_%d" % i
+            username = "user_%d" % i  # noqa: UP031
             student = UserFactory.create(username=username)
             CourseEnrollmentFactory.create(user=student, course_id=self.course.id)
             students.append(student)
 
-        chapter = ItemFactory.create(
+        chapter = BlockFactory.create(
             parent=course,
             category='chapter',
             display_name="Chapter",
             publish_item=True,
             start=datetime.datetime(2015, 3, 1, tzinfo=UTC),
         )
-        sequential = ItemFactory.create(
+        sequential = BlockFactory.create(
             parent=chapter,
             category='sequential',
             display_name="Lesson",
@@ -645,7 +670,7 @@ class TestInstructorDashboardPerformance(ModuleStoreTestCase, LoginEnrollmentTes
             start=datetime.datetime(2015, 3, 1, tzinfo=UTC),
             metadata={'graded': True, 'format': 'Homework'},
         )
-        vertical = ItemFactory.create(
+        vertical = BlockFactory.create(
             parent=sequential,
             category='vertical',
             display_name='Subsection',
@@ -653,10 +678,10 @@ class TestInstructorDashboardPerformance(ModuleStoreTestCase, LoginEnrollmentTes
             start=datetime.datetime(2015, 4, 1, tzinfo=UTC),
         )
         for i in range(10):
-            problem = ItemFactory.create(
+            problem = BlockFactory.create(
                 category="problem",
                 parent=vertical,
-                display_name="A Problem Block %d" % i,
+                display_name="A Problem Block %d" % i,  # noqa: UP031
                 weight=1,
                 publish_item=False,
                 metadata={'rerandomize': 'always'},
@@ -673,6 +698,6 @@ class TestInstructorDashboardPerformance(ModuleStoreTestCase, LoginEnrollmentTes
 
         # check MongoDB calls count
         url = reverse('spoc_gradebook', kwargs={'course_id': self.course.id})
-        with check_mongo_calls(9):
+        with check_mongo_calls(6):
             response = self.client.get(url)
             assert response.status_code == 200

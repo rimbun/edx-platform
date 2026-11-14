@@ -1,10 +1,9 @@
 """ Tests for the language API. """
-from unittest.mock import patch
-
 import ddt
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.test.utils import override_settings
 from django.utils import translation
+
 from openedx.core.djangoapps.dark_lang.models import DarkLangConfig
 from openedx.core.djangoapps.lang_pref import api as language_api
 from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration_context
@@ -38,7 +37,7 @@ class LanguageApiTest(CacheIsolationTestCase):
         """
         Verify that the header language selector config is correct.
         """
-        with patch.dict('django.conf.settings.FEATURES', base_config):
+        with override_settings(**base_config):
             with with_site_configuration_context(configuration=site_config):
                 assert language_api.header_language_selector_is_enabled() == expected
 
@@ -55,7 +54,7 @@ class LanguageApiTest(CacheIsolationTestCase):
         """
         Verify that the footer language selector config is correct.
         """
-        with patch.dict('django.conf.settings.FEATURES', base_config):
+        with override_settings(**base_config):
             with with_site_configuration_context(configuration=site_config):
                 assert language_api.footer_language_selector_is_enabled() == expected
 
@@ -95,7 +94,7 @@ class LanguageApiTest(CacheIsolationTestCase):
         assert all_languages[0][1] < all_languages[1][1]
         assert 'nl' == all_languages[0][0]
         assert 'cs' == all_languages[1][0]
-        assert 'Hollandais' == all_languages[0][1]
+        assert all_languages[0][1] in ('Hollandais', 'Néerlandais')
         assert 'Tchèque' == all_languages[1][1]
 
     def test_beta_languages(self):

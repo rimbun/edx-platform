@@ -3,7 +3,7 @@
 <%page expression_filter="h"/>
 
 <%!
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from openedx.core.djangolib.markup import HTML
 %>
 
@@ -18,7 +18,7 @@ ${HTML(fragment.head_html())}
 </%block>
 
 <%block name="footer_extra">
-<%include file="/mathjax_include.html" args="disable_fast_preview=True"/>
+<%include file="/mathjax_include.html" />
 ${HTML(fragment.foot_html())}
 </%block>
 
@@ -33,7 +33,6 @@ ${HTML(fragment.foot_html())}
       lang=${course.language}
     % endif
     >
-    <section class="container">
       <div class="static_tab_wrapper">
         ${HTML(fragment.body_html())}
       </div>

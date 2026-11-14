@@ -2,7 +2,7 @@
 
 
 import datetime
-from unittest.mock import patch  # lint-amnesty, pylint: disable=unused-import
+from unittest.mock import patch  # pylint: disable=unused-import  # noqa: F401
 
 import ddt
 import pytz
@@ -16,12 +16,17 @@ from rest_framework.test import APIClient
 from common.djangoapps.student.models import CourseAccessRole
 from common.djangoapps.student.tests.factories import TEST_PASSWORD, AdminFactory, UserFactory
 from openedx.core.lib.courses import course_image_url
-from xmodule.contentstore.content import StaticContent
-from xmodule.contentstore.django import contentstore
-from xmodule.exceptions import NotFoundError
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ToyCourseFactory
+from xmodule.contentstore.content import StaticContent  # pylint: disable=wrong-import-order
+from xmodule.contentstore.django import contentstore  # pylint: disable=wrong-import-order
+from xmodule.exceptions import NotFoundError  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    CourseFactory,
+    ToyCourseFactory,
+)
 
 from ...serializers.course_runs import CourseRunSerializer
 from ..utils import serialize_datetime
@@ -261,15 +266,15 @@ class CourseRunViewSetTests(ModuleStoreTestCase):
         data = self.get_course_run_data(user, start, end, pacing_type, role)
 
         response = self.client.post(self.list_url, data, format='json')
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201)  # noqa: PT009
 
         course_run_key = CourseKey.from_string(response.data['id'])
         course_run = modulestore().get_course(course_run_key)
-        self.assertEqual(course_run.display_name, data['title'])
-        self.assertEqual(course_run.id.org, data['org'])
-        self.assertEqual(course_run.id.course, data['number'])
-        self.assertEqual(course_run.id.run, data['run'])
-        self.assertEqual(course_run.self_paced, expected_self_paced_value)
+        self.assertEqual(course_run.display_name, data['title'])  # noqa: PT009
+        self.assertEqual(course_run.id.org, data['org'])  # noqa: PT009
+        self.assertEqual(course_run.id.course, data['number'])  # noqa: PT009
+        self.assertEqual(course_run.id.run, data['run'])  # noqa: PT009
+        self.assertEqual(course_run.self_paced, expected_self_paced_value)  # noqa: PT009
         self.assert_course_run_schedule(course_run, start, end)
         self.assert_access_role(course_run, user, role)
         self.assert_course_access_role_count(course_run, 1)
@@ -285,8 +290,8 @@ class CourseRunViewSetTests(ModuleStoreTestCase):
         data = self.get_course_run_data(user, start, end, 'self-paced')
         data['team'] = [{'user': 'invalid-username'}]
         response = self.client.post(self.list_url, data, format='json')
-        self.assertEqual(response.status_code, 400)
-        self.assertDictContainsSubset({'team': ['Course team user does not exist']}, response.data)
+        self.assertEqual(response.status_code, 400)  # noqa: PT009
+        self.assertEqual(response.data.get('team'), ['Course team user does not exist'])  # noqa: PT009
 
     def test_images_upload(self):
         # http://www.django-rest-framework.org/api-guide/parsers/#fileuploadparser
@@ -331,7 +336,7 @@ class CourseRunViewSetTests(ModuleStoreTestCase):
         original_course_run = ToyCourseFactory()
         add_organization({
             'name': 'Test Organization',
-            'short_name': original_course_run.id.org,  # lint-amnesty, pylint: disable=no-member
+            'short_name': original_course_run.id.org,  # pylint: disable=no-member
             'description': 'Testing Organization Description',
         })
         start = datetime.datetime.now(pytz.UTC).replace(microsecond=0)
@@ -339,7 +344,7 @@ class CourseRunViewSetTests(ModuleStoreTestCase):
         user = UserFactory()
         role = 'instructor'
         run = '3T2017'
-        url = reverse('api:v1:course_run-rerun', kwargs={'pk': str(original_course_run.id)})  # lint-amnesty, pylint: disable=no-member
+        url = reverse('api:v1:course_run-rerun', kwargs={'pk': str(original_course_run.id)})  # pylint: disable=no-member
         data = {
             'run': run,
             'schedule': {
@@ -369,16 +374,16 @@ class CourseRunViewSetTests(ModuleStoreTestCase):
 
         if number:
             assert course_run.id.course == number
-            assert course_run.id.course != original_course_run.id.course  # lint-amnesty, pylint: disable=no-member
+            assert course_run.id.course != original_course_run.id.course  # pylint: disable=no-member
         else:
-            assert course_run.id.course == original_course_run.id.course  # lint-amnesty, pylint: disable=no-member
+            assert course_run.id.course == original_course_run.id.course  # pylint: disable=no-member
 
         self.assert_course_run_schedule(course_run, start, end)
         self.assert_access_role(course_run, user, role)
         self.assert_course_access_role_count(course_run, 1)
         course_orgs = get_course_organizations(course_run_key)
-        self.assertEqual(len(course_orgs), 1)
-        self.assertEqual(course_orgs[0]['short_name'], original_course_run.id.org)  # lint-amnesty, pylint: disable=no-member
+        self.assertEqual(len(course_orgs), 1)  # noqa: PT009
+        self.assertEqual(course_orgs[0]['short_name'], original_course_run.id.org)  # pylint: disable=no-member  # noqa: PT009
 
     def test_rerun_duplicate_run(self):
         course_run = ToyCourseFactory()
@@ -402,3 +407,54 @@ class CourseRunViewSetTests(ModuleStoreTestCase):
         assert response.data == {'non_field_errors': [
             'Invalid key supplied. Ensure there are no special characters in the Course Number.'
         ]}
+
+    def test_clone_course(self):
+        course = CourseFactory()
+        url = reverse('api:v1:course_run-clone')
+        data = {
+            'source_course_id': str(course.id),
+            'destination_course_id': 'course-v1:destination+course+id',
+        }
+        response = self.client.post(url, data, format='json')
+        assert response.status_code == 201
+        self.assertEqual(response.data, {"message": "Course cloned successfully."})  # noqa: PT009
+
+    def test_clone_course_with_missing_source_id(self):
+        url = reverse('api:v1:course_run-clone')
+        data = {
+            'destination_course_id': 'course-v1:destination+course+id',
+        }
+        response = self.client.post(url, data, format='json')
+        assert response.status_code == 400
+        self.assertEqual(response.data, {'source_course_id': ['This field is required.']})  # noqa: PT009
+
+    def test_clone_course_with_missing_dest_id(self):
+        url = reverse('api:v1:course_run-clone')
+        data = {
+            'source_course_id': 'course-v1:source+course+id',
+        }
+        response = self.client.post(url, data, format='json')
+        assert response.status_code == 400
+        self.assertEqual(response.data, {'destination_course_id': ['This field is required.']})  # noqa: PT009
+
+    def test_clone_course_with_nonexistent_source_course(self):
+        url = reverse('api:v1:course_run-clone')
+        data = {
+            'source_course_id': 'course-v1:nonexistent+source+course_id',
+            'destination_course_id': 'course-v1:destination+course+id',
+        }
+        response = self.client.post(url, data, format='json')
+        assert response.status_code == 400
+        assert str(response.data.get('non_field_errors')[0]) == 'Source course does not exist.'
+
+    def test_clone_course_with_existing_dest_course(self):
+        url = reverse('api:v1:course_run-clone')
+        course = CourseFactory()
+        existing_dest_course = CourseFactory()
+        data = {
+            'source_course_id': str(course.id),
+            'destination_course_id': str(existing_dest_course.id),
+        }
+        response = self.client.post(url, data, format='json')
+        assert response.status_code == 400
+        assert str(response.data.get('non_field_errors')[0]) == 'Destination course already exists.'

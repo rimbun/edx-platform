@@ -5,8 +5,13 @@ import pytest
 
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.lib.courseware_search.lms_result_processor import LmsSearchResultProcessor
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 
 class LmsSearchResultProcessorTestCase(ModuleStoreTestCase):
@@ -24,37 +29,37 @@ class LmsSearchResultProcessorTestCase(ModuleStoreTestCase):
             run='test_run',
             display_name='Elasticsearch test course',
         )
-        self.section = ItemFactory.create(
+        self.section = BlockFactory.create(
             parent=self.course,
             category='chapter',
             display_name='Test Section',
         )
-        self.subsection = ItemFactory.create(
+        self.subsection = BlockFactory.create(
             parent=self.section,
             category='sequential',
             display_name='Test Subsection',
         )
-        self.vertical = ItemFactory.create(
+        self.vertical = BlockFactory.create(
             parent=self.subsection,
             category='vertical',
             display_name='Test Unit',
         )
-        self.html = ItemFactory.create(
+        self.html = BlockFactory.create(
             parent=self.vertical,
             category='html',
             display_name='Test Html control',
         )
-        self.ghost_subsection = ItemFactory.create(
+        self.ghost_subsection = BlockFactory.create(
             parent=self.section,
             category='sequential',
             display_name=None,
         )
-        self.ghost_vertical = ItemFactory.create(
+        self.ghost_vertical = BlockFactory.create(
             parent=self.ghost_subsection,
             category='vertical',
             display_name=None,
         )
-        self.ghost_html = ItemFactory.create(
+        self.ghost_html = BlockFactory.create(
             parent=self.ghost_vertical,
             category='html',
             display_name='Ghost Html control',
@@ -67,7 +72,7 @@ class LmsSearchResultProcessorTestCase(ModuleStoreTestCase):
     def test_url_parameter(self):
         fake_url = ""
         srp = LmsSearchResultProcessor({}, "test")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             fake_url = srp.url
         assert fake_url == ''
 
@@ -80,7 +85,7 @@ class LmsSearchResultProcessorTestCase(ModuleStoreTestCase):
             "test"
         )
 
-        assert srp.url == '/courses/{}/jump_to/{}'.format(str(self.course.id),
+        assert srp.url == '/courses/{}/jump_to/{}'.format(str(self.course.id),  # noqa: UP032
                                                           str(self.html.scope_ids.usage_id))
 
     def test_should_remove(self):

@@ -7,12 +7,11 @@ from datetime import datetime
 
 from pytz import UTC
 
-from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
-from common.djangoapps.student.tests.factories import GlobalStaffFactory
+from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, GlobalStaffFactory, UserFactory
 from lms.djangoapps.program_enrollments.tests.factories import ProgramCourseEnrollmentFactory, ProgramEnrollmentFactory
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 class GradeViewTestMixin(SharedModuleStoreTestCase):
@@ -54,8 +53,6 @@ class GradeViewTestMixin(SharedModuleStoreTestCase):
         }
     }
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -76,7 +73,7 @@ class GradeViewTestMixin(SharedModuleStoreTestCase):
                 created=self.date,
             )
 
-    def _create_user_program_enrollments(self, *users, **kwargs):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def _create_user_program_enrollments(self, *users, **kwargs):  # pylint: disable=missing-function-docstring
         # supply mode for enrollment. Use 'masters' to create a masters track enrollment
         for index, user in enumerate(users):
             course_enrollment = CourseEnrollmentFactory(
@@ -99,7 +96,7 @@ class GradeViewTestMixin(SharedModuleStoreTestCase):
 
     def setUp(self):
         super().setUp()
-        self.password = 'test'
+        self.password = self.TEST_PASSWORD
         self.global_staff = GlobalStaffFactory.create()
         self.student = UserFactory(password=self.password, username='student', email='student@example.com')
         self.other_student = UserFactory(
@@ -129,7 +126,7 @@ class GradeViewTestMixin(SharedModuleStoreTestCase):
         course = CourseFactory.create(display_name=display_name, run=run)
         _ = CourseOverviewFactory.create(id=course.id)
 
-        chapter = ItemFactory.create(
+        chapter = BlockFactory.create(
             category='chapter',
             parent_location=course.location,
             display_name="Chapter 1",
@@ -138,7 +135,7 @@ class GradeViewTestMixin(SharedModuleStoreTestCase):
         # A section is not considered if the student answers less than "min_count" problems
         for grading_type, min_count in (("Homework", 12), ("Lab", 12), ("Midterm Exam", 1), ("Final Exam", 1)):
             for num in range(min_count):
-                section = ItemFactory.create(
+                section = BlockFactory.create(
                     category='sequential',
                     parent_location=chapter.location,
                     due=datetime(2017, 12, 18, 11, 30, 00),
@@ -146,12 +143,12 @@ class GradeViewTestMixin(SharedModuleStoreTestCase):
                     format=grading_type,
                     graded=True,
                 )
-                vertical = ItemFactory.create(
+                vertical = BlockFactory.create(
                     category='vertical',
                     parent_location=section.location,
                     display_name=f'Vertical {grading_type} {num}',
                 )
-                ItemFactory.create(
+                BlockFactory.create(
                     category='problem',
                     parent_location=vertical.location,
                     display_name=f'Problem {grading_type} {num}',

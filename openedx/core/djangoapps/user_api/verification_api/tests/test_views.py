@@ -10,19 +10,19 @@ from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 
+from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.verify_student.models import ManualVerification, SoftwareSecurePhotoVerification
 from lms.djangoapps.verify_student.tests.factories import SSOVerificationFactory
-from common.djangoapps.student.tests.factories import UserFactory
 
 FROZEN_TIME = '2015-01-01'
 VERIFY_STUDENT = {'DAYS_GOOD_FOR': 365, 'EXPIRING_SOON_WINDOW': 20}
 
 
-class VerificationStatusViewTestsMixin:
-    """ Base class for the tests on verification status views """
+class VerificationViewTestsMixinBase:
+    """ Base class for the tests on verification views """
     VIEW_NAME = None
     CREATED_AT = datetime.datetime.strptime(FROZEN_TIME, '%Y-%m-%d')
-    PASSWORD = 'test'
+    PASSWORD = 'Password1234'
 
     def setUp(self):
         freezer = freezegun.freeze_time(FROZEN_TIME)
@@ -32,8 +32,48 @@ class VerificationStatusViewTestsMixin:
         self.user = UserFactory(password=self.PASSWORD)
         self.staff = UserFactory(is_staff=True, password=self.PASSWORD)
         self.photo_verification = SoftwareSecurePhotoVerification.objects.create(user=self.user, status='submitted')
-        self.path = reverse(self.VIEW_NAME, kwargs={'username': self.user.username})
         self.client.login(username=self.staff.username, password=self.PASSWORD)
+
+    @property
+    def path(self):
+        raise NotImplementedError
+
+    def get_expected_response(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def assert_verification_returned(self, verified=False):
+        """ Assert the path returns HTTP 200 """
+        response = self.client.get(self.path)
+        assert response.status_code == 200
+
+        return response
+
+    def test_authentication_required(self):
+        """ The endpoint should return HTTP 403 if the user is not authenticated. """
+        self.client.logout()
+        response = self.client.get(self.path)
+        assert response.status_code == 401
+
+    def test_staff_user(self):
+        """ The endpoint should be accessible to staff users. """
+        self.client.logout()
+        self.client.login(username=self.staff.username, password=self.PASSWORD)
+        self.assert_verification_returned()
+
+    def test_non_owner_nor_staff_user(self):
+        """ The endpoint should NOT be accessible if the request is not made by the submitter or staff user. """
+        user = UserFactory()
+        self.client.login(username=user.username, password=self.PASSWORD)
+        response = self.client.get(self.path)
+        assert response.status_code == 403
+
+
+class VerificationStatusViewTestsMixin(VerificationViewTestsMixinBase):
+    """ Base class for the tests on verification status views """
+
+    @property
+    def path(self):
+        return reverse(self.VIEW_NAME, kwargs={'username': self.user.username})
 
     def assert_path_not_found(self, path):
         """ Assert the path returns HTTP 404. """
@@ -45,8 +85,7 @@ class VerificationStatusViewTestsMixin:
 
     def assert_verification_returned(self, verified=False):
         """ Assert the path returns HTTP 200 and returns appropriately-serialized data. """
-        response = self.client.get(self.path)
-        assert response.status_code == 200
+        response = super().assert_verification_returned()
         expected_expires = self.CREATED_AT + datetime.timedelta(settings.VERIFY_STUDENT['DAYS_GOOD_FOR'])
 
         expected = self.get_expected_response(verified=verified, expected_expires=expected_expires)
@@ -87,6 +126,20 @@ class VerificationStatusViewTestsMixin:
         """ The endpoint should return HTTP 404 if the user does not exist. """
         path = reverse(self.VIEW_NAME, kwargs={'username': 'abc123'})
         self.assert_path_not_found(path)
+
+    def test_anonymous_with_empty_username_query_param(self):
+        """ An anonymous caller must not pass the check by sending an empty `?username=`. """
+        self.client.logout()
+        response = self.client.get(self.path, {'username': ''})
+        assert response.status_code == 401
+
+    def test_non_owner_with_own_username_query_param(self):
+        """ A caller must not pass by sending their own name in `?username=` when the path names someone else. """
+        other_user = UserFactory(password=self.PASSWORD)
+        self.client.logout()
+        self.client.login(username=other_user.username, password=self.PASSWORD)
+        response = self.client.get(self.path, {'username': other_user.username})
+        assert response.status_code == 403
 
 
 @override_settings(VERIFY_STUDENT=VERIFY_STUDENT)
@@ -137,12 +190,12 @@ class VerificationsDetailsViewTests(VerificationStatusViewTestsMixin, TestCase):
         }]
 
     def test_multiple_verification_types(self):
-        self.manual_verification = ManualVerification.objects.create(  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.manual_verification = ManualVerification.objects.create(  # pylint: disable=attribute-defined-outside-init
             user=self.user,
             status='approved',
             reason='testing'
         )
-        self.sso_verification = SSOVerificationFactory(user=self.user, status='approved')  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.sso_verification = SSOVerificationFactory(user=self.user, status='approved')  # pylint: disable=attribute-defined-outside-init
         self.photo_verification.error_msg = 'tested_error'
         self.photo_verification.error_code = 'error_code'
         self.photo_verification.status = 'denied'
@@ -180,7 +233,7 @@ class VerificationsDetailsViewTests(VerificationStatusViewTestsMixin, TestCase):
         assert json.loads(response.content.decode('utf-8')) == expected
 
     def test_multiple_verification_instances(self):
-        self.sso_verification = SSOVerificationFactory(user=self.user, status='approved')  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.sso_verification = SSOVerificationFactory(user=self.user, status='approved')  # pylint: disable=attribute-defined-outside-init
         second_ss_photo_verification = SoftwareSecurePhotoVerification.objects.create(
             user=self.user,
             status='denied',

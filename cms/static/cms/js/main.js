@@ -35,7 +35,7 @@ define([
         });
         $(document).ajaxError(function(event, jqXHR, ajaxSettings) {
             var msg, contentType,
-                message = gettext('This may be happening because of an error with our server or your internet connection. Try refreshing the page or making sure you are online.');  // eslint-disable-line max-len
+                message = gettext('This may be happening because of an error with our server or your internet connection. Try refreshing the page or making sure you are online.'); // eslint-disable-line max-len
             if (ajaxSettings.notifyOnError === false) {
                 return;
             }
@@ -47,6 +47,17 @@ define([
                 title: gettext("Studio's having trouble saving your work"),
                 message: message
             });
+            if (window.self !== window.top) {
+                try {
+                    window.parent.postMessage({
+                        type: 'studioAjaxError',
+                        message: 'Sends a message when an AJAX error occurs',
+                        payload: {}
+                    }, document.referrer);
+                } catch (e) {
+                    console.error(e);
+                }
+            }
             console.log('Studio AJAX Error', { // eslint-disable-line no-console
                 url: event.currentTarget.URL,
                 response: jqXHR.responseText,
@@ -54,7 +65,7 @@ define([
             });
             return msg.show();
         });
-        sendJSON = function(url, data, callback, type) {  // eslint-disable-line no-param-reassign
+        sendJSON = function(url, data, callback, type) { // eslint-disable-line no-param-reassign
             if ($.isFunction(data)) {
                 callback = data;
                 data = undefined;
@@ -66,13 +77,13 @@ define([
                 dataType: 'json',
                 data: JSON.stringify(data),
                 success: callback,
-                global: data ? data.global : true    // Trigger global AJAX error handler or not
+                global: data ? data.global : true // Trigger global AJAX error handler or not
             });
         };
-        $.postJSON = function(url, data, callback) {  // eslint-disable-line no-param-reassign
+        $.postJSON = function(url, data, callback) { // eslint-disable-line no-param-reassign
             return sendJSON(url, data, callback, 'POST');
         };
-        $.patchJSON = function(url, data, callback) {  // eslint-disable-line no-param-reassign
+        $.patchJSON = function(url, data, callback) { // eslint-disable-line no-param-reassign
             return sendJSON(url, data, callback, 'PATCH');
         };
         return domReady(function() {

@@ -21,28 +21,30 @@ from email.utils import formatdate
 import requests
 from config_models.models import ConfigurationModel
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.files.base import ContentFile
 from django.db import models, transaction
 from django.urls import reverse
-
 from django.utils.functional import cached_property
 from django.utils.timezone import now
-from django.utils.translation import ugettext_lazy
+from django.utils.translation import gettext_lazy
 from model_utils import Choices
 from model_utils.models import StatusModel, TimeStampedModel
 from opaque_keys.edx.django.models import CourseKeyField
 
+from common.djangoapps.util.storage import resolve_storage_backend
 from lms.djangoapps.verify_student.ssencrypt import (
     decode_and_decrypt,
     encrypt_and_encode,
     generate_signed_message,
     random_aes_key,
     rsa_decrypt,
-    rsa_encrypt
+    rsa_encrypt,
 )
-from openedx.core.djangoapps.signals.signals import LEARNER_NOW_VERIFIED
-from openedx.core.storage import get_storage
+from lms.djangoapps.verify_student.statuses import VerificationAttemptStatus
+from openedx.core.djangoapps.signals.signals import LEARNER_SSO_VERIFIED, PHOTO_VERIFICATION_APPROVED
+from openedx.core.djangolib.model_mixins import DeletableByUserValue
+from openedx.core.lib.log_utils import get_username_or_pii_safe_user_id_for_log
 
 from .utils import auto_verify_for_testing_enabled, earliest_allowed_verification_date, submit_request_to_ss
 
@@ -80,7 +82,7 @@ def status_before_must_be(*valid_start_statuses):
         @functools.wraps(func)
         def with_status_check(obj, *args, **kwargs):
             if obj.status not in valid_start_statuses:
-                exception_msg = (
+                exception_msg = (  # noqa: UP032
                     "Error calling {} {}: status is '{}', must be one of: {}"
                 ).format(func, obj, obj.status, valid_start_statuses)
                 raise VerificationException(exception_msg)
@@ -97,9 +99,9 @@ class IDVerificationAttempt(StatusModel):
     their identity through one of several methods that inherit from this Model,
     including PhotoVerification and SSOVerification.
 
-    .. pii: The User's name is stored in this and sub-models
+    .. pii: The User's name is stored in this and sub-models.
     .. pii_types: name
-    .. pii_retirement: retained
+    .. pii_retirement: local_api
     """
     STATUS = Choices('created', 'ready', 'submitted', 'must_retry', 'approved', 'denied')
     user = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)
@@ -113,7 +115,7 @@ class IDVerificationAttempt(StatusModel):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True, db_index=True)
 
-    def expiration_default():  # lint-amnesty, pylint: disable=no-method-argument
+    def expiration_default():  # pylint: disable=no-method-argument
         return now() + timedelta(days=settings.VERIFY_STUDENT["DAYS_GOOD_FOR"])
 
     # Datetime that the verification will expire.
@@ -158,10 +160,13 @@ class IDVerificationAttempt(StatusModel):
         )
 
 
-class ManualVerification(IDVerificationAttempt):
+class ManualVerification(IDVerificationAttempt, DeletableByUserValue):
     """
     Each ManualVerification represents a user's verification that bypasses the need for
     any other verification.
+
+    The PII is retained by default, but can be redacted during retirement
+    by enabling ``REDACT_MANUAL_VERIFICATION_HISTORICAL_PII``.
 
     .. pii: The User's name is stored in the parent model
     .. pii_types: name
@@ -180,7 +185,7 @@ class ManualVerification(IDVerificationAttempt):
         app_label = 'verify_student'
 
     def __str__(self):
-        return 'ManualIDVerification for {name}, status: {status}'.format(
+        return 'ManualIDVerification for {name}, status: {status}'.format(  # noqa: UP032
             name=self.name,
             status=self.status,
         )
@@ -190,6 +195,13 @@ class ManualVerification(IDVerificationAttempt):
         Whether or not the status should be displayed to the user.
         """
         return False
+
+    @classmethod
+    def redact_before_delete_fields(cls):
+        """
+        Clear PII fields before delete in downstream soft-delete systems.
+        """
+        return {'name': ''}
 
 
 class SSOVerification(IDVerificationAttempt):
@@ -230,7 +242,7 @@ class SSOVerification(IDVerificationAttempt):
         app_label = "verify_student"
 
     def __str__(self):
-        return 'SSOIDVerification for {name}, status: {status}'.format(
+        return 'SSOIDVerification for {name}, status: {status}'.format(  # noqa: UP032
             name=self.name,
             status=self.status,
         )
@@ -243,18 +255,18 @@ class SSOVerification(IDVerificationAttempt):
         """
         Send a signal indicating that this verification was approved.
         """
-        log.info("Verification for user '{user_id}' approved by '{reviewer}' SSO.".format(
-            user_id=self.user, reviewer=approved_by
+        log.info("Verification for user '{user_id}' approved by '{reviewer}' SSO.".format(  # noqa: UP032
+            user_id=get_username_or_pii_safe_user_id_for_log(self.user), reviewer=approved_by
         ))
 
         # Emit signal to find and generate eligible certificates
-        LEARNER_NOW_VERIFIED.send_robust(
-            sender=SSOVerification,
-            user=self.user
+        LEARNER_SSO_VERIFIED.send_robust(
+            sender=PhotoVerification,
+            user=self.user,
         )
 
-        message = 'LEARNER_NOW_VERIFIED signal fired for {user} from SSOVerification'
-        log.info(message.format(user=self.user.username))
+        message = 'LEARNER_SSO_VERIFIED signal fired for {user} from SSOVerification'
+        log.info(message.format(user=get_username_or_pii_safe_user_id_for_log(self.user)))
 
 
 class PhotoVerification(IDVerificationAttempt):
@@ -300,7 +312,7 @@ class PhotoVerification(IDVerificationAttempt):
 
     .. pii: The User's name is stored in the parent model, this one stores links to face and photo ID images
     .. pii_types: name, image
-    .. pii_retirement: retained
+    .. pii_retirement: local_api
     """
     ######################## Fields Set During Creation ########################
     # See class docstring for description of status states
@@ -438,7 +450,7 @@ class PhotoVerification(IDVerificationAttempt):
         if self.status == self.STATUS.approved:
             return
 
-        log.info("Verification for user '{user_id}' approved by '{reviewer}'.".format(
+        log.info("Verification for user '{user_id}' approved by '{reviewer}'.".format(  # noqa: UP032
             user_id=self.user, reviewer=user_id
         ))
         self.error_msg = ""  # reset, in case this attempt was denied before
@@ -450,14 +462,15 @@ class PhotoVerification(IDVerificationAttempt):
             days=settings.VERIFY_STUDENT["DAYS_GOOD_FOR"]
         )
         self.save()
+
         # Emit signal to find and generate eligible certificates
-        LEARNER_NOW_VERIFIED.send_robust(
+        PHOTO_VERIFICATION_APPROVED.send_robust(
             sender=PhotoVerification,
-            user=self.user
+            user=self.user,
         )
 
-        message = 'LEARNER_NOW_VERIFIED signal fired for {user} from PhotoVerification'
-        log.info(message.format(user=self.user.username))
+        message = 'PHOTO_VERIFICATION_APPROVED signal fired for {user} from PhotoVerification'
+        log.info(message.format(user=get_username_or_pii_safe_user_id_for_log(self.user)))
 
     @status_before_must_be("ready", "must_retry")
     def mark_submit(self):
@@ -540,7 +553,7 @@ class PhotoVerification(IDVerificationAttempt):
             lets you amend the error message in case there were additional
             details to be made.
         """
-        log.info("Verification for user '{user_id}' denied by '{reviewer}'.".format(
+        log.info("Verification for user '{user_id}' denied by '{reviewer}'.".format(  # noqa: UP032
             user_id=self.user, reviewer=reviewing_user
         ))
         self.error_msg = error_msg
@@ -627,7 +640,7 @@ class SoftwareSecurePhotoVerification(PhotoVerification):
 
     .. pii: The User's name is stored in the parent model, this one stores links to face and photo ID images
     .. pii_types: name, image
-    .. pii_retirement: retained
+    .. pii_retirement: local_api
     """
     # This is a base64.urlsafe_encode(rsa_encrypt(photo_id_aes_key), ss_pub_key)
     # So first we generate a random AES-256 key to encrypt our photo ID with.
@@ -826,7 +839,7 @@ class SoftwareSecurePhotoVerification(PhotoVerification):
             log.info(
                 ('Software Secure attempt for user: %r and receipt ID: %r used the same photo ID data as the '
                  'receipt with ID %r.'),
-                self.user.username,
+                get_username_or_pii_safe_user_id_for_log(self.user),
                 self.receipt_id,
                 copy_id_photo_from.receipt_id,
             )
@@ -910,7 +923,6 @@ class SoftwareSecurePhotoVerification(PhotoVerification):
         config = settings.VERIFY_STUDENT["SOFTWARE_SECURE"]
 
         # Default to the S3 backend for backward compatibility
-        storage_class = config.get("STORAGE_CLASS", "storages.backends.s3boto.S3BotoStorage")
         storage_kwargs = config.get("STORAGE_KWARGS", {})
 
         # Map old settings to the parameters expected by the storage backend
@@ -919,10 +931,15 @@ class SoftwareSecurePhotoVerification(PhotoVerification):
         if "AWS_SECRET_KEY" in config:
             storage_kwargs["secret_key"] = config["AWS_SECRET_KEY"]
         if "S3_BUCKET" in config:
-            storage_kwargs["bucket"] = config["S3_BUCKET"]
+            storage_kwargs["bucket_name"] = config["S3_BUCKET"]
             storage_kwargs["querystring_expire"] = self.IMAGE_LINK_DURATION
 
-        return get_storage(storage_class, **storage_kwargs)
+        return resolve_storage_backend(
+            storage_key="verify_student",
+            legacy_setting_key="VERIFY_STUDENT",
+            legacy_sec_setting_keys=["SOFTWARE_SECURE", "STORAGE_CLASS"],
+            options=storage_kwargs
+        )
 
     def _get_path(self, prefix, override_receipt_id=None):
         """
@@ -1056,7 +1073,7 @@ class SoftwareSecurePhotoVerification(PhotoVerification):
 
         verification = SoftwareSecurePhotoVerification.get_recent_verification(user)
 
-        if verification and verification.expiration_datetime < recently_expired_date and not verification.expiry_email_date:  # lint-amnesty, pylint: disable=line-too-long
+        if verification and verification.expiration_datetime < recently_expired_date and not verification.expiry_email_date:  # pylint: disable=line-too-long
             expiry_email_date = today - timedelta(days=email_config['RESEND_DAYS'])
             SoftwareSecurePhotoVerification.objects.filter(pk=verification.pk).update(
                 expiry_email_date=expiry_email_date)
@@ -1083,14 +1100,13 @@ class VerificationDeadline(TimeStampedModel):
         app_label = "verify_student"
 
     course_key = CourseKeyField(
-        max_length=255,
         db_index=True,
         unique=True,
-        help_text=ugettext_lazy("The course for which this deadline applies"),
+        help_text=gettext_lazy("The course for which this deadline applies"),
     )
 
     deadline = models.DateTimeField(
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "The datetime after which users are no longer allowed "
             "to submit photos for verification."
         )
@@ -1173,8 +1189,10 @@ class VerificationDeadline(TimeStampedModel):
 
 class SSPVerificationRetryConfig(ConfigurationModel):  # pylint: disable=model-missing-unicode, useless-suppression
     """
-        SSPVerificationRetryConfig used to inject arguments
-        to retry_failed_photo_verifications management command
+    SSPVerificationRetryConfig used to inject arguments
+    to retry_failed_photo_verifications management command
+
+    .. no_pii:
     """
 
     class Meta:
@@ -1189,3 +1207,68 @@ class SSPVerificationRetryConfig(ConfigurationModel):  # pylint: disable=model-m
 
     def __str__(self):
         return str(self.arguments)
+
+
+class VerificationAttempt(StatusModel):
+    """
+    The model represents impelementation-agnostic information about identity verification (IDV) attempts.
+
+    Plugins that implement forms of IDV can store information about IDV attempts in this model for use across
+    the platform.
+
+    .. pii: Contains the name of the user
+    .. pii_types: name
+    .. pii_retirement: local_api
+    """
+    user = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)
+    name = models.CharField(blank=True, max_length=255)
+
+    STATUS = Choices(
+        VerificationAttemptStatus.CREATED,
+        VerificationAttemptStatus.PENDING,
+        VerificationAttemptStatus.APPROVED,
+        VerificationAttemptStatus.DENIED,
+    )
+
+    expiration_datetime = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    hide_status_from_user = models.BooleanField(
+        default=False,
+        null=True,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    def should_display_status_to_user(self):
+        """When called, returns true or false based on the type of VerificationAttempt"""
+        return not self.hide_status_from_user
+
+    def active_at_datetime(self, deadline):
+        """Check whether the verification was active at a particular datetime.
+
+        Arguments:
+            deadline (datetime): The date at which the verification was active
+                (created before and expiration datetime is after today).
+
+        Returns:
+            bool
+
+        """
+        return (
+            self.created_at <= deadline and
+            (self.expiration_datetime is None or self.expiration_datetime > now())
+        )
+
+    @classmethod
+    def retire_user(cls, user_id):
+        """
+        Retire user as part of GDPR pipeline
+
+        :param user_id: int
+        """
+        verification_attempts = cls.objects.filter(user_id=user_id)
+        verification_attempts.delete()

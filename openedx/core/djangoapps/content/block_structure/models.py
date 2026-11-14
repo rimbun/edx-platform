@@ -5,18 +5,17 @@ Models used by the block structure framework.
 
 import errno
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from logging import getLogger
 
 from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.base import ContentFile
 from django.db import models, transaction
-
 from model_utils.models import TimeStampedModel
 
+from common.djangoapps.util.storage import resolve_storage_backend
 from openedx.core.djangoapps.xmodule_django.models import UsageKeyWithRunField
-from openedx.core.storage import get_storage
 
 from . import config
 from .exceptions import BlockStructureNotFound
@@ -40,15 +39,14 @@ def _directory_name(data_usage_key):
     # .. setting_default: ''
     # .. setting_description: Specifies the path in storage where block structures would be saved,
     #   for storage-backed block structure cache.
-    #   For more information, check https://github.com/edx/edx-platform/pull/14571.
-    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']` and on
-    #   `block_structure.storage_backing_for_cache`.
+    #   For more information, check https://github.com/openedx/edx-platform/pull/14571.
+    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']`
     directory_prefix = settings.BLOCK_STRUCTURES_SETTINGS.get('DIRECTORY_PREFIX', '')
 
     # replace any '/' in the usage key so they aren't interpreted
     # as folder separators.
     encoded_usage_key = str(data_usage_key).replace('/', '_')
-    return '{}{}'.format(
+    return '{}{}'.format(  # noqa: UP032
         directory_prefix,
         encoded_usage_key,
     )
@@ -59,7 +57,7 @@ def _path_name(bs_model, _filename):
     Returns path name to use for the given
     BlockStructureModel instance.
     """
-    filename = datetime.utcnow().strftime('%Y-%m-%d-%H:%M:%S-%f')
+    filename = datetime.now(UTC).strftime('%Y-%m-%d-%H:%M:%S-%f')
     return _create_path(
         _directory_name(bs_model.data_usage_key),
         filename,
@@ -73,20 +71,23 @@ def _bs_model_storage():
     # .. setting_name: BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']
     # .. setting_default: None
     # .. setting_description: Specifies the storage used for storage-backed block structure cache.
-    #   For more information, check https://github.com/edx/edx-platform/pull/14571.
-    # .. setting_warnings: Depends on `block_structure.storage_backing_for_cache`.
-    storage_class = settings.BLOCK_STRUCTURES_SETTINGS.get('STORAGE_CLASS')
+    #   For more information, check https://github.com/openedx/edx-platform/pull/14571.
+    # storage_class = settings.BLOCK_STRUCTURES_SETTINGS.get('STORAGE_CLASS')
 
     # .. setting_name: BLOCK_STRUCTURES_SETTINGS['STORAGE_KWARGS']
     # .. setting_default: {}
     # .. setting_description: Specifies the keyword arguments needed to setup the storage, which
     #   would be used for storage-backed block structure cache.
-    #   For more information, check https://github.com/edx/edx-platform/pull/14571.
-    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']` and on
-    #   `block_structure.storage_backing_for_cache`.
+    #   For more information, check https://github.com/openedx/edx-platform/pull/14571.
+    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']`
     storage_kwargs = settings.BLOCK_STRUCTURES_SETTINGS.get('STORAGE_KWARGS', {})
 
-    return get_storage(storage_class, **storage_kwargs)
+    return resolve_storage_backend(
+        storage_key="block_structures_settings",
+        legacy_setting_key="BLOCK_STRUCTURES_SETTINGS",
+        legacy_sec_setting_keys=["STORAGE_CLASS"],
+        options=storage_kwargs
+    )
 
 
 class CustomizableFileField(models.FileField):
@@ -105,7 +106,7 @@ class CustomizableFileField(models.FileField):
         ))
         super().__init__(*args, **kwargs)
 
-    def deconstruct(self):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def deconstruct(self):  # pylint: disable=missing-function-docstring
         name, path, args, kwargs = super().deconstruct()
         del kwargs['upload_to']
         del kwargs['storage']
@@ -137,13 +138,13 @@ def _storage_error_handling(bs_model, operation, is_read_operation=False):
         yield
     except Exception as error:  # pylint: disable=broad-except
         log.exception('BlockStructure: Exception %s on store %s; %s.', error.__class__, operation, bs_model)
-        if isinstance(error, OSError) and error.errno in (errno.EACCES, errno.EPERM):  # lint-amnesty, pylint: disable=no-else-raise, no-member
+        if isinstance(error, OSError) and error.errno in (errno.EACCES, errno.EPERM):  # pylint: disable=no-else-raise, no-member
             raise
         elif is_read_operation and isinstance(error, (IOError, SuspiciousOperation)):
             # May have been caused by one of the possible error
             # situations listed above.  Raise BlockStructureNotFound
             # so the block structure can be regenerated and restored.
-            raise BlockStructureNotFound(bs_model.data_usage_key)  # lint-amnesty, pylint: disable=raise-missing-from
+            raise BlockStructureNotFound(bs_model.data_usage_key)  # pylint: disable=raise-missing-from  # noqa: B904
         else:
             raise
 
@@ -171,7 +172,7 @@ class BlockStructureModel(TimeStampedModel):
         max_length=255,
         unique=True,
     )
-    data_version = models.CharField(
+    data_version = models.CharField(  # noqa: DJ001
         'Version of the data at the time of collection.',
         blank=True,
         null=True,
@@ -216,7 +217,7 @@ class BlockStructureModel(TimeStampedModel):
             return cls.objects.get(data_usage_key=data_usage_key)
         except cls.DoesNotExist:
             log.info('BlockStructure: Not found in table; %s.', data_usage_key)
-            raise BlockStructureNotFound(data_usage_key)  # lint-amnesty, pylint: disable=raise-missing-from
+            raise BlockStructureNotFound(data_usage_key)  # pylint: disable=raise-missing-from  # noqa: B904
 
     @classmethod
     def update_or_create(cls, serialized_data, data_usage_key, **kwargs):
@@ -234,11 +235,9 @@ class BlockStructureModel(TimeStampedModel):
             with _storage_error_handling(bs_model, operation):
                 bs_model.data.save('', ContentFile(serialized_data))
 
-        cls._log(bs_model, operation, serialized_data)
-
         if not created:
             cls._prune_files(data_usage_key)
-
+        cls._log(bs_model, operation, serialized_data)
         return bs_model, created
 
     def __str__(self):
@@ -255,15 +254,12 @@ class BlockStructureModel(TimeStampedModel):
         """
         Deletes previous file versions for data_usage_key.
         """
-        if not settings.BLOCK_STRUCTURES_SETTINGS.get('PRUNING_ACTIVE', False):
-            return
-
         if num_to_keep is None:
             num_to_keep = config.num_versions_to_keep()
 
         try:
             all_files_by_date = sorted(cls._get_all_files(data_usage_key))
-            files_to_delete = all_files_by_date[:-num_to_keep] if num_to_keep > 0 else all_files_by_date  # lint-amnesty, pylint: disable=invalid-unary-operand-type
+            files_to_delete = all_files_by_date[:-num_to_keep] if num_to_keep > 0 else all_files_by_date  # pylint: disable=invalid-unary-operand-type
             cls._delete_files(files_to_delete)
             log.info(
                 'BlockStructure: Deleted %d out of total %d files in store; data_usage_key: %s, num_to_keep: %d.',
@@ -272,7 +268,6 @@ class BlockStructureModel(TimeStampedModel):
                 data_usage_key,
                 num_to_keep,
             )
-
         except Exception:  # pylint: disable=broad-except
             log.exception('BlockStructure: Exception when deleting old files; data_usage_key: %s.', data_usage_key)
 

@@ -1,32 +1,33 @@
 define([
-    'jquery', 'underscore', 'common/js/spec_helpers/template_helpers',
+    'jquery', 'underscore', 'sinon', 'common/js/spec_helpers/template_helpers',
     'edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers',
     'logger', 'js/edxnotes/collections/tabs', 'js/edxnotes/views/tabs/search_results',
     'js/spec/edxnotes/helpers'
 ], function(
-    $, _, TemplateHelpers, AjaxHelpers, Logger, TabsCollection, SearchResultsView, Helpers
+    $, _, sinon, TemplateHelpers, AjaxHelpers, Logger, TabsCollection, SearchResultsView, Helpers
 ) {
     'use strict';
+
     describe('EdxNotes SearchResultsView', function() {
         var notes = [
-            {
-                created: 'December 11, 2014 at 11:12AM',
-                updated: 'December 11, 2014 at 11:12AM',
-                text: 'Third added model',
-                quote: 'Should be listed first'
-            },
-            {
-                created: 'December 11, 2014 at 11:11AM',
-                updated: 'December 11, 2014 at 11:11AM',
-                text: 'Second added model',
-                quote: 'Should be listed second'
-            },
-            {
-                created: 'December 11, 2014 at 11:10AM',
-                updated: 'December 11, 2014 at 11:10AM',
-                text: 'First added model',
-                quote: 'Should be listed third'
-            }
+                {
+                    created: 'December 11, 2014 at 11:12AM',
+                    updated: 'December 11, 2014 at 11:12AM',
+                    text: 'Third added model',
+                    quote: 'Should be listed first'
+                },
+                {
+                    created: 'December 11, 2014 at 11:11AM',
+                    updated: 'December 11, 2014 at 11:11AM',
+                    text: 'Second added model',
+                    quote: 'Should be listed second'
+                },
+                {
+                    created: 'December 11, 2014 at 11:10AM',
+                    updated: 'December 11, 2014 at 11:10AM',
+                    text: 'First added model',
+                    quote: 'Should be listed third'
+                }
             ],
             responseJson = {
                 count: 3,
@@ -37,7 +38,8 @@ define([
                 previous: null,
                 results: notes
             },
-            getView, submitForm, tabInfo, searchResultsTabId;
+            getView, submitForm, tabInfo, searchResultsTabId,
+            requests, xhrFactory;
 
         getView = function(tabsCollection, perPage, options) {
             options = _.defaults(options || {}, {
@@ -69,12 +71,21 @@ define([
         searchResultsTabId = '#search-results-panel';
 
         beforeEach(function() {
+            xhrFactory = sinon.useFakeXMLHttpRequest();
+            requests = [];
+            requests.currentIndex = 0;
+            requests.restore = function() { xhrFactory.restore(); };
+            xhrFactory.onCreate = function(req) { requests.push(req); };
             loadFixtures('js/fixtures/edxnotes/edxnotes.html');
             TemplateHelpers.installTemplates([
                 'templates/edxnotes/note-item', 'templates/edxnotes/tab-item'
             ]);
 
             this.tabsCollection = new TabsCollection();
+        });
+
+        afterEach(function() {
+            requests.restore();
         });
 
         it('does not create a tab and content on initialization', function() {
@@ -84,8 +95,7 @@ define([
         });
 
         it('displays a tab and content on search with proper data and order', function() {
-            var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this);
+            var view = getView(this.tabsCollection);
 
             submitForm(view.searchBox, 'second');
             Helpers.respondToRequest(requests, responseJson, true);
@@ -94,8 +104,7 @@ define([
         });
 
         it('displays loading indicator when search is running', function() {
-            var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this);
+            var view = getView(this.tabsCollection);
 
             submitForm(view.searchBox, 'test query');
             expect(view.$('.ui-loading')).not.toHaveClass('is-hidden');
@@ -108,8 +117,7 @@ define([
         });
 
         it('displays no results message', function() {
-            var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this);
+            var view = getView(this.tabsCollection);
 
             submitForm(view.searchBox, 'some text');
             Helpers.respondToRequest(requests, _.extend(_.clone(responseJson), {count: 0, results: []}), true);
@@ -123,8 +131,7 @@ define([
         });
 
         it('does not send an additional request on switching between tabs', function() {
-            var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this);
+            var view = getView(this.tabsCollection);
 
             spyOn(Logger, 'log');
             submitForm(view.searchBox, 'test_query');
@@ -143,8 +150,7 @@ define([
         });
 
         it('can clear search results if tab is closed', function() {
-            var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this);
+            var view = getView(this.tabsCollection);
             spyOn(view.searchBox, 'clearInput').and.callThrough();
 
             submitForm(view.searchBox, 'test_query');
@@ -156,8 +162,7 @@ define([
         });
 
         it('can correctly show/hide error messages', function() {
-            var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this);
+            var view = getView(this.tabsCollection);
 
             submitForm(view.searchBox, 'test error');
 
@@ -180,7 +185,6 @@ define([
 
         it('can correctly update search results', function() {
             var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this),
                 newNotes = [{
                     created: 'December 11, 2014 at 11:10AM',
                     updated: 'December 11, 2014 at 11:10AM',
@@ -212,7 +216,7 @@ define([
 
         it('will not render header and footer if there are no notes', function() {
             var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this),
+                // eslint-disable-next-line no-shadow
                 notes = {
                     count: 0,
                     current_page: 1,
@@ -230,7 +234,7 @@ define([
 
         it('can go to a page number', function() {
             var view = getView(this.tabsCollection),
-                requests = AjaxHelpers.requests(this),
+                // eslint-disable-next-line no-shadow
                 notes = Helpers.createNotesData(
                     {
                         numNotesToCreate: 10,
@@ -268,8 +272,7 @@ define([
         });
 
         it('can navigate forward and backward', function() {
-            var requests = AjaxHelpers.requests(this),
-                page1Notes = Helpers.createNotesData(
+            var page1Notes = Helpers.createNotesData(
                     {
                         numNotesToCreate: 10,
                         count: 15,
@@ -315,8 +318,7 @@ define([
         });
 
         it('sends correct page size value', function() {
-            var requests = AjaxHelpers.requests(this),
-                view = getView(this.tabsCollection, 5);
+            var view = getView(this.tabsCollection, 5);
 
             submitForm(view.searchBox, 'awesome');
             Helpers.verifyRequestParams(

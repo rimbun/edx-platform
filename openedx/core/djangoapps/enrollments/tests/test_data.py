@@ -3,35 +3,41 @@ Test the Data Aggregation Layer for Course Enrollments.
 
 """
 
-
 import datetime
-import unittest
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import ddt
 import pytest
-from django.conf import settings
-from pytz import UTC
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
+from common.djangoapps.student.models import (  # pylint: disable=line-too-long
+    AlreadyEnrolledError,
+    CourseEnrollment,
+    CourseFullError,
+    EnrollmentClosedError,
+)
+from common.djangoapps.student.roles import AuthzCompatCourseAccessRole
+from common.djangoapps.student.tests.factories import CourseAccessRoleFactory, CourseEnrollmentFactory, UserFactory
 from openedx.core.djangoapps.enrollments import data
 from openedx.core.djangoapps.enrollments.errors import (
     CourseEnrollmentClosedError,
     CourseEnrollmentExistsError,
     CourseEnrollmentFullError,
-    UserNotFoundError
+    UserNotFoundError,
 )
 from openedx.core.djangoapps.enrollments.serializers import CourseEnrollmentSerializer
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 from openedx.core.lib.exceptions import CourseNotFoundError
-from common.djangoapps.student.models import AlreadyEnrolledError, CourseEnrollment, CourseFullError, EnrollmentClosedError  # lint-amnesty, pylint: disable=line-too-long
-from common.djangoapps.student.tests.factories import CourseAccessRoleFactory, UserFactory, CourseEnrollmentFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 class EnrollmentDataTest(ModuleStoreTestCase):
     """
     Test course enrollment data aggregation.
@@ -371,7 +377,7 @@ class EnrollmentDataTest(ModuleStoreTestCase):
     def _update_verified_mode_as_expired(self, course_id):
         """Dry method to change verified mode expiration."""
         mode = CourseMode.objects.get(course_id=course_id, mode_slug=CourseMode.VERIFIED)
-        mode.expiration_datetime = datetime.datetime(year=1970, month=1, day=1, tzinfo=UTC)
+        mode.expiration_datetime = datetime.datetime(year=1970, month=1, day=1, tzinfo=ZoneInfo("UTC"))
         mode.save()
 
     def assert_enrollment_modes(self, expected_modes, include_expired):
@@ -389,8 +395,15 @@ class EnrollmentDataTest(ModuleStoreTestCase):
         expected_role = CourseAccessRoleFactory.create(
             course_id=self.course.id, user=self.user, role="SuperCoolTestRole",
         )
+        expected_role_compat = AuthzCompatCourseAccessRole(
+            user_id=expected_role.user.id,
+            username=expected_role.user.username,
+            org=expected_role.org,
+            course_id=expected_role.course_id,
+            role=expected_role.role,
+        )
         roles = data.get_user_roles(self.user.username)
-        assert roles == {expected_role}
+        assert roles == {expected_role_compat}
 
     def test_get_roles_no_roles(self):
         """Get roles for a user who has no roles"""

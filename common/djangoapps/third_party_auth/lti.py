@@ -10,11 +10,11 @@ import time
 from django.contrib.auth import REDIRECT_FIELD_NAME
 from oauthlib.common import Request
 from oauthlib.oauth1.rfc5849.signature import (
+    base_string_uri,
     collect_parameters,
-    construct_base_string,
-    normalize_base_string_uri,
     normalize_parameters,
-    sign_hmac_sha1
+    sign_hmac_sha1,
+    signature_base_string,
 )
 from social_core.backends.base import BaseAuth
 from social_core.exceptions import AuthFailed
@@ -49,7 +49,7 @@ class LTIAuthBackend(BaseAuth):
         # Set a auth_entry here so we don't have to receive that as a custom parameter
         self.strategy.session_setdefault('auth_entry', 'login')
 
-        if not validated_lti_params:  # lint-amnesty, pylint: disable=no-else-raise
+        if not validated_lti_params:  # pylint: disable=no-else-raise
             self.strategy.session_set(LTI_PARAMS_KEY, None)
             raise AuthFailed(self, "LTI parameters could not be validated.")
         else:
@@ -154,10 +154,10 @@ class LTIAuthBackend(BaseAuth):
         # we proceed through the entire validation before rejecting any request for any reason.
         # However, as noted there, the value of doing this is dubious.
         try:
-            base_uri = normalize_base_string_uri(request.uri)
+            base_uri = base_string_uri(request.uri)
             parameters = collect_parameters(uri_query=request.uri_query, body=request.body)
             parameters_string = normalize_parameters(parameters)
-            base_string = construct_base_string(request.http_method, base_uri, parameters_string)
+            base_string = signature_base_string(request.http_method, base_uri, parameters_string)
 
             computed_signature = sign_hmac_sha1(base_string, str(lti_consumer_secret), '')
             submitted_signature = request.oauth_signature
@@ -177,7 +177,7 @@ class LTIAuthBackend(BaseAuth):
 
             # As this must take constant time, do not use shortcutting operators such as 'and'.
             # Instead, use constant time operators such as '&', which is the bitwise and.
-            valid = (lti_consumer_valid)
+            valid = lti_consumer_valid
             valid = valid & (submitted_signature == computed_signature)
             valid = valid & (request.oauth_version == '1.0')
             valid = valid & (request.oauth_signature_method == 'HMAC-SHA1')

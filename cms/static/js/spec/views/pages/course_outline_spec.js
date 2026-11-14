@@ -1,4 +1,5 @@
 import $ from 'jquery';
+import sinon from 'sinon';
 import AjaxHelpers from 'edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers';
 import ViewUtils from 'common/js/components/utils/view_utils';
 import CourseOutlinePage from 'js/views/pages/course_outline';
@@ -9,12 +10,12 @@ import TemplateHelpers from 'common/js/spec_helpers/template_helpers';
 import Course from 'js/models/course';
 
 describe('CourseOutlinePage', function() {
-    var createCourseOutlinePage, displayNameInput, model, outlinePage, requests, getItemsOfType, getItemHeaders,
+    var createCourseOutlinePage, displayNameInput, model, outlinePage, requests, xhrFactory, getItemsOfType, getItemHeaders,
         verifyItemsExpanded, expandItemsAndVerifyState, collapseItemsAndVerifyState, selectBasicSettings,
-        selectVisibilitySettings, selectAdvancedSettings, createMockCourseJSON, createMockSectionJSON,
+        selectVisibilitySettings, selectDiscussionSettings, selectAdvancedSettings, createMockCourseJSON, createMockSectionJSON,
         createMockSubsectionJSON, verifyTypePublishable, mockCourseJSON, mockEmptyCourseJSON, setSelfPaced, setSelfPacedCustomPLS,
         mockSingleSectionCourseJSON, createMockVerticalJSON, createMockIndexJSON, mockCourseEntranceExamJSON,
-        selectOnboardingExam, createMockCourseJSONWithReviewRules,mockCourseJSONWithReviewRules,
+        selectOnboardingExam, createMockCourseJSONWithReviewRules, mockCourseJSONWithReviewRules,
         mockOutlinePage = readFixtures('templates/mock/mock-course-outline-page.underscore'),
         mockRerunNotification = readFixtures('templates/mock/mock-course-rerun-notification.underscore');
 
@@ -37,10 +38,13 @@ describe('CourseOutlinePage', function() {
                 display_name: 'Section',
                 children: []
             },
+            unit_level_discussions: false,
             user_partitions: [],
             user_partition_info: {},
             highlights_enabled: true,
-            highlights_enabled_for_messaging: false
+            highlights_enabled_for_messaging: false,
+            hide_from_toc: false,
+            enable_hide_from_toc_ui: true
         }, options, {child_info: {children: children}});
     };
 
@@ -67,7 +71,9 @@ describe('CourseOutlinePage', function() {
             show_review_rules: true,
             user_partition_info: {},
             highlights_enabled: true,
-            highlights_enabled_for_messaging: false
+            highlights_enabled_for_messaging: false,
+            hide_from_toc: false,
+            enable_hide_from_toc_ui: true
         }, options, {child_info: {children: children}});
     };
 
@@ -92,7 +98,9 @@ describe('CourseOutlinePage', function() {
             group_access: {},
             user_partition_info: {},
             highlights: [],
-            highlights_enabled: true
+            highlights_enabled: true,
+            hide_from_toc: false,
+            enable_hide_from_toc_ui: true
         }, options, {child_info: {children: children}});
     };
 
@@ -122,7 +130,9 @@ describe('CourseOutlinePage', function() {
             },
             user_partitions: [],
             group_access: {},
-            user_partition_info: {}
+            user_partition_info: {},
+            hide_from_toc: false,
+            enable_hide_from_toc_ui: true,
         }, options, {child_info: {children: children}});
     };
 
@@ -140,7 +150,9 @@ describe('CourseOutlinePage', function() {
             edited_by: 'MockUser',
             user_partitions: [],
             group_access: {},
-            user_partition_info: {}
+            user_partition_info: {},
+            hide_from_toc: false,
+            enable_hide_from_toc_ui: true
         }, options);
     };
 
@@ -197,6 +209,10 @@ describe('CourseOutlinePage', function() {
         $(".modal-section .settings-tab-button[data-tab='advanced']").click();
     };
 
+    function selectDiscussionSettings() {
+        $(".modal-section .settings-tab-button[data-tab='discussion']").click();
+    }
+
     setSelfPaced = function() {
         /* global course */
         course.set('self_paced', true);
@@ -205,10 +221,9 @@ describe('CourseOutlinePage', function() {
     setSelfPacedCustomPLS = function() {
         setSelfPaced();
         course.set('is_custom_relative_dates_active', true);
-    }
+    };
 
     createCourseOutlinePage = function(test, courseJSON, createOnly) {
-        requests = AjaxHelpers.requests(test);
         model = new XBlockOutlineInfo(courseJSON, {parse: true});
         outlinePage = new CourseOutlinePage({
             model: model,
@@ -236,6 +251,7 @@ describe('CourseOutlinePage', function() {
         };
 
         it('can be published', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = getMockCourseJSON({
                 has_changes: true
             });
@@ -251,6 +267,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('should show publish button if it is not published and not changed', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = getMockCourseJSON({
                 has_changes: false,
                 published: false
@@ -259,6 +276,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('should show publish button if it is published and changed', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = getMockCourseJSON({
                 has_changes: true,
                 published: true
@@ -267,6 +285,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('should show publish button if it is not published, but changed', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = getMockCourseJSON({
                 has_changes: true,
                 published: false
@@ -275,6 +294,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('should hide publish button if it is not changed, but published', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = getMockCourseJSON({
                 has_changes: false,
                 published: true
@@ -285,6 +305,11 @@ describe('CourseOutlinePage', function() {
     };
 
     beforeEach(function() {
+        xhrFactory = sinon.useFakeXMLHttpRequest();
+        requests = [];
+        requests.currentIndex = 0;
+        requests.restore = function() { xhrFactory.restore(); };
+        xhrFactory.onCreate = function(req) { requests.push(req); };
         window.course = new Course({
             id: '5',
             name: 'Course Name',
@@ -300,10 +325,11 @@ describe('CourseOutlinePage', function() {
             'course-outline', 'xblock-string-field-editor', 'modal-button',
             'basic-modal', 'course-outline-modal', 'release-date-editor',
             'due-date-editor', 'self-paced-due-date-editor', 'grading-editor', 'publish-editor',
-            'staff-lock-editor', 'unit-access-editor', 'content-visibility-editor',
+            'staff-lock-editor', 'unit-access-editor', 'discussion-editor', 'content-visibility-editor',
             'settings-modal-tabs', 'timed-examination-preference-editor', 'access-editor',
             'show-correctness-editor', 'highlights-editor', 'highlights-enable-editor',
-            'course-highlights-enable'
+            'course-highlights-enable', 'course-video-sharing-enable', 'summary-configuration-editor',
+            'subsection-share-link-modal-tabs', 'full-page-share-link-editor', 'embed-link-share-link-editor',
         ]);
         appendSetFixtures(mockOutlinePage);
         mockCourseJSON = createMockCourseJSON({}, [
@@ -344,6 +370,7 @@ describe('CourseOutlinePage', function() {
     });
 
     afterEach(function() {
+        requests.restore();
         EditHelpers.cancelModalIfShowing();
         EditHelpers.removeMockAnalytics();
         // Clean up after the $.datepicker
@@ -584,6 +611,7 @@ describe('CourseOutlinePage', function() {
             setSelfPaced();
         });
 
+        // eslint-disable-next-line prefer-const
         createCourse = function(sectionOptions, courseOptions) {
             createCourseOutlinePage(this,
                 createMockCourseJSON(courseOptions, [
@@ -592,14 +620,17 @@ describe('CourseOutlinePage', function() {
             );
         };
 
+        // eslint-disable-next-line prefer-const
         createCourseWithHighlights = function(highlights) {
             createCourse({highlights: highlights});
         };
 
+        // eslint-disable-next-line prefer-const
         clickSaveOnModal = function() {
             $('.wrapper-modal-window .action-save').click();
         };
 
+        // eslint-disable-next-line prefer-const
         clickCancelOnModal = function() {
             $('.wrapper-modal-window .action-cancel').click();
         };
@@ -672,7 +703,6 @@ describe('CourseOutlinePage', function() {
                 expectHighlightsEnabledToBe(false);
             });
         });
-
 
         describe('Section Highlights', function() {
             var mockHighlightValues, highlightsLink, highlightInputs, openHighlights, saveHighlights,
@@ -835,6 +865,70 @@ describe('CourseOutlinePage', function() {
         });
     });
 
+    describe('Video sharing', function() {
+        beforeEach(function() {
+            setSelfPaced();
+        });
+
+        const createCourse = function(courseOptions) {
+            createCourseOutlinePage(this,
+                createMockCourseJSON(courseOptions)
+            );
+        };
+
+        const selectedOption = function() {
+            return $('select#video-sharing-configuration-options>option[selected="true"]');
+        };
+
+        it('displays video sharing link when enabled', function() {
+            createCourse({
+                video_sharing_enabled: true,
+                video_sharing_options: 'all-on',
+                video_sharing_doc_url: 'http://rick.roll'
+            });
+            expect($('.course-video-sharing')).toExist();
+            expect(selectedOption().val()).toEqual('all-on');
+        });
+
+        it('if option invalid, none is selected', function() {
+            createCourse({
+                video_sharing_enabled: true,
+                video_sharing_options: 'invalid-option',
+                video_sharing_doc_url: 'http://rick.roll'
+            });
+            expect($('.course-video-sharing')).toExist();
+            expect(selectedOption()).not.toExist();
+        });
+
+        it('will not display video sharing link when disabled', function() {
+            createCourse({
+                video_sharing_enabled: false,
+                video_sharing_options: 'all-on',
+                video_sharing_doc_url: 'http://rick.roll'
+            });
+            expect($('div.course-video-sharing')).not.toExist();
+            expect(selectedOption()).not.toExist();
+        });
+
+        it('tracks changes to video sharing option', function() {
+            createCourse({
+                video_sharing_enabled: true,
+                video_sharing_options: 'all-on',
+                video_sharing_doc_url: 'http://rick.roll'
+            });
+
+            selectedOption().val('per-video').trigger('change');
+
+            expect(window.analytics.track).toHaveBeenCalledWith(
+                'edx.social.video_sharing_options.changed',
+                {
+                    course_id: 'mock-course',
+                    video_sharing_options: 'per-video'
+                }
+            );
+        });
+    });
+
     describe('Section', function() {
         var getDisplayNameWrapper;
 
@@ -975,6 +1069,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('can display a publish modal with a list of unpublished subsections and units', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = createMockCourseJSON({}, [
                     createMockSectionJSON({has_changes: true}, [
                         createMockSubsectionJSON({has_changes: true}, [
@@ -1104,7 +1199,7 @@ describe('CourseOutlinePage', function() {
             }
         };
 
-          modalSettingsWithExamReviewRules = {
+        modalSettingsWithExamReviewRules = {
             graderType: 'notgraded',
             isPrereq: false,
             metadata: {
@@ -1136,7 +1231,9 @@ describe('CourseOutlinePage', function() {
                 is_practice_exam: false,
                 is_proctored_exam: false,
                 default_time_limit_minutes: 150,
-                hide_after_due: true
+                hide_after_due: true,
+                hide_from_toc: false,
+                enable_hide_from_toc_ui: true,
             }, [
                 createMockVerticalJSON({
                     has_changes: true,
@@ -1251,6 +1348,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('can show correct editors for self_paced course', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = createMockCourseJSON({}, [
                 createMockSectionJSON({}, [
                     createMockSubsectionJSON({}, [])
@@ -1318,6 +1416,7 @@ describe('CourseOutlinePage', function() {
                     default_time_limit_minutes: 150,
                     hide_after_due: true,
                     is_onboarding_exam: false,
+                    hide_from_toc: null,
                 }
             });
             expect(requests[0].requestHeaders['X-HTTP-Method-Override']).toBe('PATCH');
@@ -1357,7 +1456,7 @@ describe('CourseOutlinePage', function() {
         it('review rules exists', function() {
             createCourseOutlinePage(this, mockCourseJSONWithReviewRules, false);
             outlinePage.$('.outline-subsection .configure-button').click();
-             $('.wrapper-modal-window .action-save').click();
+            $('.wrapper-modal-window .action-save').click();
             AjaxHelpers.expectJsonRequest(requests, 'POST', '/xblock/mock-subsection', modalSettingsWithExamReviewRules);
             expect(requests[0].requestHeaders['X-HTTP-Method-Override']).toBe('PATCH');
         });
@@ -1390,7 +1489,7 @@ describe('CourseOutlinePage', function() {
             $('.wrapper-modal-window .action-save').click();
         });
 
-        it('can select the onboarding exam when a course supports onboarding', function () {
+        it('can select the onboarding exam when a course supports onboarding', function() {
             var mockCourseWithSpecialExamJSON = createMockCourseJSON({}, [
                 createMockSectionJSON({
                     has_changes: true,
@@ -2098,6 +2197,7 @@ describe('CourseOutlinePage', function() {
         });
 
         it('can display a publish modal with a list of unpublished units', function() {
+            // eslint-disable-next-line no-shadow
             var mockCourseJSON = createMockCourseJSON({}, [
                     createMockSectionJSON({has_changes: true}, [
                         createMockSubsectionJSON({has_changes: true}, [
@@ -2123,8 +2223,9 @@ describe('CourseOutlinePage', function() {
             expect($modalWindow.find('.outline-subsection')).not.toExist();
         });
 
-        describe('Self Paced with Custom Personalized Learner Schedules (PLS)', function () {
+        describe('Self Paced with Custom Personalized Learner Schedules (PLS)', function() {
             beforeEach(function() {
+                // eslint-disable-next-line no-shadow
                 var mockCourseJSON = createMockCourseJSON({}, [
                     createMockSectionJSON({}, [
                         createMockSubsectionJSON({}, [])
@@ -2142,7 +2243,7 @@ describe('CourseOutlinePage', function() {
 
             selectRelativeWeeksSubsection = function(weeks) {
                 $('#due_in').val(weeks).trigger('keyup');
-            }
+            };
 
             mockCustomPacingServerValuesJson = createMockSectionJSON({
                 release_date: 'Jan 01, 2970 at 05:00 UTC'
@@ -2159,6 +2260,8 @@ describe('CourseOutlinePage', function() {
                     is_practice_exam: false,
                     is_proctored_exam: false,
                     default_time_limit_minutes: null,
+                    hide_from_toc: false,
+                    enable_hide_from_toc_ui: true,
                 }, [
                     createMockVerticalJSON({
                         has_changes: true,
@@ -2167,7 +2270,7 @@ describe('CourseOutlinePage', function() {
                 ])
             ]);
 
-            it('can show correct editors for self_paced course with custom pacing', function (){
+            it('can show correct editors for self_paced course with custom pacing', function() {
                 outlinePage.$('.outline-subsection .configure-button').click();
                 expect($('.edit-settings-release').length).toBe(0);
                 // Due date input exists for custom pacing self paced courses
@@ -2227,7 +2330,7 @@ describe('CourseOutlinePage', function() {
                 expectShowCorrectness('never');
             });
 
-            it ('does not show relative date input when assignment is not graded', function() {
+            it('does not show relative date input when assignment is not graded', function() {
                 outlinePage.$('.outline-subsection .configure-button').click();
                 $('#grading_type').val('Lab').trigger('change');
                 $('#due_in').val('').trigger('change');
@@ -2236,17 +2339,10 @@ describe('CourseOutlinePage', function() {
                 $('#grading_type').val('notgraded').trigger('change');
                 $('#due_in').val('').trigger('change');
                 expect($('#relative_date_input').css('display')).toBe('none');
-            })
+            });
 
             it('shows validation error on relative date', function() {
                 outlinePage.$('.outline-subsection .configure-button').click();
-
-                // when due number of weeks goes over 18
-                selectRelativeWeeksSubsection('19');
-                expect($('#relative_weeks_due_warning_max').css('display')).not.toBe('none');
-                expect($('#relative_weeks_due_warning_max')).toContainText('The maximum number of weeks this subsection can be due in is 18 weeks from the learner enrollment date.');
-                expect($('.wrapper-modal-window .action-save').prop('disabled')).toBe(true);
-                expect($('.wrapper-modal-window .action-save').hasClass('is-disabled')).toBe(true);
 
                 // when due number of weeks is less than 1
                 selectRelativeWeeksSubsection('-1');
@@ -2256,8 +2352,7 @@ describe('CourseOutlinePage', function() {
                 expect($('.wrapper-modal-window .action-save').hasClass('is-disabled')).toBe(true);
 
                 // when no validation error should show up
-                selectRelativeWeeksSubsection('10');
-                expect($('#relative_weeks_due_warning_max').css('display')).toBe('none');
+                selectRelativeWeeksSubsection('19');
                 expect($('#relative_weeks_due_warning_min').css('display')).toBe('none');
                 expect($('.wrapper-modal-window .action-save').prop('disabled')).toBe(false);
                 expect($('.wrapper-modal-window .action-save').hasClass('is-disabled')).toBe(false);
@@ -2311,13 +2406,14 @@ describe('CourseOutlinePage', function() {
                     'Contains staff only content'
                 );
             });
-        })
+        });
     });
 
     // Note: most tests for units can be found in Bok Choy
     describe('Unit', function() {
-        var getUnitStatus = function(options) {
-            mockCourseJSON = createMockCourseJSON({}, [
+        var getUnitStatus = function(options, courseOptions) {
+            courseOptions = courseOptions || {};
+            mockCourseJSON = createMockCourseJSON(courseOptions, [
                 createMockSectionJSON({}, [
                     createMockSubsectionJSON({}, [
                         createMockVerticalJSON(options)
@@ -2407,6 +2503,50 @@ describe('CourseOutlinePage', function() {
             );
             expect(messages.length).toBe(1);
             expect(messages).toContainText('Contains staff only content');
+        });
+
+        describe('discussion settings', function() {
+            it('hides discussion settings if unit level discussions are disabled', function() {
+                getUnitStatus({}, {unit_level_discussions: false});
+                outlinePage.$('.outline-unit .configure-button').click();
+                expect($('.modal-section .edit-discussion')).not.toExist();
+            });
+        });
+
+        describe('summary configuration', function() {
+            it('hides summary configuration settings if summary_configuration_enabled is not a boolean', function() {
+                getUnitStatus({summary_configuration_enabled: null});
+                outlinePage.$('.outline-unit .configure-button').click();
+                expect($('.modal-section .summary-configuration')).not.toExist();
+            });
+
+            it('shows summary configuration settings if summary_configuration_enabled is true', function() {
+                getUnitStatus({summary_configuration_enabled: true});
+                outlinePage.$('.outline-unit .configure-button').click();
+                expect($('.modal-section .summary-configuration')).toExist();
+            });
+
+            it('shows summary configuration settings if summary_configuration_enabled is false', function() {
+                getUnitStatus({summary_configuration_enabled: false});
+                outlinePage.$('.outline-unit .configure-button').click();
+                expect($('.modal-section .summary-configuration')).toExist();
+            });
+
+            it('can be updated', function() {
+                getUnitStatus({summary_configuration_enabled: false});
+                outlinePage.$('.outline-unit .configure-button').click();
+                expect($('#summary_configuration_enabled').is(':checked')).toBe(false);
+                $('#summary_configuration_enabled').prop('checked', true).trigger('change');
+                $('.wrapper-modal-window .action-save').click();
+                AjaxHelpers.expectJsonRequest(requests, 'POST', '/xblock/mock-unit', {
+                    summary_configuration_enabled: true,
+                    publish: 'republish',
+                    metadata: {
+                        visible_to_staff_only: null,
+                        hide_from_toc: null
+                    }
+                });
+            });
         });
 
         verifyTypePublishable('unit', function(options) {

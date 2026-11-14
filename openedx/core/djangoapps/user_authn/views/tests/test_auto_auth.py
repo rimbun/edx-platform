@@ -6,21 +6,24 @@ from unittest.mock import Mock, patch
 
 import ddt
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
-from django.test import TestCase
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.test import TestCase, override_settings
 from django.test.client import Client
 from opaque_keys.edx.locator import CourseLocator
 
 from common.djangoapps.student.models import CourseAccessRole, CourseEnrollment, UserProfile, anonymous_id_for_user
 from common.djangoapps.util.testing import UrlResetMixin
+from common.test.utils import assert_dict_contains_subset
 from openedx.core.djangoapps.django_comment_common.models import (
     FORUM_ROLE_ADMINISTRATOR,
     FORUM_ROLE_MODERATOR,
     FORUM_ROLE_STUDENT,
-    Role
+    Role,
 )
 from openedx.core.djangoapps.django_comment_common.utils import seed_permissions_roles
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
 
 
 class AutoAuthTestCase(UrlResetMixin, TestCase):
@@ -42,9 +45,9 @@ class AutoAuthEnabledTestCase(AutoAuthTestCase, ModuleStoreTestCase):
         (COURSE_ID_SPLIT, CourseLocator.from_string(COURSE_ID_SPLIT)),
     )
 
-    @patch.dict("django.conf.settings.FEATURES", {"AUTOMATIC_AUTH_FOR_TESTING": True})
+    @override_settings(AUTOMATIC_AUTH_FOR_TESTING=True)
     def setUp(self):
-        # Patching the settings.FEATURES['AUTOMATIC_AUTH_FOR_TESTING']
+        # Patching the AUTOMATIC_AUTH_FOR_TESTING setting
         # value affects the contents of urls.py,
         # so we need to call super.setUp() which reloads urls.py (because
         # of the UrlResetMixin)
@@ -64,7 +67,7 @@ class AutoAuthEnabledTestCase(AutoAuthTestCase, ModuleStoreTestCase):
         assert user.is_active
         assert not user.profile.requires_parental_consent()
 
-    @patch.dict("django.conf.settings.FEATURES", {'RESTRICT_AUTOMATIC_AUTH': False})
+    @override_settings(RESTRICT_AUTOMATIC_AUTH=False)
     def test_create_same_user(self):
         self._auto_auth({'username': 'test'})
         self._auto_auth({'username': 'test'})
@@ -102,7 +105,7 @@ class AutoAuthEnabledTestCase(AutoAuthTestCase, ModuleStoreTestCase):
         # By default, the user should not be global staff
         assert not user.is_staff
 
-    @patch.dict("django.conf.settings.FEATURES", {'RESTRICT_AUTOMATIC_AUTH': False})
+    @override_settings(RESTRICT_AUTOMATIC_AUTH=False)
     def test_create_staff_user(self):
 
         # Create a staff user
@@ -129,7 +132,7 @@ class AutoAuthEnabledTestCase(AutoAuthTestCase, ModuleStoreTestCase):
 
     @ddt.data(*COURSE_IDS_DDT)
     @ddt.unpack
-    @patch.dict("django.conf.settings.FEATURES", {'RESTRICT_AUTOMATIC_AUTH': False})
+    @override_settings(RESTRICT_AUTOMATIC_AUTH=False)
     def test_double_enrollment(self, course_id, course_key):
 
         # Create a user and enroll in a course
@@ -182,12 +185,13 @@ class AutoAuthEnabledTestCase(AutoAuthTestCase, ModuleStoreTestCase):
         for key in ['created_status', 'username', 'email', 'password', 'user_id', 'anonymous_id']:
             assert key in response_data
         user = User.objects.get(username=response_data['username'])
-        self.assertDictContainsSubset(
+        assert_dict_contains_subset(
+            self,
             {
                 'created_status': 'Logged in',
                 'anonymous_id': anonymous_id_for_user(user, None),
             },
-            response_data
+            response_data,
         )
 
     @ddt.data(*COURSE_IDS_DDT)
@@ -206,13 +210,13 @@ class AutoAuthEnabledTestCase(AutoAuthTestCase, ModuleStoreTestCase):
         enrollment = CourseEnrollment.objects.get(course_id=course_key)
         assert enrollment.user.username == 'test'
 
-        # Check that the redirect was to the course info/outline page
+        # Check that the redirect was to the correct outline page for either lms or studio
         if settings.ROOT_URLCONF == 'lms.urls':
-            url_pattern = '/course/'
+            expected_redirect_url = f'http://learning-mfe/course/{course_id}/home'
         else:
-            url_pattern = f'/course/{str(course_key)}'
+            expected_redirect_url = f'/course/{course_id}'
 
-        assert response.url.endswith(url_pattern)
+        assert response.url == expected_redirect_url
 
     def test_redirect_to_main(self):
         # Create user and redirect to 'home' (cms) or 'dashboard' (lms)
@@ -299,9 +303,9 @@ class AutoAuthDisabledTestCase(AutoAuthTestCase):
     Test that the page is inaccessible with default settings
     """
 
-    @patch.dict("django.conf.settings.FEATURES", {"AUTOMATIC_AUTH_FOR_TESTING": False})
+    @override_settings(AUTOMATIC_AUTH_FOR_TESTING=False)
     def setUp(self):
-        # Patching the settings.FEATURES['AUTOMATIC_AUTH_FOR_TESTING']
+        # Patching the AUTOMATIC_AUTH_FOR_TESTING setting
         # value affects the contents of urls.py,
         # so we need to call super.setUp() which reloads urls.py (because
         # of the UrlResetMixin)
@@ -323,9 +327,9 @@ class AutoAuthRestrictedTestCase(AutoAuthTestCase):
     work as intended.  These restrictions are in place for load tests.
     """
 
-    @patch.dict('django.conf.settings.FEATURES', {'AUTOMATIC_AUTH_FOR_TESTING': True})
+    @override_settings(AUTOMATIC_AUTH_FOR_TESTING=True)
     def setUp(self):
-        # Patching the settings.FEATURES['AUTOMATIC_AUTH_FOR_TESTING']
+        # Patching the AUTOMATIC_AUTH_FOR_TESTING setting
         # value affects the contents of urls.py,
         # so we need to call super.setUp() which reloads urls.py (because
         # of the UrlResetMixin)
@@ -333,7 +337,7 @@ class AutoAuthRestrictedTestCase(AutoAuthTestCase):
         self.url = '/auto_auth'
         self.client = Client()
 
-    @patch.dict("django.conf.settings.FEATURES", {'RESTRICT_AUTOMATIC_AUTH': True})
+    @override_settings(RESTRICT_AUTOMATIC_AUTH=True)
     def test_superuser(self):
         """
         Make sure that superusers cannot be created.
@@ -341,7 +345,7 @@ class AutoAuthRestrictedTestCase(AutoAuthTestCase):
         response = self.client.get(self.url, {'username': 'test', 'superuser': 'true'})
         assert response.status_code == 403
 
-    @patch.dict("django.conf.settings.FEATURES", {'RESTRICT_AUTOMATIC_AUTH': True})
+    @override_settings(RESTRICT_AUTOMATIC_AUTH=True)
     def test_modify_user(self):
         """
         Make sure that existing users cannot be modified.

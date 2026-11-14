@@ -1,7 +1,7 @@
 """
 User facing error messages during course import and export
 """
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 COURSE_ALREADY_EXIST = _('Aborting import because a course with this id: {} already exists.')
 COURSE_PERMISSION_DENIED = _('Permission denied. You do not have write access to this course.')
@@ -14,5 +14,5 @@ PERMISSION_DENIED = _('Permission denied')
 UNKNOWN_ERROR_IN_IMPORT = _('Unknown error while importing course.')
 UNKNOWN_ERROR_IN_UNPACKING = _('An Unknown error occurred during the unpacking step.')
 UNKNOWN_USER_ID = _('Unknown User ID: {0}')
-UNSAFE_TAR_FILE = _('Unsafe tar file. Aborting import.')
+UNSAFE_ARCHIVE_FILE = _('Unsafe archive file. Aborting import.')
 USER_PERMISSION_DENIED = _('User permission denied.')

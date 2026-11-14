@@ -7,6 +7,8 @@ from django.test import TestCase
 from path import Path
 
 from common.djangoapps import edxmako
+from openedx.core.djangoapps.theming.helpers import get_themes
+from openedx.core.djangoapps.theming.helpers_dirs import get_theme_dirs
 from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
 from openedx.core.lib.tempdir import create_symlink, delete_symlink, mkdtemp_clean
 
@@ -19,6 +21,10 @@ class TestComprehensiveTheming(TestCase):
 
         # Clear the internal staticfiles caches, to get test isolation.
         staticfiles.finders.get_finder.cache_clear()
+
+        # Clear cache on get_theme methods.
+        get_themes.cache_clear()
+        get_theme_dirs.cache_clear()
 
     @with_comprehensive_theme('red-theme')
     def test_red_footer(self):

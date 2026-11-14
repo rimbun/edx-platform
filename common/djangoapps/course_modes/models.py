@@ -3,9 +3,10 @@ Add and create new modes for running courses on this particular LMS
 """
 
 
+import logging
 from collections import defaultdict, namedtuple
 from datetime import timedelta
-import logging
+
 from config_models.models import ConfigurationModel
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -13,9 +14,8 @@ from django.core.validators import validate_comma_separated_integer_list
 from django.db import models
 from django.db.models import Q
 from django.dispatch import receiver
-
 from django.utils.timezone import now
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from edx_django_utils.cache import RequestCache
 from opaque_keys.edx.django.models import CourseKeyField
 from simple_history.models import HistoricalRecords
@@ -35,6 +35,8 @@ Mode = namedtuple('Mode',
                       'expiration_datetime',
                       'description',
                       'sku',
+                      'android_sku',
+                      'ios_sku',
                       'bulk_sku',
                   ])
 
@@ -87,7 +89,14 @@ class CourseMode(models.Model):
     # The system prefers to set this automatically based on default settings. But
     # if the field is set manually we want a way to indicate that so we don't
     # overwrite the manual setting of the field.
-    expiration_datetime_is_explicit = models.BooleanField(default=False)
+    expiration_datetime_is_explicit = models.BooleanField(
+        default=False,
+        verbose_name=_("Lock upgrade deadline date"),
+        help_text=_(
+            "OPTIONAL: Set to True to lock in the explicitly defined upgrade deadline date. "
+            "Set to False if there is no upgrade deadline or to use the default upgrade deadline."
+        )
+    )
 
     # DEPRECATED: the `expiration_date` field has been replaced by `expiration_datetime`
     expiration_date = models.DateField(default=None, null=True, blank=True)
@@ -100,10 +109,10 @@ class CourseMode(models.Model):
 
     # optional description override
     # WARNING: will not be localized
-    description = models.TextField(null=True, blank=True)
+    description = models.TextField(null=True, blank=True)  # noqa: DJ001
 
     # Optional SKU for integration with the ecommerce service
-    sku = models.CharField(
+    sku = models.CharField(  # noqa: DJ001
         max_length=255,
         null=True,
         blank=True,
@@ -114,8 +123,32 @@ class CourseMode(models.Model):
         )
     )
 
+    # Optional Android SKU for integration with mobile and the ecommerce service
+    android_sku = models.CharField(  # noqa: DJ001
+        max_length=255,
+        null=True,
+        blank=True,
+        verbose_name="Android SKU",
+        help_text=_(
+            "OPTIONAL: This is the Android SKU registered on play store for this mode of the course. "
+            "Leave this blank if the course has not yet been migrated to the ecommerce service."
+        )
+    )
+
+    # Optional iOS SKU for integration with mobile and the ecommerce service
+    ios_sku = models.CharField(  # noqa: DJ001
+        max_length=255,
+        null=True,
+        blank=True,
+        verbose_name="iOS SKU",
+        help_text=_(
+            "OPTIONAL: This is the iOS SKU registered on app store for this mode of the course.  "
+            "Leave this blank if the course has not yet been migrated to the ecommerce service."
+        )
+    )
+
     # Optional bulk order SKU for integration with the ecommerce service
-    bulk_sku = models.CharField(
+    bulk_sku = models.CharField(  # noqa: DJ001
         max_length=255,
         null=True,
         blank=True,
@@ -136,6 +169,10 @@ class CourseMode(models.Model):
     CREDIT_MODE = 'credit'
     MASTERS = 'masters'
     EXECUTIVE_EDUCATION = 'executive-education'
+    PAID_EXECUTIVE_EDUCATION = 'paid-executive-education'
+    UNPAID_EXECUTIVE_EDUCATION = 'unpaid-executive-education'
+    PAID_BOOTCAMP = 'paid-bootcamp'
+    UNPAID_BOOTCAMP = 'unpaid-bootcamp'
 
     DEFAULT_MODE = Mode(
         settings.COURSE_MODE_DEFAULTS['slug'],
@@ -146,6 +183,8 @@ class CourseMode(models.Model):
         settings.COURSE_MODE_DEFAULTS['expiration_datetime'],
         settings.COURSE_MODE_DEFAULTS['description'],
         settings.COURSE_MODE_DEFAULTS['sku'],
+        settings.COURSE_MODE_DEFAULTS['android_sku'],
+        settings.COURSE_MODE_DEFAULTS['ios_sku'],
         settings.COURSE_MODE_DEFAULTS['bulk_sku'],
     )
     DEFAULT_MODE_SLUG = settings.COURSE_MODE_DEFAULTS['slug']
@@ -158,14 +197,20 @@ class CourseMode(models.Model):
         PROFESSIONAL,
         VERIFIED,
         MASTERS,
-        EXECUTIVE_EDUCATION
+        EXECUTIVE_EDUCATION,
+        PAID_EXECUTIVE_EDUCATION,
+        UNPAID_EXECUTIVE_EDUCATION,
+        PAID_BOOTCAMP,
+        UNPAID_BOOTCAMP
     ]
 
     # Modes utilized for audit/free enrollments
-    AUDIT_MODES = [AUDIT, HONOR]
+    AUDIT_MODES = [AUDIT, HONOR, UNPAID_EXECUTIVE_EDUCATION, UNPAID_BOOTCAMP]
 
     # Modes that allow a student to pursue a verified certificate
-    VERIFIED_MODES = [VERIFIED, PROFESSIONAL, MASTERS, EXECUTIVE_EDUCATION]
+    VERIFIED_MODES = [
+        VERIFIED, PROFESSIONAL, MASTERS, EXECUTIVE_EDUCATION, PAID_EXECUTIVE_EDUCATION, PAID_BOOTCAMP
+    ]
 
     # Modes that allow a student to pursue a non-verified certificate
     NON_VERIFIED_MODES = [HONOR, AUDIT, NO_ID_PROFESSIONAL_MODE]
@@ -174,7 +219,10 @@ class CourseMode(models.Model):
     CREDIT_MODES = [CREDIT_MODE]
 
     # Modes that are eligible to purchase credit
-    CREDIT_ELIGIBLE_MODES = [VERIFIED, PROFESSIONAL, NO_ID_PROFESSIONAL_MODE, EXECUTIVE_EDUCATION]
+    CREDIT_ELIGIBLE_MODES = [
+        VERIFIED, PROFESSIONAL, NO_ID_PROFESSIONAL_MODE, EXECUTIVE_EDUCATION, PAID_EXECUTIVE_EDUCATION,
+        PAID_BOOTCAMP
+    ]
 
     # Modes for which certificates/programs may need to be updated
     CERTIFICATE_RELEVANT_MODES = CREDIT_MODES + CREDIT_ELIGIBLE_MODES + [MASTERS]
@@ -188,7 +236,7 @@ class CourseMode(models.Model):
         app_label = "course_modes"
         unique_together = ('course', 'mode_slug', 'currency')
 
-    def __init__(self, *args, **kwargs):  # lint-amnesty, pylint: disable=useless-super-delegation
+    def __init__(self, *args, **kwargs):  # pylint: disable=useless-super-delegation
         super().__init__(*args, **kwargs)
 
     def clean(self):
@@ -206,21 +254,21 @@ class CourseMode(models.Model):
         if int(self.min_price) < min_price_for_mode:
             mode_display_name = mode_config.get('display_name', self.mode_slug)
             raise ValidationError(
-                _(  # lint-amnesty, pylint: disable=translation-of-non-string
-                    "The {course_mode} course mode has a minimum price of {min_price}. You must set a price greater than or equal to {min_price}.".format(  # lint-amnesty, pylint: disable=line-too-long
+                _(  # pylint: disable=translation-of-non-string
+                    "The {course_mode} course mode has a minimum price of {min_price}. You must set a price greater than or equal to {min_price}.".format(  # pylint: disable=line-too-long
                         course_mode=mode_display_name, min_price=min_price_for_mode
                     )
                 )
             )
 
-    def save(self, force_insert=False, force_update=False, using=None):  # lint-amnesty, pylint: disable=arguments-differ
+    def save(self, force_insert=False, force_update=False, using=None):  # pylint: disable=arguments-differ  # noqa: DJ012
         # Ensure currency is always lowercase.
         self.clean()  # ensure object-level validation is performed before we save.
         self.currency = self.currency.lower()
         if self.id is None:
             # If this model has no primary key at save time, it needs to be force-inserted.
             force_insert = True
-        super().save(force_insert, force_update, using)
+        super().save(force_insert=force_insert, force_update=force_update, using=using)
 
     @property
     def slug(self):
@@ -761,7 +809,10 @@ class CourseMode(models.Model):
         If there is no mode found, will return the price of DEFAULT_MODE, which is 0
         """
         modes = cls.modes_for_course(course_id)
-        return min(mode.min_price for mode in modes if mode.currency.lower() == currency.lower())
+        return min(
+            (mode.min_price for mode in modes if mode.currency.lower() == currency.lower()),
+            default=0
+        )
 
     @classmethod
     def is_eligible_for_certificate(cls, mode_slug, status=None):
@@ -775,7 +826,7 @@ class CourseMode(models.Model):
         """
         ineligible_modes = [cls.AUDIT]
 
-        if settings.FEATURES.get('DISABLE_HONOR_CERTIFICATES', False):
+        if getattr(settings, 'DISABLE_HONOR_CERTIFICATES', False):
             # Adding check so that we can regenerate the certificate for learners who have
             # already earned the certificate using honor mode
             from lms.djangoapps.certificates.data import CertificateStatuses
@@ -801,11 +852,13 @@ class CourseMode(models.Model):
             self.expiration_datetime,
             self.description,
             self.sku,
+            self.android_sku,
+            self.ios_sku,
             self.bulk_sku
         )
 
-    def __str__(self):
-        return "{} : {}, min={}".format(
+    def __str__(self):  # noqa: DJ012
+        return "{} : {}, min={}".format(  # noqa: UP032
             self.course_id, self.mode_slug, self.min_price
         )
 
@@ -877,7 +930,7 @@ def format_course_price(price):
     return cosmetic_display_price
 
 
-class CourseModesArchive(models.Model):
+class CourseModesArchive(models.Model):  # noqa: DJ008
     """
     Store the past values of course_mode that a course had in the past. We decided on having
     separate model, because there is a uniqueness contraint on (course_mode, course_id)
@@ -890,11 +943,11 @@ class CourseModesArchive(models.Model):
         app_label = "course_modes"
 
     # the course that this mode is attached to
-    course_id = CourseKeyField(max_length=255, db_index=True)
+    course_id = CourseKeyField(db_index=True)
 
     # the reference to this mode that can be used by Enrollments to generate
     # similar behavior for the same slug across courses
-    mode_slug = models.CharField(max_length=100)
+    mode_slug = models.CharField(max_length=100)  # noqa: DJ012
 
     # The 'pretty' name that can be translated and displayed
     mode_display_name = models.CharField(max_length=255)

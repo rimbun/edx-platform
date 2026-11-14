@@ -100,6 +100,8 @@ class Course:
             merged_mode.currency = posted_mode.currency
             merged_mode.sku = posted_mode.sku
             merged_mode.bulk_sku = posted_mode.bulk_sku
+            merged_mode.android_sku = posted_mode.android_sku
+            merged_mode.ios_sku = posted_mode.ios_sku
             merged_mode.expiration_datetime = posted_mode.expiration_datetime
             merged_mode.save()
 
@@ -129,7 +131,7 @@ class Course:
             course_id = CourseKey.from_string(str(course_id))
         except InvalidKeyError:
             log.debug('[%s] is not a valid course key.', course_id)
-            raise ValueError  # lint-amnesty, pylint: disable=raise-missing-from
+            raise ValueError  # pylint: disable=raise-missing-from  # noqa: B904
 
         course_modes = CourseMode.objects.filter(course_id=course_id)
 

@@ -1,18 +1,35 @@
 """
 Emits course grade events.
 """
-from crum import get_current_user
-from eventtracking import tracker
+from logging import getLogger
 
-from common.djangoapps.track import contexts
+from crum import get_current_user
+from django.conf import settings
+from eventtracking import tracker
+from openedx_events.learning.data import (
+    CcxCourseData,
+    CcxCoursePassingStatusData,
+    CourseData,
+    CoursePassingStatusData,
+    UserData,
+    UserPersonalData,
+)
+from openedx_events.learning.signals import CCX_COURSE_PASSING_STATUS_UPDATED, COURSE_PASSING_STATUS_UPDATED
+from openedx_filters.learning.filters import GradeEventContextRequested
+
+from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.track import contexts, segment
 from common.djangoapps.track.event_transaction_utils import (
     create_new_event_transaction_id,
     get_event_transaction_id,
     get_event_transaction_type,
-    set_event_transaction_type
+    set_event_transaction_type,
 )
+from lms.djangoapps.grades.signals.signals import SCHEDULE_FOLLOW_UP_SEGMENT_EVENT_FOR_COURSE_PASSED_FIRST_TIME
+from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 
-from openedx.features.enterprise_support.context import get_enterprise_event_context
+log = getLogger(__name__)
 
 COURSE_GRADE_CALCULATED = 'edx.grades.course.grade_calculated'
 GRADES_OVERRIDE_EVENT_TYPE = 'edx.grades.problem.score_overridden'
@@ -149,10 +166,25 @@ def course_grade_passed_first_time(user_id, course_id):
     """
     event_name = COURSE_GRADE_PASSED_FIRST_TIME_EVENT_TYPE
     context = contexts.course_context_from_course_id(course_id)
-    context_enterprise = get_enterprise_event_context(user_id, course_id)
-    context.update(context_enterprise)
+    try:
+        filtered_context, _, _ = GradeEventContextRequested.run_filter(
+            context=context, user_id=user_id, course_id=course_id
+        )
+    except Exception:  # pylint: disable=broad-except
+        log.exception(
+            'GradeEventContextRequested failed for user_id=%s course_id=%s',
+            user_id,
+            course_id,
+        )
+        raise
+    log.debug(
+        'GradeEventContextRequested succeeded for user_id=%s course_id=%s',
+        user_id,
+        course_id,
+    )
+
     # TODO (AN-6134): remove this context manager
-    with tracker.get_tracker().context(event_name, context):
+    with tracker.get_tracker().context(event_name, filtered_context):
         tracker.emit(
             event_name,
             {
@@ -166,8 +198,8 @@ def course_grade_passed_first_time(user_id, course_id):
 
 def course_grade_now_passed(user, course_id):
     """
-    Emits an edx.course.grade.now_passed event
-    with data from the course and user passed now .
+    Emits an edx.course.grade.now_passed and passing status updated events
+    with data from the course and user passed now.
     """
     event_name = COURSE_GRADE_NOW_PASSED_EVENT_TYPE
     context = contexts.course_context_from_course_id(course_id)
@@ -182,11 +214,13 @@ def course_grade_now_passed(user, course_id):
             }
         )
 
+    _emit_course_passing_status_update(user, course_id, is_passing=True)
+
 
 def course_grade_now_failed(user, course_id):
     """
-    Emits an edx.course.grade.now_failed event
-    with data from the course and user failed now .
+    Emits an edx.course.grade.now_failed and passing status updated events
+    with data from the course and user failed now.
     """
     event_name = COURSE_GRADE_NOW_FAILED_EVENT_TYPE
     context = contexts.course_context_from_course_id(course_id)
@@ -199,4 +233,104 @@ def course_grade_now_failed(user, course_id):
                 'event_transaction_id': str(get_event_transaction_id()),
                 'event_transaction_type': str(get_event_transaction_type())
             }
+        )
+
+    _emit_course_passing_status_update(user, course_id, is_passing=False)
+
+
+def fire_segment_event_on_course_grade_passed_first_time(user_id, course_locator):
+    """
+    Fire a segment event `edx.course.grade.passed.first_time` with the desired data.
+
+    * Event should be only fired for learners enrolled in paid enrollment modes.
+    """
+    event_name = 'edx.course.learner.passed.first_time'
+    courserun_key = str(course_locator)
+    courserun_org = course_locator.org
+    paid_enrollment_modes = (
+        CourseMode.MASTERS,
+        CourseMode.VERIFIED,
+        CourseMode.CREDIT_MODE,
+        CourseMode.PROFESSIONAL,
+        CourseMode.NO_ID_PROFESSIONAL_MODE,
+    )
+
+    try:
+        enrollment = CourseEnrollment.objects.get(
+            user_id=user_id,
+            course_id=courserun_key,
+            mode__in=paid_enrollment_modes
+        )
+    except CourseEnrollment.DoesNotExist:
+        return
+
+    try:
+        courserun_display_name = CourseOverview.objects.values_list('display_name', flat=True).get(id=courserun_key)
+    except CourseOverview.DoesNotExist:
+        return
+
+    event_properties = {
+        'LMS_ENROLLMENT_ID': enrollment.id,
+        'COURSE_TITLE': courserun_display_name,
+        'COURSE_ORG_NAME': courserun_org,
+    }
+    if getattr(settings, 'OUTCOME_SURVEYS_EVENTS_ENABLED', False):
+        segment.track(user_id, event_name, event_properties)
+
+        # fire signal so that a follow up event can be scheduled in outcome_surveys app
+        SCHEDULE_FOLLOW_UP_SEGMENT_EVENT_FOR_COURSE_PASSED_FIRST_TIME.send(
+            sender=None,
+            user_id=user_id,
+            course_id=course_locator,
+            event_properties=event_properties
+        )
+
+    log.info("Segment event fired for passed learners. Event: [{}], Data: [{}]".format(event_name, event_properties))  # noqa: UP032  # pylint: disable=line-too-long
+
+
+def _emit_course_passing_status_update(user, course_id, is_passing):
+    """
+    Emit course passing status event according to the course type.
+    The status of event is determined by is_passing parameter.
+    """
+    if hasattr(course_id, 'ccx'):
+        # .. event_implemented_name: CCX_COURSE_PASSING_STATUS_UPDATED
+        # .. event_type: org.openedx.learning.ccx.course.passing.status.updated.v1
+        CCX_COURSE_PASSING_STATUS_UPDATED.send_event(
+            course_passing_status=CcxCoursePassingStatusData(
+                is_passing=is_passing,
+                user=UserData(
+                    pii=UserPersonalData(
+                        username=user.username,
+                        email=user.email,
+                        name=user.get_full_name() or user.profile.name,
+                    ),
+                    id=user.id,
+                    is_active=user.is_active,
+                ),
+                course=CcxCourseData(
+                    ccx_course_key=course_id,
+                    master_course_key=course_id.to_course_locator(),
+                ),
+            )
+        )
+    else:
+        # .. event_implemented_name: COURSE_PASSING_STATUS_UPDATED
+        # .. event_type: org.openedx.learning.course.passing.status.updated.v1
+        COURSE_PASSING_STATUS_UPDATED.send_event(
+            course_passing_status=CoursePassingStatusData(
+                is_passing=is_passing,
+                user=UserData(
+                    pii=UserPersonalData(
+                        username=user.username,
+                        email=user.email,
+                        name=user.get_full_name() or user.profile.name,
+                    ),
+                    id=user.id,
+                    is_active=user.is_active,
+                ),
+                course=CourseData(
+                    course_key=course_id,
+                ),
+            )
         )

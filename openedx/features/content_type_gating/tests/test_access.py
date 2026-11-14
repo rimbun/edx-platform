@@ -1,35 +1,41 @@
 """
 Test audit user's access to various content based on content-gating features.
 """
-import os
 from datetime import datetime, timedelta
+from unittest.mock import Mock, patch
 
 import ddt
 from django.conf import settings
-from django.test.client import RequestFactory, Client
+from django.contrib.auth import get_user_model
+from django.test.client import Client, RequestFactory
 from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
-from django.contrib.auth.models import User
-from unittest.mock import patch, Mock
 from pyquery import PyQuery as pq
 
-from lms.djangoapps.course_api.blocks.api import get_blocks
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
-from common.djangoapps.student.tests.factories import BetaTesterFactory
-from common.djangoapps.student.tests.factories import GlobalStaffFactory
-from common.djangoapps.student.tests.factories import InstructorFactory
-from common.djangoapps.student.tests.factories import OrgInstructorFactory
-from common.djangoapps.student.tests.factories import OrgStaffFactory
-from common.djangoapps.student.tests.factories import StaffFactory
-from lms.djangoapps.courseware.module_render import load_single_xblock
+from common.djangoapps.student.models import CourseEnrollment, FBEEnrollmentExclusion
+from common.djangoapps.student.roles import CourseInstructorRole
+from common.djangoapps.student.tests.factories import (
+    TEST_PASSWORD,
+    BetaTesterFactory,
+    CourseEnrollmentFactory,
+    GlobalStaffFactory,
+    InstructorFactory,
+    OrgInstructorFactory,
+    OrgStaffFactory,
+    StaffFactory,
+    UserFactory,
+)
+from lms.djangoapps.course_api.blocks.api import get_blocks
+from lms.djangoapps.courseware.block_render import load_single_xblock
 from lms.djangoapps.courseware.tests.helpers import MasqueradeMixin
 from lms.djangoapps.discussion.django_comment_client.tests.factories import RoleFactory
 from openedx.core.djangoapps.django_comment_common.models import (
     FORUM_ROLE_ADMINISTRATOR,
     FORUM_ROLE_COMMUNITY_TA,
     FORUM_ROLE_GROUP_MODERATOR,
-    FORUM_ROLE_MODERATOR
+    FORUM_ROLE_MODERATOR,
 )
 from openedx.core.djangoapps.user_api.tests.factories import UserCourseTagFactory
 from openedx.core.djangoapps.util.testing import TestConditionalContent
@@ -39,11 +45,12 @@ from openedx.features.content_type_gating.helpers import CONTENT_GATING_PARTITIO
 from openedx.features.content_type_gating.models import ContentTypeGatingConfig
 from openedx.features.content_type_gating.partitions import ContentTypeGatingPartition
 from openedx.features.content_type_gating.services import ContentTypeGatingService
-from common.djangoapps.student.models import CourseEnrollment, FBEEnrollmentExclusion
-from common.djangoapps.student.roles import CourseInstructorRole
-from common.djangoapps.student.tests.factories import TEST_PASSWORD, CourseEnrollmentFactory, UserFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import (
+    TEST_DATA_SPLIT_MODULESTORE,
+    ModuleStoreTestCase,
+    SharedModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.partitions.partitions import ENROLLMENT_TRACK_PARTITION_ID
 
 METADATA = {
@@ -51,14 +58,15 @@ METADATA = {
         CONTENT_GATING_PARTITION_ID: [CONTENT_TYPE_GATE_GROUP_IDS['full_access']]
     }
 }
+User = get_user_model()
 
 
 @patch("crum.get_current_request")
-def _get_content_from_fragment(block, user_id, course, request_factory, mock_get_current_request):
+def _get_content_from_fragment(_store, block, user_id, course, request_factory, mock_get_current_request):
     """
     Returns the content from the rendered fragment of a block
     Arguments:
-        block: some sort of xblock descriptor, must implement .scope_ids.usage_id
+        block: some sort of XBlock, must implement .scope_ids.usage_id
         user_id (int): id of user
         course_id (CourseLocator): id of course
     """
@@ -79,33 +87,34 @@ def _get_content_from_fragment(block, user_id, course, request_factory, mock_get
     return frag.content
 
 
-def _get_content_from_lms_index(block, user_id, course, request_factory):
+def _get_content_from_lms_index(store, block, user_id, _course, _request_factory):
     """
     Returns the content from the lms index view of the block
     Arguments:
-        block: some sort of xblock descriptor, must implement .scope_ids.usage_id
+        block: some sort of XBlock, must implement .scope_ids.usage_id
         user_id (int): id of user
-        course_id (CourseLocator): id of course
     """
     client = Client()
     client.login(username=User.objects.get(id=user_id).username, password=TEST_PASSWORD)
+
+    # Re-load the block from the store to ensure that its `parent` field is filled out correctly
+    block = store.get_item(block.location)
+
     page_content = client.get(
-        reverse('courseware', kwargs={'course_id': block.scope_ids.usage_id.course_key}),
+        reverse('render_xblock', args=[str(block.parent)]) + '?recheck_access=1',
         follow=True,
     )
-    page = pq(page_content.content)
-    seq_contents = page('#seq_contents_0').html()
-    seq = pq(seq_contents)
-    block_contents = seq(f'[data-id="{block.scope_ids.usage_id}"]')
 
+    page = pq(page_content.content)
+    block_contents = page(f'[data-id="{block.scope_ids.usage_id}"]')
     return block_contents.html()
 
 
-def _assert_block_is_gated(block, is_gated, user, course, request_factory, has_upgrade_link=True):
+def _assert_block_is_gated(store, block, is_gated, user, course, request_factory, has_upgrade_link=True):
     """
     Asserts that a block in a specific course is gated for a specific user
     Arguments:
-        block: some sort of xblock descriptor, must implement .scope_ids.usage_id
+        block: some sort of XBlock, must implement .scope_ids.usage_id
         is_gated (bool): if True, this user is expected to be gated from this block
         user (int): user
         course_id (CourseLocator): id of course
@@ -113,7 +122,7 @@ def _assert_block_is_gated(block, is_gated, user, course, request_factory, has_u
     checkout_link = '#' if has_upgrade_link else None
     for content_getter in (_get_content_from_fragment, _get_content_from_lms_index):
         with patch.object(ContentTypeGatingPartition, '_get_checkout_link', return_value=checkout_link):
-            content = content_getter(block, user.id, course, request_factory)
+            content = content_getter(store, block, user.id, course, request_factory)  # pylint: disable=no-value-for-parameter
         if is_gated:
             assert 'content-paywall' in content
             if has_upgrade_link:
@@ -143,16 +152,16 @@ def _assert_block_is_gated(block, is_gated, user, course, request_factory, has_u
             assert 'student_view_data' in course_api_block
 
 
-def _assert_block_is_empty(block, user_id, course, request_factory):
+def _assert_block_is_empty(store, block, user_id, course, request_factory):
     """
     Asserts that a block in a specific course is empty for a specific user
     Arguments:
-        block: some sort of xblock descriptor, must implement .scope_ids.usage_id
+        block: some sort of XBlock, must implement .scope_ids.usage_id
         is_gated (bool): if True, this user is expected to be gated from this block
         user_id (int): id of user
         course_id (CourseLocator): id of course
     """
-    content = _get_content_from_lms_index(block, user_id, course, request_factory)
+    content = _get_content_from_lms_index(store, block, user_id, course, request_factory)
     assert content is None
 
 
@@ -160,7 +169,7 @@ def _assert_block_is_empty(block, user_id, course, request_factory):
 @override_settings(FIELD_OVERRIDE_PROVIDERS=(
     'openedx.features.content_type_gating.field_override.ContentTypeGatingFieldOverride',
 ))
-class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
+class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):  # pylint: disable=missing-class-docstring
 
     PROBLEM_TYPES = ['problem', 'openassessment', 'drag-and-drop-v2', 'done', 'edx_sga']
     # 'html' is a component that just displays html, in these tests it is used to test that users who do not have access
@@ -202,31 +211,32 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         # Create components with the cartesian product of possible values of
         # graded/has_score/weight for the test_graded_score_weight_values test.
         cls.graded_score_weight_blocks = {}
-        for graded, has_score, weight, gated in cls.GRADED_SCORE_WEIGHT_TEST_CASES:
-            case_name = ' Graded: ' + str(graded) + ' Has Score: ' + str(has_score) + ' Weight: ' + str(weight)
-            block = ItemFactory.create(
-                parent=cls.blocks_dict['vertical'],
+        for graded, has_score, weight, gated in cls.GRADED_SCORE_WEIGHT_TEST_CASES:  # noqa: B007
+            case_name = ' Graded: ' + str(graded) + ' Has Score: ' + str(has_score) + ' Weight: ' + str(weight)  # noqa: F841  # pylint: disable=line-too-long
+            block_args = {
+                'parent': cls.blocks_dict['vertical'],
                 # has_score is determined by XBlock type. It is not a value set on an instance of an XBlock.
                 # Therefore, we create a problem component when has_score is True
                 # and an html component when has_score is False.
-                category='problem' if has_score else 'html',
-                graded=graded,
-                weight=weight,
-                metadata=METADATA if (graded and has_score and weight) else {},
-            )
+                'category': 'problem' if has_score else 'html',
+                'graded': graded,
+            }
+            if has_score:
+                block_args['weight'] = weight
+            if graded and has_score and weight:
+                block_args['metadata'] = METADATA
+            block = BlockFactory.create(**block_args)
             # Intersperse HTML so that the content-gating renders in all blocks
-            ItemFactory.create(
+            BlockFactory.create(
                 parent=cls.blocks_dict['vertical'],
                 category='html',
                 graded=False,
             )
             cls.graded_score_weight_blocks[(graded, has_score, weight)] = block
-
-        host = os.environ.get('BOK_CHOY_HOSTNAME', '127.0.0.1')
+        host = '127.0.0.1'
         metadata_lti_xblock = {
             'lti_id': 'correct_lti_id',
             'launch_url': 'http://{}:{}/{}'.format(host, '8765', 'correct_lti_endpoint'),
-            'open_in_a_new_page': False
         }
 
         scored_lti_metadata = {}
@@ -234,7 +244,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         scored_lti_metadata.update(METADATA)
 
         # add LTI blocks to default course
-        cls.blocks_dict['lti_block'] = ItemFactory.create(
+        cls.blocks_dict['lti_block'] = BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='lti_consumer',
             has_score=True,
@@ -242,12 +252,12 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
             metadata=scored_lti_metadata,
         )
         # Intersperse HTML so that the content-gating renders in all blocks
-        ItemFactory.create(
+        BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='html',
             graded=False,
         )
-        cls.blocks_dict['lti_block_not_scored'] = ItemFactory.create(
+        cls.blocks_dict['lti_block_not_scored'] = BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='lti_consumer',
             has_score=False,
@@ -255,14 +265,14 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         )
 
         # Intersperse HTML so that the content-gating renders in all blocks
-        ItemFactory.create(
+        BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='html',
             graded=False,
         )
 
         # add ungraded problem for xblock_handler test
-        cls.blocks_dict['graded_problem'] = ItemFactory.create(
+        cls.blocks_dict['graded_problem'] = BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='problem',
             graded=True,
@@ -270,26 +280,26 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         )
 
         # Intersperse HTML so that the content-gating renders in all blocks
-        ItemFactory.create(
+        BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='html',
             graded=False,
         )
 
-        cls.blocks_dict['ungraded_problem'] = ItemFactory.create(
+        cls.blocks_dict['ungraded_problem'] = BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='problem',
             graded=False,
         )
 
         # Intersperse HTML so that the content-gating renders in all blocks
-        ItemFactory.create(
+        BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='html',
             graded=False,
         )
 
-        cls.blocks_dict['audit_visible_graded_problem'] = ItemFactory.create(
+        cls.blocks_dict['audit_visible_graded_problem'] = BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='problem',
             graded=True,
@@ -302,7 +312,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         )
 
         # Intersperse HTML so that the content-gating renders in all blocks
-        ItemFactory.create(
+        BlockFactory.create(
             parent=cls.blocks_dict['vertical'],
             category='html',
             graded=False,
@@ -403,28 +413,28 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
 
         with cls.store.bulk_operations(course.id):
             blocks_dict = {}
-            chapter = ItemFactory.create(
+            chapter = BlockFactory.create(
                 parent=course,
                 display_name='Overview',
             )
-            blocks_dict['chapter'] = ItemFactory.create(
+            blocks_dict['chapter'] = BlockFactory.create(
                 parent=course,
                 category='chapter',
                 display_name='Week 1',
             )
-            blocks_dict['sequential'] = ItemFactory.create(
+            blocks_dict['sequential'] = BlockFactory.create(
                 parent=chapter,
                 category='sequential',
                 display_name='Lesson 1',
             )
-            blocks_dict['vertical'] = ItemFactory.create(
+            blocks_dict['vertical'] = BlockFactory.create(
                 parent=blocks_dict['sequential'],
                 category='vertical',
                 display_name='Lesson 1 Vertical - Unit 1',
             )
 
             for component_type in component_types:
-                block = ItemFactory.create(
+                block = BlockFactory.create(
                     parent=blocks_dict['vertical'],
                     category=component_type,
                     graded=True,
@@ -432,7 +442,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
                 )
                 blocks_dict[component_type] = block
                 # Intersperse HTML so that the content-gating renders in all blocks
-                ItemFactory.create(
+                BlockFactory.create(
                     parent=blocks_dict['vertical'],
                     category='html',
                     graded=False,
@@ -457,6 +467,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
     @ddt.unpack
     def test_access_to_problems(self, prob_type, is_gated):
         _assert_block_is_gated(
+            self.store,
             block=self.blocks_dict[prob_type],
             user=self.users['audit'],
             course=self.course,
@@ -464,6 +475,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
             request_factory=self.factory,
         )
         _assert_block_is_gated(
+            self.store,
             block=self.blocks_dict[prob_type],
             user=self.users['verified'],
             course=self.course,
@@ -479,6 +491,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         # Verify that graded, has_score and weight must all be true for a component to be gated
         block = self.graded_score_weight_blocks[(graded, has_score, weight)]
         _assert_block_is_gated(
+            self.store,
             block=block,
             user=self.audit_user,
             course=self.course,
@@ -514,6 +527,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
          All users should have access to non-problem component types, the 'html' components test that.
          """
         _assert_block_is_gated(
+            self.store,
             block=self.courses[course]['blocks'][component_type],
             user=self.users[user_track],
             course=self.courses[course]['course'],
@@ -527,6 +541,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         the user will continue to see gated content, but the upgrade messaging will be removed.
         """
         _assert_block_is_gated(
+            self.store,
             block=self.courses['expired_upgrade_deadline']['blocks']['problem'],
             user=self.users['audit'],
             course=self.courses['expired_upgrade_deadline']['course'],
@@ -591,6 +606,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
 
         # assert that course team members have access to graded content
         _assert_block_is_gated(
+            self.store,
             block=self.blocks_dict['problem'],
             user=user,
             course=self.course,
@@ -618,6 +634,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
             mode='audit',
         )
         _assert_block_is_gated(
+            self.store,
             block=self.blocks_dict['problem'],
             user=user,
             course=self.course,
@@ -642,6 +659,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         graded, has_score, weight = True, True, 1
         block = self.graded_score_weight_blocks[(graded, has_score, weight)]
         _assert_block_is_gated(
+            self.store,
             block=block,
             user=user,
             course=self.course,
@@ -750,6 +768,7 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
         self.update_masquerade(username=user.username)
 
         _assert_block_is_gated(
+            self.store,
             block=self.blocks_dict['problem'],
             user=user,
             course=self.course,
@@ -764,12 +783,8 @@ class TestProblemTypeAccess(SharedModuleStoreTestCase, MasqueradeMixin):
     def test_discount_display(self):
 
         with patch.object(ContentTypeGatingPartition, '_get_checkout_link', return_value='#'):
-            block_content = _get_content_from_lms_index(
-                block=self.blocks_dict['problem'],
-                user_id=self.audit_user.id,
-                course=self.course,
-                request_factory=self.factory,
-            )
+            block_content = _get_content_from_lms_index(self.store, self.blocks_dict['problem'], self.audit_user.id,
+                                                        self.course, self.factory)
 
         assert '<span>DISCOUNT_PRICE</span>' in block_content
 
@@ -800,9 +815,13 @@ class TestConditionalContentAccess(TestConditionalContent):
         self.student_audit_b = self.student_b
 
         # Create verified students
-        self.student_verified_a = UserFactory.create(username='student_verified_a', email='student_verified_a@example.com')
+        self.student_verified_a = UserFactory.create(
+            username='student_verified_a', email='student_verified_a@example.com'
+        )
         CourseEnrollmentFactory.create(user=self.student_verified_a, course_id=self.course.id, mode='verified')
-        self.student_verified_b = UserFactory.create(username='student_verified_b', email='student_verified_b@example.com')
+        self.student_verified_b = UserFactory.create(
+            username='student_verified_b', email='student_verified_b@example.com'
+        )
         CourseEnrollmentFactory.create(user=self.student_verified_b, course_id=self.course.id, mode='verified')
 
         # Put students into content gating groups
@@ -819,12 +838,12 @@ class TestConditionalContentAccess(TestConditionalContent):
             value='1',
         )
         # Create blocks to go into the verticals
-        self.block_a = ItemFactory.create(
+        self.block_a = BlockFactory.create(
             category='problem',
             parent=self.vertical_a,
             metadata=METADATA,
         )
-        self.block_b = ItemFactory.create(
+        self.block_b = BlockFactory.create(
             category='problem',
             parent=self.vertical_b,
             metadata=METADATA,
@@ -832,12 +851,14 @@ class TestConditionalContentAccess(TestConditionalContent):
 
     def test_access_based_on_conditional_content(self):
         """
-        If a user is enrolled as an audit user they should not have access to graded problems, including conditional content.
+        If a user is enrolled as an audit user they should not have access to graded problems,
+        including conditional content.
         All paid type tracks should have access graded problems including conditional content.
         """
 
         # Make sure that all audit enrollments are gated regardless of if they see vertical a or vertical b
         _assert_block_is_gated(
+            self.store,
             block=self.block_a,
             user=self.student_audit_a,
             course=self.course,
@@ -845,6 +866,7 @@ class TestConditionalContentAccess(TestConditionalContent):
             request_factory=self.factory,
         )
         _assert_block_is_gated(
+            self.store,
             block=self.block_b,
             user=self.student_audit_b,
             course=self.course,
@@ -854,6 +876,7 @@ class TestConditionalContentAccess(TestConditionalContent):
 
         # Make sure that all verified enrollments are not gated regardless of if they see vertical a or vertical b
         _assert_block_is_gated(
+            self.store,
             block=self.block_a,
             user=self.student_verified_a,
             course=self.course,
@@ -861,6 +884,7 @@ class TestConditionalContentAccess(TestConditionalContent):
             request_factory=self.factory,
         )
         _assert_block_is_gated(
+            self.store,
             block=self.block_b,
             user=self.student_verified_b,
             course=self.course,
@@ -892,23 +916,23 @@ class TestMessageDeduplication(ModuleStoreTestCase):
         self.request_factory = RequestFactory()
         ContentTypeGatingConfig.objects.create(enabled=True, enabled_as_of=datetime(2018, 1, 1))
 
-    def _create_course(self):
+    def _create_course(self):  # pylint: disable=missing-function-docstring
         course = CourseFactory.create(run='test', display_name='test')
         CourseModeFactory.create(course_id=course.id, mode_slug='audit')
         CourseModeFactory.create(course_id=course.id, mode_slug='verified')
         blocks_dict = {}
         with self.store.bulk_operations(course.id):
-            blocks_dict['chapter'] = ItemFactory.create(
+            blocks_dict['chapter'] = BlockFactory.create(
                 parent=course,
                 category='chapter',
                 display_name='Week 1'
             )
-            blocks_dict['sequential'] = ItemFactory.create(
+            blocks_dict['sequential'] = BlockFactory.create(
                 parent=blocks_dict['chapter'],
                 category='sequential',
                 display_name='Lesson 1'
             )
-            blocks_dict['vertical'] = ItemFactory.create(
+            blocks_dict['vertical'] = BlockFactory.create(
                 parent=blocks_dict['sequential'],
                 category='vertical',
                 display_name='Lesson 1 Vertical - Unit 1'
@@ -927,13 +951,14 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             course_id=course['course'].id,
             mode='audit'
         )
-        blocks_dict['graded_1'] = ItemFactory.create(
-            parent=blocks_dict['vertical'],
+        blocks_dict['graded_1'] = BlockFactory.create(
+            parent_location=blocks_dict['vertical'].location,
             category='problem',
             graded=True,
             metadata=METADATA,
         )
         _assert_block_is_gated(
+            self.store,
             block=blocks_dict['graded_1'],
             user=self.user,
             course=course['course'],
@@ -945,13 +970,13 @@ class TestMessageDeduplication(ModuleStoreTestCase):
         ''' First graded problem should show message, second shouldn't '''
         course = self._create_course()
         blocks_dict = course['blocks']
-        blocks_dict['graded_1'] = ItemFactory.create(
+        blocks_dict['graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
-        blocks_dict['graded_2'] = ItemFactory.create(
+        blocks_dict['graded_2'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
@@ -963,6 +988,7 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             mode='audit'
         )
         _assert_block_is_gated(
+            self.store,
             block=blocks_dict['graded_1'],
             user=self.user,
             course=course['course'],
@@ -970,6 +996,7 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             request_factory=self.request_factory,
         )
         _assert_block_is_empty(
+            self.store,
             block=blocks_dict['graded_2'],
             user_id=self.user.id,
             course=course['course'],
@@ -980,25 +1007,25 @@ class TestMessageDeduplication(ModuleStoreTestCase):
         ''' First graded problem should show message, all that follow shouldn't '''
         course = self._create_course()
         blocks_dict = course['blocks']
-        blocks_dict['graded_1'] = ItemFactory.create(
+        blocks_dict['graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
-        blocks_dict['graded_2'] = ItemFactory.create(
+        blocks_dict['graded_2'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
-        blocks_dict['graded_3'] = ItemFactory.create(
+        blocks_dict['graded_3'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
-        blocks_dict['graded_4'] = ItemFactory.create(
+        blocks_dict['graded_4'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
@@ -1010,6 +1037,7 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             mode='audit'
         )
         _assert_block_is_gated(
+            self.store,
             block=blocks_dict['graded_1'],
             user=self.user,
             course=course['course'],
@@ -1017,18 +1045,21 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             request_factory=self.request_factory,
         )
         _assert_block_is_empty(
+            self.store,
             block=blocks_dict['graded_2'],
             user_id=self.user.id,
             course=course['course'],
             request_factory=self.request_factory,
         )
         _assert_block_is_empty(
+            self.store,
             block=blocks_dict['graded_3'],
             user_id=self.user.id,
             course=course['course'],
             request_factory=self.request_factory,
         )
         _assert_block_is_empty(
+            self.store,
             block=blocks_dict['graded_4'],
             user_id=self.user.id,
             course=course['course'],
@@ -1039,18 +1070,18 @@ class TestMessageDeduplication(ModuleStoreTestCase):
         ''' Multiple graded content with ungraded between it should show message on either end '''
         course = self._create_course()
         blocks_dict = course['blocks']
-        blocks_dict['graded_1'] = ItemFactory.create(
+        blocks_dict['graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
-        blocks_dict['ungraded_2'] = ItemFactory.create(
+        blocks_dict['ungraded_2'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=False,
         )
-        blocks_dict['graded_3'] = ItemFactory.create(
+        blocks_dict['graded_3'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
@@ -1062,6 +1093,7 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             mode='audit'
         )
         _assert_block_is_gated(
+            self.store,
             block=blocks_dict['graded_1'],
             user=self.user,
             course=course['course'],
@@ -1069,6 +1101,7 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             request_factory=self.request_factory,
         )
         _assert_block_is_gated(
+            self.store,
             block=blocks_dict['ungraded_2'],
             user=self.user,
             course=course['course'],
@@ -1076,6 +1109,7 @@ class TestMessageDeduplication(ModuleStoreTestCase):
             request_factory=self.request_factory,
         )
         _assert_block_is_gated(
+            self.store,
             block=blocks_dict['graded_3'],
             user=self.user,
             course=course['course'],
@@ -1093,6 +1127,7 @@ class TestContentTypeGatingService(ModuleStoreTestCase):
     to check whether a sequence contains content type gated blocks
     The content_type_gate_for_block can be used to return the content type gate for a given block
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     def setUp(self):
         super().setUp()
@@ -1101,27 +1136,29 @@ class TestContentTypeGatingService(ModuleStoreTestCase):
         self.request_factory = RequestFactory()
         ContentTypeGatingConfig.objects.create(enabled=True, enabled_as_of=datetime(2018, 1, 1))
 
-    def _create_course(self):
+    def _create_course(self):  # pylint: disable=missing-function-docstring
         course = CourseFactory.create(run='test', display_name='test')
         CourseModeFactory.create(course_id=course.id, mode_slug='audit')
         CourseModeFactory.create(course_id=course.id, mode_slug='verified')
         blocks_dict = {}
         with self.store.bulk_operations(course.id):
-            blocks_dict['chapter'] = ItemFactory.create(
+            blocks_dict['chapter'] = BlockFactory.create(
                 parent=course,
                 category='chapter',
                 display_name='Week 1'
             )
-            blocks_dict['sequential'] = ItemFactory.create(
+            blocks_dict['sequential'] = BlockFactory.create(
                 parent=blocks_dict['chapter'],
                 category='sequential',
                 display_name='Lesson 1'
             )
-            blocks_dict['vertical'] = ItemFactory.create(
+            blocks_dict['vertical'] = BlockFactory.create(
                 parent=blocks_dict['sequential'],
                 category='vertical',
                 display_name='Lesson 1 Vertical - Unit 1'
             )
+        # get updated course
+        course = self.store.get_item(course.location)
         return {
             'course': course,
             'blocks': blocks_dict,
@@ -1136,13 +1173,13 @@ class TestContentTypeGatingService(ModuleStoreTestCase):
             course_id=course['course'].id,
             mode='audit'
         )
-        blocks_dict['graded_1'] = ItemFactory.create(
+        blocks_dict['graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
-        blocks_dict['not_graded_1'] = ItemFactory.create(
+        blocks_dict['not_graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=False,
@@ -1150,14 +1187,19 @@ class TestContentTypeGatingService(ModuleStoreTestCase):
         )
 
         # The method returns a content type gate for blocks that should be gated
-        assert 'content-paywall' in ContentTypeGatingService()._content_type_gate_for_block(self.user, blocks_dict['graded_1'], course['course'].id).content
+        assert 'content-paywall' in ContentTypeGatingService()._content_type_gate_for_block(  # pylint: disable=protected-access
+            self.user, blocks_dict['graded_1'], course['course'].id
+        ).content
 
         # The method returns None for blocks that should not be gated
-        assert ContentTypeGatingService()._content_type_gate_for_block(self.user, blocks_dict['not_graded_1'], course['course'].id) is None
+        assert ContentTypeGatingService()._content_type_gate_for_block(  # pylint: disable=protected-access
+            self.user, blocks_dict['not_graded_1'], course['course'].id
+        ) is None
 
-    @patch.object(ContentTypeGatingService, '_get_user', return_value=UserFactory.build())
-    def test_check_children_for_content_type_gating_paywall(self, mocked_user):  # pylint: disable=unused-argument
+    @patch.object(ContentTypeGatingService, "_get_user")
+    def test_check_children_for_content_type_gating_paywall(self, mocked_get_user):
         ''' Verify that the method returns a content type gate when appropriate '''
+        mocked_get_user.return_value = UserFactory.create()  # saved user object with id
         course = self._create_course()
         blocks_dict = course['blocks']
         CourseEnrollmentFactory.create(
@@ -1165,22 +1207,32 @@ class TestContentTypeGatingService(ModuleStoreTestCase):
             course_id=course['course'].id,
             mode='audit'
         )
-        blocks_dict['not_graded_1'] = ItemFactory.create(
+        blocks_dict['not_graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=False,
             metadata=METADATA,
         )
+        # get updated course
+        course['course'] = self.store.get_item(course['course'].location)
+        blocks_dict['vertical'] = self.store.get_item(blocks_dict['vertical'].location)
 
         # The method returns a content type gate for blocks that should be gated
-        assert ContentTypeGatingService().check_children_for_content_type_gating_paywall(blocks_dict['vertical'], course['course'].id) is None
+        assert ContentTypeGatingService().check_children_for_content_type_gating_paywall(
+            blocks_dict['vertical'], course['course'].id
+        ) is None
 
-        blocks_dict['graded_1'] = ItemFactory.create(
+        blocks_dict['graded_1'] = BlockFactory.create(
             parent=blocks_dict['vertical'],
             category='problem',
             graded=True,
             metadata=METADATA,
         )
+        # get updated course
+        course['course'] = self.store.get_item(course['course'].location)
+        blocks_dict['vertical'] = self.store.get_item(blocks_dict['vertical'].location)
 
         # The method returns None for blocks that should not be gated
-        assert 'content-paywall' in ContentTypeGatingService().check_children_for_content_type_gating_paywall(blocks_dict['vertical'], course['course'].id)
+        assert 'content-paywall' in ContentTypeGatingService().check_children_for_content_type_gating_paywall(
+            blocks_dict['vertical'], course['course'].id
+        )

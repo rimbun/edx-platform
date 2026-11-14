@@ -12,7 +12,10 @@ from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.course_api.blocks.transformers.block_completion import BlockCompletionTransformer
 from lms.djangoapps.course_blocks.api import get_course_blocks
 from lms.djangoapps.course_blocks.transformers.tests.helpers import ModuleStoreTestCase, TransformerRegistryTestMixin
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 
 class StubAggregatorXBlock(XBlock):
@@ -66,14 +69,14 @@ class BlockCompletionTransformerTestCase(TransformerRegistryTestMixin, Completio
         """
         course = CourseFactory.create()
         # Have to have at least one complete block to trigger entering the marking 'complete' flow
-        filled_aggregator = ItemFactory.create(category='aggregator', parent=course)
-        block = ItemFactory.create(category='comp', parent=filled_aggregator)
+        filled_aggregator = BlockFactory.create(category='aggregator', parent=course)
+        block = BlockFactory.create(category='comp', parent=filled_aggregator)
         BlockCompletion.objects.submit_completion(
             user=self.user,
             block_key=block.location,
             completion=self.COMPLETION_TEST_VALUE,
         )
-        empty_aggregator = ItemFactory.create(category='aggregator', parent=course)
+        empty_aggregator = BlockFactory.create(category='aggregator', parent=course)
         block_structure = get_course_blocks(self.user, course.location, self.transformers)
 
         self._assert_block_has_proper_completion_values(
@@ -92,7 +95,7 @@ class BlockCompletionTransformerTestCase(TransformerRegistryTestMixin, Completio
         Excluded blocks always receive None for 'completion' and False for 'complete'
         """
         course = CourseFactory.create()
-        block = ItemFactory.create(category='excluded', parent=course)
+        block = BlockFactory.create(category='excluded', parent=course)
         block_structure = get_course_blocks(self.user, course.location, self.transformers)
 
         self._assert_block_has_proper_completion_values(block_structure, block.location, None, False)
@@ -104,7 +107,7 @@ class BlockCompletionTransformerTestCase(TransformerRegistryTestMixin, Completio
         'completion' should have the value and 'complete' should be True in these cases.
         """
         course = CourseFactory.create()
-        block = ItemFactory.create(category='comp', parent=course)
+        block = BlockFactory.create(category='comp', parent=course)
         BlockCompletion.objects.submit_completion(
             user=self.user,
             block_key=block.location,
@@ -122,7 +125,7 @@ class BlockCompletionTransformerTestCase(TransformerRegistryTestMixin, Completio
         'html' blocks end up receiving a 'completion' of 1.0 after being viewed.
         """
         course = CourseFactory.create()
-        block = ItemFactory.create(category='html', parent=course)
+        block = BlockFactory.create(category='html', parent=course)
         block_structure = get_course_blocks(self.user, course.location, self.transformers)
 
         self._assert_block_has_proper_completion_values(block_structure, block.location, 0.0, False)

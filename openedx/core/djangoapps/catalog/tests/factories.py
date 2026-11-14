@@ -36,8 +36,10 @@ def generate_zulu_datetime():
     The catalog returns UTC datetimes formatted using Z, the zone designator
     for the zero UTC offset, not the +00:00 offset. For more, see
     https://en.wikipedia.org/wiki/ISO_8601#UTC.
+    Faker.date_time() now returns time with sub-seconds in %S.%f format
+    but we don't need the sub_seconds precision, only the whole seconds
     """
-    return fake.date_time().isoformat() + 'Z'
+    return fake.date_time().isoformat().split('.')[0] + 'Z'
 
 
 def generate_price_ranges():
@@ -102,7 +104,7 @@ class ImageFactory(ImageFactoryBase):
     """
     For constructing dicts mirroring the catalog's serialized representation of ImageFields.
 
-    See https://github.com/edx/course-discovery/blob/master/course_discovery/apps/api/fields.py.
+    See https://github.com/openedx/course-discovery/blob/master/course_discovery/apps/api/fields.py.
     """
     description = factory.Faker('sentence')
     src = factory.Faker('image_url')
@@ -112,7 +114,7 @@ class StdImageFactory(ImageFactoryBase):
     """
     For constructing dicts mirroring the catalog's serialized representation of StdImageFields.
 
-    See https://github.com/edx/course-discovery/blob/master/course_discovery/apps/api/fields.py.
+    See https://github.com/openedx/course-discovery/blob/master/course_discovery/apps/api/fields.py.
     """
     url = factory.Faker('image_url')
 
@@ -156,6 +158,8 @@ class CourseRunFactory(DictFactoryBase):
     end = factory.LazyFunction(generate_zulu_datetime)
     enrollment_end = factory.LazyFunction(generate_zulu_datetime)
     enrollment_start = factory.LazyFunction(generate_zulu_datetime)
+    is_enrollable = True
+    is_marketable = True
     image = ImageFactory()
     key = factory.LazyFunction(generate_course_run_key)
     marketing_url = factory.Faker('url')
@@ -234,7 +238,6 @@ class ProgramTypeFactory(DictFactoryBase):
 class ProgramTypeAttrsFactory(DictFactoryBase):
     uuid = factory.Faker('uuid4')
     slug = factory.Faker('word')
-    coaching_supported = False
 
 
 class ProgramFactory(DictFactoryBase):
@@ -287,3 +290,4 @@ class PathwayFactory(DictFactoryBase):
     org_name = factory.Faker('company')
     programs = factory.LazyFunction(partial(generate_instances, ProgramFactory))
     pathway_type = FuzzyChoice(path_type.value for path_type in PathwayType)
+    status = 'published'

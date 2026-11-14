@@ -3,6 +3,7 @@
 
 from datetime import datetime
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import factory
 from django.contrib.auth.models import AnonymousUser, Group, Permission
@@ -10,33 +11,36 @@ from django.contrib.contenttypes.models import ContentType
 from django.test.client import RequestFactory
 from factory.django import DjangoModelFactory
 from opaque_keys.edx.keys import CourseKey
-from pytz import UTC
 
 from common.djangoapps.student.models import (
     AccountRecovery,
     CourseAccessRole,
     CourseEnrollment,
     CourseEnrollmentAllowed,
+    CourseEnrollmentAttribute,
     CourseEnrollmentCelebration,
     PendingEmailChange,
     Registration,
     User,
+    UserAttribute,
     UserProfile,
-    UserStanding
+    UserStanding,
 )
-from common.djangoapps.student.roles import GlobalStaff
-from common.djangoapps.student.roles import CourseBetaTesterRole
-from common.djangoapps.student.roles import CourseInstructorRole
-from common.djangoapps.student.roles import CourseStaffRole
-from common.djangoapps.student.roles import OrgInstructorRole
-from common.djangoapps.student.roles import OrgStaffRole
+from common.djangoapps.student.roles import (
+    CourseBetaTesterRole,
+    CourseInstructorRole,
+    CourseStaffRole,
+    GlobalStaff,
+    OrgInstructorRole,
+    OrgStaffRole,
+)
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 
-TEST_PASSWORD = 'test'
+TEST_PASSWORD = 'Password1234'
 
 
-class GroupFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class GroupFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = Group
         django_get_or_create = ('name', )
@@ -44,7 +48,7 @@ class GroupFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing
     name = factory.Sequence('group{}'.format)
 
 
-class UserStandingFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class UserStandingFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = UserStanding
 
@@ -53,7 +57,7 @@ class UserStandingFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=
     changed_by = None
 
 
-class UserProfileFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class UserProfileFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = UserProfile
         django_get_or_create = ('user', )
@@ -66,7 +70,7 @@ class UserProfileFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=m
     goals = 'Learn a lot'
 
 
-class RegistrationFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class RegistrationFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = Registration
 
@@ -74,12 +78,12 @@ class RegistrationFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=
     activation_key = str(uuid4().hex)
 
 
-class UserFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class UserFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = User
         django_get_or_create = ('email', 'username')
 
-    _DEFAULT_PASSWORD = 'test'
+    _DEFAULT_PASSWORD = 'Password1234'
 
     username = factory.Sequence('robot{}'.format)
     email = factory.Sequence('robot+test+{}@edx.org'.format)
@@ -89,8 +93,8 @@ class UserFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-
     is_staff = False
     is_active = True
     is_superuser = False
-    last_login = datetime(2012, 1, 1, tzinfo=UTC)
-    date_joined = datetime(2011, 1, 1, tzinfo=UTC)
+    last_login = datetime(2012, 1, 1, tzinfo=ZoneInfo("UTC"))
+    date_joined = datetime(2011, 1, 1, tzinfo=ZoneInfo("UTC"))
 
     @factory.post_generation
     def profile(obj, create, extracted, **kwargs):  # pylint: disable=unused-argument, missing-function-docstring
@@ -103,7 +107,7 @@ class UserFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-
             return None
 
     @factory.post_generation
-    def groups(self, create, extracted, **kwargs):  # lint-amnesty, pylint: disable=missing-function-docstring, unused-argument
+    def groups(self, create, extracted, **kwargs):  # pylint: disable=missing-function-docstring, unused-argument
         if extracted is None:
             return
 
@@ -111,7 +115,16 @@ class UserFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-
             extracted = [extracted]
 
         for group_name in extracted:
-            self.groups.add(GroupFactory.simple_generate(create, name=group_name))  # lint-amnesty, pylint: disable=no-member
+            self.groups.add(GroupFactory.simple_generate(create, name=group_name))  # pylint: disable=no-member
+
+
+class UserAttributeFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
+    class Meta:
+        model = UserAttribute
+
+    user = factory.SubFactory(UserFactory)
+    name = factory.Sequence('{}'.format)
+    value = factory.Sequence('{}'.format)
 
 
 class RequestFactoryNoCsrf(RequestFactory):
@@ -120,7 +133,7 @@ class RequestFactoryNoCsrf(RequestFactory):
     """
     def request(self, **kwargs):
         request = super().request(**kwargs)
-        setattr(request, '_dont_enforce_csrf_checks', True)  # pylint: disable=literal-used-as-attribute
+        setattr(request, '_dont_enforce_csrf_checks', True)  # pylint: disable=literal-used-as-attribute  # noqa: B010
         return request
 
 
@@ -137,7 +150,7 @@ class SuperuserFactory(UserFactory):
     is_superuser = True
 
 
-class CourseEnrollmentFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class CourseEnrollmentFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = CourseEnrollment
 
@@ -186,7 +199,14 @@ class CourseEnrollmentCelebrationFactory(DjangoModelFactory):
     enrollment = factory.SubFactory(CourseEnrollmentFactory)
 
 
-class CourseAccessRoleFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class CourseEnrollmentAttributeFactory(DjangoModelFactory):
+    class Meta:
+        model = CourseEnrollmentAttribute
+
+    enrollment = factory.SubFactory(CourseEnrollmentFactory)
+
+
+class CourseAccessRoleFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = CourseAccessRole
 
@@ -195,7 +215,7 @@ class CourseAccessRoleFactory(DjangoModelFactory):  # lint-amnesty, pylint: disa
     role = 'TestRole'
 
 
-class CourseEnrollmentAllowedFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class CourseEnrollmentAllowedFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = CourseEnrollmentAllowed
 
@@ -225,7 +245,7 @@ class ContentTypeFactory(DjangoModelFactory):
     app_label = factory.Faker('app_name')
 
 
-class PermissionFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class PermissionFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = Permission
 
@@ -233,7 +253,7 @@ class PermissionFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=mi
     content_type = factory.SubFactory(ContentTypeFactory)
 
 
-class AccountRecoveryFactory(DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class AccountRecoveryFactory(DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = AccountRecovery
         django_get_or_create = ('user',)

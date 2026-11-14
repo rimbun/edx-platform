@@ -37,23 +37,23 @@ Our next steps would be to:
 
 
 import collections
+import html
 import json
 import sys
 import unittest
 from datetime import datetime, timedelta
-import html
-
 from unittest import mock
-import pytz
+from zoneinfo import ZoneInfo
+
 from bs4 import BeautifulSoup
 from django.conf import settings
 from django.urls import reverse
 from xblock.plugin import Plugin
 
-import lms.djangoapps.lms_xblock.runtime
+import xmodule.services
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 class XBlockEventTestMixin:
@@ -70,7 +70,7 @@ class XBlockEventTestMixin:
     2. assert_event_published verifies that an event of a given search
         specification was published.
 
-    The Mongo/bok_choy event tests in cohorts have nice examplars for
+    The Mongo event tests in cohorts have nice examplars for
     how such functionality might look.
 
     In the future, we would like to expand both search
@@ -83,8 +83,6 @@ class XBlockEventTestMixin:
 
     Good things to look at as developing the code:
     * Gabe's library for parsing events. This is nice.
-    * Bok choy has a nice Mongo search for events in the cohorts test
-      case. It is a little slow for the general case.
     * This is originally based on a cleanup of the EventTestMixin. We
       could work to converge those in some sensible way.
     """
@@ -100,26 +98,26 @@ class XBlockEventTestMixin:
 
         """
         super().setUp()
-        saved_init = lms.djangoapps.lms_xblock.runtime.LmsModuleSystem.__init__
+        saved_init = xmodule.services.EventPublishingService.__init__
 
-        def patched_init(runtime_self, **kwargs):
+        def patched_init(runtime_self, user, course_id, track_function, **kwargs):
             """
-            Swap out publish in the __init__
+            Swap out track_function in the __init__
             """
-            old_publish = kwargs["publish"]
+            old_track_function = track_function
 
-            def publish(block, event_type, event):
+            def new_track_function(event_type, event):
                 """
-                Log the event, and call the original publish
+                Log the event, and call the original track_function.
                 """
                 self.events.append({"event": event, "event_type": event_type})
-                old_publish(block, event_type, event)
-            kwargs['publish'] = publish
-            return saved_init(runtime_self, **kwargs)
+                old_track_function(event_type, event)
+            track_function = new_track_function
+            return saved_init(runtime_self, user, course_id, track_function, **kwargs)
 
         self.events = []
-        lms_sys = "lms.djangoapps.lms_xblock.runtime.LmsModuleSystem.__init__"
-        patcher = mock.patch(lms_sys, patched_init)
+        publish_service = "xmodule.services.EventPublishingService.__init__"
+        patcher = mock.patch(publish_service, patched_init)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -200,7 +198,7 @@ class GradePublishTestMixin:
                                 'score': score,
                                 'max_score': max_score})
             # Shim a return time, defaults to 1 hour before now
-            return datetime.now().replace(tzinfo=pytz.UTC) - timedelta(hours=1)
+            return datetime.now().replace(tzinfo=ZoneInfo("UTC")) - timedelta(hours=1)
 
         self.scores = []
         patcher = mock.patch("lms.djangoapps.grades.signals.handlers.set_score", capture_score)
@@ -239,17 +237,17 @@ class XBlockScenarioTestCaseMixin:
         cls.xblocks = {}
         with cls.store.bulk_operations(cls.course.id, emit_signals=False):
             for chapter_config in cls.test_configuration:
-                chapter = ItemFactory.create(
-                    parent=cls.course,
+                chapter = BlockFactory.create(
+                    parent_location=cls.course.location,
                     display_name="ch_" + chapter_config['urlname'],
                     category='chapter'
                 )
-                section = ItemFactory.create(
+                section = BlockFactory.create(
                     parent=chapter,
                     display_name="sec_" + chapter_config['urlname'],
                     category='sequential'
                 )
-                unit = ItemFactory.create(
+                unit = BlockFactory.create(
                     parent=section,
                     display_name='unit_' + chapter_config['urlname'],
                     category='vertical'
@@ -263,7 +261,7 @@ class XBlockScenarioTestCaseMixin:
                     )
 
                 for xblock_config in chapter_config['xblocks']:
-                    xblock = ItemFactory.create(
+                    xblock = BlockFactory.create(
                         parent=unit,
                         category=xblock_config['blocktype'],
                         display_name=xblock_config['urlname'],
@@ -271,14 +269,7 @@ class XBlockScenarioTestCaseMixin:
                     )
                     cls.xblocks[xblock_config['urlname']] = xblock
 
-                scenario_url = str(reverse(
-                    'courseware_section',
-                    kwargs={
-                        'course_id': str(cls.course.id),
-                        'chapter': "ch_" + chapter_config['urlname'],
-                        'section': "sec_" + chapter_config['urlname']
-                    }
-                ))
+                scenario_url = reverse('render_xblock', args=[str(section.location)])
 
                 cls.scenario_urls[chapter_config['urlname']] = scenario_url
 
@@ -288,9 +279,9 @@ class XBlockStudentTestCaseMixin:
     Creates a default set of students for XBlock tests
     '''
     student_list = [
-        {'email': 'alice@test.edx.org', 'password': 'foo'},
-        {'email': 'bob@test.edx.org', 'password': 'foo'},
-        {'email': 'eve@test.edx.org', 'password': 'foo'},
+        {'email': 'alice@test.edx.org', 'password': 'Password1234'},
+        {'email': 'bob@test.edx.org', 'password': 'Password1234'},
+        {'email': 'eve@test.edx.org', 'password': 'Password1234'},
     ]
 
     def setUp(self):

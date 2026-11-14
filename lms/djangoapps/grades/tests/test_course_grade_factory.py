@@ -1,21 +1,18 @@
 """
 Tests for the CourseGradeFactory class.
 """
-import itertools
 from unittest.mock import patch
 
 import ddt
-from django.conf import settings
-from edx_toggles.toggles.testutils import override_waffle_switch
 
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.courseware.access import has_access
-from lms.djangoapps.grades.config.tests.utils import persistent_grades_feature_flags
 from openedx.core.djangoapps.content.block_structure.factory import BlockStructureFactory
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
-from ..config.waffle import ASSUME_ZERO_GRADE_IF_ABSENT, waffle_switch
 from ..course_grade import CourseGrade, ZeroCourseGrade
 from ..course_grade_factory import CourseGradeFactory
 from ..subsection_grade import ReadSubsectionGrade, ZeroSubsectionGrade
@@ -51,28 +48,6 @@ class TestCourseGradeFactory(GradeTestBase):
         grade = CourseGradeFactory().read(self.request.user, invisible_course)
         assert grade.percent == 0
 
-    @patch.dict(settings.FEATURES, {'PERSISTENT_GRADES_ENABLED_FOR_ALL_TESTS': False})
-    @ddt.data(
-        (True, True),
-        (True, False),
-        (False, True),
-        (False, False),
-    )
-    @ddt.unpack
-    def test_course_grade_feature_gating(self, feature_flag, course_setting):
-        # Grades are only saved if the feature flag and the advanced setting are
-        # both set to True.
-        grade_factory = CourseGradeFactory()
-        with persistent_grades_feature_flags(
-            global_flag=feature_flag,
-            enabled_for_all_courses=False,
-            course_id=self.course.id,
-            enabled_for_course=course_setting
-        ):
-            with patch('lms.djangoapps.grades.models.PersistentCourseGrade.read') as mock_read_grade:
-                grade_factory.read(self.request.user, self.course)
-        assert mock_read_grade.called == (feature_flag and course_setting)
-
     def test_read_and_update(self):
         grade_factory = CourseGradeFactory()
 
@@ -98,45 +73,42 @@ class TestCourseGradeFactory(GradeTestBase):
         with self.assertNumQueries(3), mock_get_score(1, 2):
             _assert_read(expected_pass=False, expected_percent=0)  # start off with grade of 0
 
-        num_queries = 42
+        num_queries = 50
         with self.assertNumQueries(num_queries), mock_get_score(1, 2):
             grade_factory.update(self.request.user, self.course, force_update_subsections=True)
 
         with self.assertNumQueries(3):
             _assert_read(expected_pass=True, expected_percent=0.5)  # updated to grade of .5
 
-        num_queries = 6
+        num_queries = 8
         with self.assertNumQueries(num_queries), mock_get_score(1, 4):
             grade_factory.update(self.request.user, self.course, force_update_subsections=False)
 
         with self.assertNumQueries(3):
             _assert_read(expected_pass=True, expected_percent=0.5)  # NOT updated to grade of .25
 
-        num_queries = 23
+        num_queries = 26
         with self.assertNumQueries(num_queries), mock_get_score(2, 2):
             grade_factory.update(self.request.user, self.course, force_update_subsections=True)
 
         with self.assertNumQueries(3):
             _assert_read(expected_pass=True, expected_percent=1.0)  # updated to grade of 1.0
 
-        num_queries = 29
+        num_queries = 34
         with self.assertNumQueries(num_queries), mock_get_score(0, 0):  # the subsection now is worth zero
             grade_factory.update(self.request.user, self.course, force_update_subsections=True)
 
         with self.assertNumQueries(3):
             _assert_read(expected_pass=False, expected_percent=0.0)  # updated to grade of 0.0
 
-    @patch.dict(settings.FEATURES, {'ASSUME_ZERO_GRADE_IF_ABSENT_FOR_ALL_TESTS': False})
-    @ddt.data(*itertools.product((True, False), (True, False)))
-    @ddt.unpack
-    def test_read_zero(self, assume_zero_enabled, create_if_needed):
-        with override_waffle_switch(waffle_switch(ASSUME_ZERO_GRADE_IF_ABSENT), active=assume_zero_enabled):
-            grade_factory = CourseGradeFactory()
-            course_grade = grade_factory.read(self.request.user, self.course, create_if_needed=create_if_needed)
-            if create_if_needed or assume_zero_enabled:
-                self._assert_zero_grade(course_grade, ZeroCourseGrade if assume_zero_enabled else CourseGrade)
-            else:
-                assert course_grade is None
+    @ddt.data((True, False))
+    def test_read_zero(self, create_if_needed):
+        grade_factory = CourseGradeFactory()
+        course_grade = grade_factory.read(self.request.user, self.course, create_if_needed=create_if_needed)
+        if create_if_needed:
+            self._assert_zero_grade(course_grade, ZeroCourseGrade)
+        else:
+            assert course_grade is None
 
     def test_read_optimization(self):
         grade_factory = CourseGradeFactory()
@@ -192,6 +164,7 @@ class TestCourseGradeFactory(GradeTestBase):
         with mock_get_score(1, 2):
             self.subsection_grade_factory.update(self.course_structure[self.sequence.location])
         course_grade = CourseGradeFactory().update(self.request.user, self.course)
+        subsection_grades = list(course_grade.subsection_grades.values())
 
         actual_summary = course_grade.summary
 
@@ -215,26 +188,28 @@ class TestCourseGradeFactory(GradeTestBase):
             'section_breakdown': [
                 {
                     'category': 'Homework',
-                    'detail': 'Homework 1 - Test Sequential X with an & Ampersand - 50% (1/2)',
+                    'detail': 'Homework 1 - Test Sequential X with an & Ampersand - 50.00% (1/2)',
                     'label': 'HW 01',
-                    'percent': 0.5
+                    'percent': 0.5,
+                    'sequential_id': str(subsection_grades[0].location),
                 },
                 {
                     'category': 'Homework',
-                    'detail': 'Homework 2 - Test Sequential A - 0% (0/1)',
+                    'detail': 'Homework 2 - Test Sequential A - 0.00% (0/1)',
                     'label': 'HW 02',
-                    'percent': 0.0
+                    'percent': 0.0,
+                    'sequential_id': str(subsection_grades[1].location),
                 },
                 {
                     'category': 'Homework',
-                    'detail': 'Homework Average = 25%',
+                    'detail': 'Homework Average = 25.00%',
                     'label': 'HW Avg',
                     'percent': 0.25,
                     'prominent': True
                 },
                 {
                     'category': 'NoCredit',
-                    'detail': 'NoCredit Average = 0%',
+                    'detail': 'NoCredit Average = 0.00%',
                     'label': 'NC Avg',
                     'percent': 0,
                     'prominent': True
@@ -279,7 +254,7 @@ class TestGradeIteration(SharedModuleStoreTestCase):
         iterator, but it shouldn't error.
         """
         grade_results = list(CourseGradeFactory().iter([], self.course))
-        assert grade_results == []
+        assert not grade_results
 
     def test_all_empty_grades(self):
         """
@@ -316,7 +291,7 @@ class TestGradeIteration(SharedModuleStoreTestCase):
             else mock_course_grade.return_value
             for student in self.students
         ]
-        with self.assertNumQueries(8):
+        with self.assertNumQueries(20):
             all_course_grades, all_errors = self._course_grades_and_errors_for(self.course, self.students)
         assert {student: str(all_errors[student]) for student in all_errors} == {
             student3: 'Error for student3.',

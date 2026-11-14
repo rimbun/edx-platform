@@ -9,19 +9,21 @@ from unittest.mock import Mock
 
 from openedx_events.learning.data import CertificateData, CourseData, UserData, UserPersonalData
 from openedx_events.learning.signals import CERTIFICATE_CHANGED, CERTIFICATE_CREATED, CERTIFICATE_REVOKED
-from openedx_events.tests.utils import OpenEdxEventsTestMixin
+from openedx_events.testing import OpenEdxEventsTestMixin
 
 from common.djangoapps.student.tests.factories import UserFactory
+from common.test.utils import assert_dict_contains_subset
+from lms.djangoapps.certificates.models import CertificateStatuses, GeneratedCertificate
 from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFactory
-from lms.djangoapps.certificates.models import GeneratedCertificate, CertificateStatuses
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangolib.testing.utils import skip_unless_lms
-
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
 
 
 @skip_unless_lms
-class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
+class CertificateEventTest(OpenEdxEventsTestMixin, SharedModuleStoreTestCase):
     """
     Tests for the Open edX Events associated with the student's certification
     process.
@@ -40,17 +42,6 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
         "org.openedx.learning.certificate.changed.v1",
         "org.openedx.learning.certificate.revoked.v1",
     ]
-
-    @classmethod
-    def setUpClass(cls):
-        """
-        Set up class method for the Test class.
-
-        This method starts manually events isolation. Explanation here:
-        openedx/core/djangoapps/user_authn/views/tests/test_events.py#L44
-        """
-        super().setUpClass()
-        cls.start_events_isolation()
 
     def setUp(self):  # pylint: disable=arguments-differ
         super().setUp()
@@ -93,8 +84,9 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
             download_url="https://certificate.pdf"
         )
 
-        self.assertTrue(self.receiver_called)
-        self.assertDictContainsSubset(
+        self.assertTrue(self.receiver_called)  # noqa: PT009
+        assert_dict_contains_subset(
+            self,
             {
                 "signal": CERTIFICATE_CREATED,
                 "sender": None,
@@ -118,7 +110,7 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
                     name=certificate.name,
                 ),
             },
-            event_receiver.call_args.kwargs
+            event_receiver.call_args.kwargs,
         )
 
     def test_send_certificate_changed_event(self):
@@ -146,8 +138,9 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
         certificate.grade = "50"
         certificate.save()
 
-        self.assertTrue(self.receiver_called)
-        self.assertDictContainsSubset(
+        self.assertTrue(self.receiver_called)  # noqa: PT009
+        assert_dict_contains_subset(
+            self,
             {
                 "signal": CERTIFICATE_CHANGED,
                 "sender": None,
@@ -171,7 +164,7 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
                     name=certificate.name,
                 ),
             },
-            event_receiver.call_args.kwargs
+            event_receiver.call_args.kwargs,
         )
 
     def test_send_certificate_revoked_event(self):
@@ -198,8 +191,9 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
 
         certificate.invalidate()
 
-        self.assertTrue(self.receiver_called)
-        self.assertDictContainsSubset(
+        self.assertTrue(self.receiver_called)  # noqa: PT009
+        assert_dict_contains_subset(
+            self,
             {
                 "signal": CERTIFICATE_REVOKED,
                 "sender": None,
@@ -223,5 +217,5 @@ class CertificateEventTest(SharedModuleStoreTestCase, OpenEdxEventsTestMixin):
                     name=certificate.name,
                 ),
             },
-            event_receiver.call_args.kwargs
+            event_receiver.call_args.kwargs,
         )

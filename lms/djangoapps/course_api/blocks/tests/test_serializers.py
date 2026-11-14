@@ -9,9 +9,11 @@ from common.djangoapps.student.roles import CourseStaffRole
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.course_blocks.api import get_course_block_access_transformers, get_course_blocks
 from openedx.core.djangoapps.content.block_structure.transformers import BlockStructureTransformers
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import ToyCourseFactory
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import ToyCourseFactory  # pylint: disable=wrong-import-order
 
 from ..serializers import BlockDictSerializer, BlockSerializer
 from ..transformers.blocks_api import BlocksAPITransformer
@@ -84,6 +86,7 @@ class TestBlockSerializerBase(SharedModuleStoreTestCase):
             'student_view_multi_device',
             'lti_url',
             'visible_to_staff_only',
+            'hide_after_due'
         ])
 
     def assert_extended_block(self, serialized_block):
@@ -100,7 +103,8 @@ class TestBlockSerializerBase(SharedModuleStoreTestCase):
             'graded',
             'student_view_multi_device',
             'lti_url',
-            'visible_to_staff_only'
+            'visible_to_staff_only',
+            'hide_after_due'
         } <= set(serialized_block.keys())
 
         # video blocks should have student_view_data

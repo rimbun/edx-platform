@@ -7,20 +7,19 @@ import logging
 import re
 
 from django.conf import settings
+from xblock.fields import Date
 
 from openedx.core.djangolib.markup import HTML
 from openedx.core.lib.courses import course_image_url
-from xmodule.data import CertificatesDisplayBehaviors
-from xmodule.fields import Date
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from xmodule.data import CertificatesDisplayBehaviors  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
 
 # This list represents the attribute keys for a course's 'about' info.
 # Note: The 'video' attribute is intentionally excluded as it must be
 # handled separately; its value maps to an alternate key name.
 ABOUT_ATTRIBUTES = [
     'syllabus',
-    'title',
     'subtitle',
     'duration',
     'description',
@@ -71,13 +70,13 @@ class CourseDetails:
         self.pre_requisite_courses = []  # pre-requisite courses
         self.entrance_exam_enabled = ""  # is entrance exam enabled
         self.entrance_exam_id = ""  # the content location for the entrance exam
-        self.entrance_exam_minimum_score_pct = settings.FEATURES.get(
-            'ENTRANCE_EXAM_MIN_SCORE_PCT',
-            '50'
+        self.entrance_exam_minimum_score_pct = str(
+            settings.ENTRANCE_EXAM_MIN_SCORE_PCT
         )  # minimum passing score for entrance exam content module/tree,
         self.self_paced = None
         self.learning_info = []
         self.instructor_info = []
+        self.has_changes = None
 
     @classmethod
     def fetch_about_attribute(cls, course_key, attribute):
@@ -103,36 +102,38 @@ class CourseDetails:
         return cls.populate(modulestore().get_course(course_key))
 
     @classmethod
-    def populate(cls, course_descriptor):
+    def populate(cls, block):
         """
-        Returns a fully populated CourseDetails model given the course descriptor
+        Returns a fully populated CourseDetails model given the course block
         """
-        course_key = course_descriptor.id
+        course_key = block.id
         course_details = cls(course_key.org, course_key.course, course_key.run)
-        course_details.start_date = course_descriptor.start
-        course_details.end_date = course_descriptor.end
+        course_details.start_date = block.start
+        course_details.end_date = block.end
         updated_available_date, updated_display_behavior = cls.validate_certificate_settings(
-            course_descriptor.certificate_available_date,
-            course_descriptor.certificates_display_behavior
+            block.certificate_available_date,
+            block.certificates_display_behavior
         )
         course_details.certificate_available_date = updated_available_date
         course_details.certificates_display_behavior = updated_display_behavior
-        course_details.enrollment_start = course_descriptor.enrollment_start
-        course_details.enrollment_end = course_descriptor.enrollment_end
-        course_details.pre_requisite_courses = course_descriptor.pre_requisite_courses
-        course_details.course_image_name = course_descriptor.course_image
-        course_details.course_image_asset_path = course_image_url(course_descriptor, 'course_image')
-        course_details.banner_image_name = course_descriptor.banner_image
-        course_details.banner_image_asset_path = course_image_url(course_descriptor, 'banner_image')
-        course_details.video_thumbnail_image_name = course_descriptor.video_thumbnail_image
-        course_details.video_thumbnail_image_asset_path = course_image_url(course_descriptor, 'video_thumbnail_image')
-        course_details.language = course_descriptor.language
-        course_details.self_paced = course_descriptor.self_paced
-        course_details.learning_info = course_descriptor.learning_info
-        course_details.instructor_info = course_descriptor.instructor_info
+        course_details.enrollment_start = block.enrollment_start
+        course_details.enrollment_end = block.enrollment_end
+        course_details.pre_requisite_courses = block.pre_requisite_courses
+        course_details.course_image_name = block.course_image
+        course_details.course_image_asset_path = course_image_url(block, 'course_image')
+        course_details.banner_image_name = block.banner_image
+        course_details.banner_image_asset_path = course_image_url(block, 'banner_image')
+        course_details.video_thumbnail_image_name = block.video_thumbnail_image
+        course_details.video_thumbnail_image_asset_path = course_image_url(block, 'video_thumbnail_image')
+        course_details.language = block.language
+        course_details.self_paced = block.self_paced
+        course_details.has_changes = modulestore().has_changes(block)
+        course_details.learning_info = block.learning_info
+        course_details.instructor_info = block.instructor_info
+        course_details.title = block.display_name
 
         # Default course license is "All Rights Reserved"
-        course_details.license = getattr(course_descriptor, "license", "all-rights-reserved")
+        course_details.license = getattr(block, "license", "all-rights-reserved")
 
         course_details.intro_video = cls.fetch_youtube_video_id(course_key)
 
@@ -194,123 +195,136 @@ class CourseDetails:
     @classmethod
     def update_from_json(cls, course_key, jsondict, user):  # pylint: disable=too-many-statements
         """
-        Decode the json into CourseDetails and save any changed attrs to the db
+        Decode the json into CourseDetails and save any changed attrs to the db.
+
+        All writes are batched inside a single ``bulk_operations`` context so that
+        only one ``course_published`` signal is emitted per call, regardless of how
+        many individual fields were updated.  Without this, every ``update_item`` /
+        ``delete_item`` call inside ``update_about_item`` (and the top-level block
+        update) each fire their own signal, causing downstream tasks to run
+        multiple times for a single user action.
         """
         module_store = modulestore()
-        descriptor = module_store.get_course(course_key)
 
-        dirty = False
+        with module_store.bulk_operations(course_key):
+            block = module_store.get_course(course_key)
 
-        # In the descriptor's setter, the date is converted to JSON
-        # using Date's to_json method. Calling to_json on something that
-        # is already JSON doesn't work. Since reaching directly into the
-        # model is nasty, convert the JSON Date to a Python date, which
-        # is what the setter expects as input.
-        date = Date()
+            dirty = False
 
-        if 'start_date' in jsondict:
-            converted = date.from_json(jsondict['start_date'])
-        else:
-            converted = None
-        if converted != descriptor.start:
-            dirty = True
-            descriptor.start = converted
+            # In the block's setter, the date is converted to JSON
+            # using Date's to_json method. Calling to_json on something that
+            # is already JSON doesn't work. Since reaching directly into the
+            # model is nasty, convert the JSON Date to a Python date, which
+            # is what the setter expects as input.
+            date = Date()
 
-        if 'end_date' in jsondict:
-            converted = date.from_json(jsondict['end_date'])
-        else:
-            converted = None
+            if jsondict.get('overview') == '':
+                jsondict['overview'] = '<p>&nbsp;</p>'
 
-        if converted != descriptor.end:
-            dirty = True
-            descriptor.end = converted
+            if 'start_date' in jsondict:
+                converted = date.from_json(jsondict['start_date'])
+            else:
+                converted = None
+            if converted != block.start:
+                dirty = True
+                block.start = converted
 
-        if 'enrollment_start' in jsondict:
-            converted = date.from_json(jsondict['enrollment_start'])
-        else:
-            converted = None
+            if 'end_date' in jsondict:
+                converted = date.from_json(jsondict['end_date'])
+            else:
+                converted = None
 
-        if converted != descriptor.enrollment_start:
-            dirty = True
-            descriptor.enrollment_start = converted
+            if converted != block.end:
+                dirty = True
+                block.end = converted
 
-        if 'enrollment_end' in jsondict:
-            converted = date.from_json(jsondict['enrollment_end'])
-        else:
-            converted = None
+            if 'enrollment_start' in jsondict:
+                converted = date.from_json(jsondict['enrollment_start'])
+            else:
+                converted = None
 
-        if converted != descriptor.enrollment_end:
-            dirty = True
-            descriptor.enrollment_end = converted
+            if converted != block.enrollment_start:
+                dirty = True
+                block.enrollment_start = converted
 
-        if 'certificate_available_date' in jsondict:
-            converted = date.from_json(jsondict['certificate_available_date'])
-        else:
-            converted = None
+            if 'enrollment_end' in jsondict:
+                converted = date.from_json(jsondict['enrollment_end'])
+            else:
+                converted = None
 
-        if converted != descriptor.certificate_available_date:
-            dirty = True
-            descriptor.certificate_available_date = converted
+            if converted != block.enrollment_end:
+                dirty = True
+                block.enrollment_end = converted
 
-        if (
-            'certificates_display_behavior' in jsondict
-            and jsondict['certificates_display_behavior'] != descriptor.certificates_display_behavior
-        ):
-            descriptor.certificates_display_behavior = jsondict['certificates_display_behavior']
-            dirty = True
+            if 'certificate_available_date' in jsondict:
+                converted = date.from_json(jsondict['certificate_available_date'])
+            else:
+                converted = None
 
-        if 'course_image_name' in jsondict and jsondict['course_image_name'] != descriptor.course_image:
-            descriptor.course_image = jsondict['course_image_name']
-            dirty = True
+            if converted != block.certificate_available_date:
+                dirty = True
+                block.certificate_available_date = converted
 
-        if 'banner_image_name' in jsondict and jsondict['banner_image_name'] != descriptor.banner_image:
-            descriptor.banner_image = jsondict['banner_image_name']
-            dirty = True
+            if (
+                'certificates_display_behavior' in jsondict
+                and jsondict['certificates_display_behavior'] != block.certificates_display_behavior
+            ):
+                block.certificates_display_behavior = jsondict['certificates_display_behavior']
+                dirty = True
 
-        if 'video_thumbnail_image_name' in jsondict \
-                and jsondict['video_thumbnail_image_name'] != descriptor.video_thumbnail_image:
-            descriptor.video_thumbnail_image = jsondict['video_thumbnail_image_name']
-            dirty = True
+            if 'course_image_name' in jsondict and jsondict['course_image_name'] != block.course_image:
+                block.course_image = jsondict['course_image_name']
+                dirty = True
 
-        if 'pre_requisite_courses' in jsondict \
-                and sorted(jsondict['pre_requisite_courses']) != sorted(descriptor.pre_requisite_courses):
-            descriptor.pre_requisite_courses = jsondict['pre_requisite_courses']
-            dirty = True
+            if 'banner_image_name' in jsondict and jsondict['banner_image_name'] != block.banner_image:
+                block.banner_image = jsondict['banner_image_name']
+                dirty = True
 
-        if 'license' in jsondict:
-            descriptor.license = jsondict['license']
-            dirty = True
+            if 'video_thumbnail_image_name' in jsondict \
+                    and jsondict['video_thumbnail_image_name'] != block.video_thumbnail_image:
+                block.video_thumbnail_image = jsondict['video_thumbnail_image_name']
+                dirty = True
 
-        if 'learning_info' in jsondict:
-            descriptor.learning_info = jsondict['learning_info']
-            dirty = True
+            if 'pre_requisite_courses' in jsondict \
+                    and sorted(jsondict['pre_requisite_courses']) != sorted(block.pre_requisite_courses):
+                block.pre_requisite_courses = jsondict['pre_requisite_courses']
+                dirty = True
 
-        if 'instructor_info' in jsondict:
-            descriptor.instructor_info = jsondict['instructor_info']
-            dirty = True
+            if 'license' in jsondict:
+                block.license = jsondict['license']
+                dirty = True
 
-        if 'language' in jsondict and jsondict['language'] != descriptor.language:
-            descriptor.language = jsondict['language']
-            dirty = True
+            if 'learning_info' in jsondict:
+                block.learning_info = jsondict['learning_info']
+                dirty = True
 
-        if (descriptor.can_toggle_course_pacing
-                and 'self_paced' in jsondict
-                and jsondict['self_paced'] != descriptor.self_paced):
-            descriptor.self_paced = jsondict['self_paced']
-            dirty = True
+            if 'instructor_info' in jsondict:
+                block.instructor_info = jsondict['instructor_info']
+                dirty = True
 
-        if dirty:
-            module_store.update_item(descriptor, user.id)
+            if 'language' in jsondict and jsondict['language'] != block.language:
+                block.language = jsondict['language']
+                dirty = True
 
-        # NOTE: below auto writes to the db w/o verifying that any of
-        # the fields actually changed to make faster, could compare
-        # against db or could have client send over a list of which
-        # fields changed.
-        for attribute in ABOUT_ATTRIBUTES:
-            if attribute in jsondict:
-                cls.update_about_item(descriptor, attribute, jsondict[attribute], user.id)
+            if (block.can_toggle_course_pacing
+                    and 'self_paced' in jsondict
+                    and jsondict['self_paced'] != block.self_paced):
+                block.self_paced = jsondict['self_paced']
+                dirty = True
 
-        cls.update_about_video(descriptor, jsondict['intro_video'], user.id)
+            if dirty:
+                module_store.update_item(block, user.id)
+
+            # NOTE: below auto writes to the db w/o verifying that any of
+            # the fields actually changed to make faster, could compare
+            # against db or could have client send over a list of which
+            # fields changed.
+            for attribute in ABOUT_ATTRIBUTES:
+                if attribute in jsondict:
+                    cls.update_about_item(block, attribute, jsondict[attribute], user.id)
+
+            if 'intro_video' in jsondict:
+                cls.update_about_video(block, jsondict['intro_video'], user.id)
 
         # Could just return jsondict w/o doing any db reads, but I put
         # the reads in as a means to confirm it persisted correctly
@@ -335,7 +349,7 @@ class CourseDetails:
         if keystring_matcher:
             return keystring_matcher.group(0)
         else:
-            logging.warn("ignoring the content because it doesn't not conform to expected pattern: " + raw_video)  # lint-amnesty, pylint: disable=deprecated-method, logging-not-lazy
+            logging.warn("ignoring the content because it doesn't not conform to expected pattern: " + raw_video)  # pylint: disable=deprecated-method, logging-not-lazy
             return None
 
     @staticmethod
@@ -368,10 +382,6 @@ class CourseDetails:
             tuple[str, str]: updated certificate_available_date, updated certificates_display_behavior
             None
         """
-        # If V2 is not enable, return original values
-        if not settings.FEATURES.get("ENABLE_V2_CERT_DISPLAY_SETTINGS", False):
-            return (certificate_available_date, certificates_display_behavior)
-
         # "early_no_info" will always show regardless of settings
         if certificates_display_behavior == CertificatesDisplayBehaviors.EARLY_NO_INFO:
             return (None, CertificatesDisplayBehaviors.EARLY_NO_INFO)

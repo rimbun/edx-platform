@@ -5,6 +5,7 @@ Outside of this subpackage, import these functions
 from `lms.djangoapps.program_enrollments.api`.
 """
 
+import re
 from functools import reduce
 from operator import or_
 
@@ -20,7 +21,7 @@ from ..exceptions import (
     BadOrganizationShortNameException,
     ProgramDoesNotExistException,
     ProgramHasNoAuthoringOrganizationException,
-    ProviderDoesNotExistException
+    ProviderDoesNotExistException,
 )
 from ..models import ProgramCourseEnrollment, ProgramEnrollment
 
@@ -62,7 +63,7 @@ def get_program_enrollment(
         raise ValueError(_STUDENT_ARG_ERROR_MESSAGE)
     filters = {
         "user": user,
-        "external_user_key": external_user_key,
+        "external_user_key__iexact": external_user_key,
         "curriculum_uuid": curriculum_uuid,
     }
     return ProgramEnrollment.objects.get(
@@ -100,7 +101,7 @@ def get_program_course_enrollment(
         raise ValueError(_STUDENT_ARG_ERROR_MESSAGE)
     filters = {
         "program_enrollment__user": user,
-        "program_enrollment__external_user_key": external_user_key,
+        "program_enrollment__external_user_key__iexact": external_user_key,
         "program_enrollment__curriculum_uuid": curriculum_uuid,
     }
     return ProgramCourseEnrollment.objects.get(
@@ -142,10 +143,13 @@ def fetch_program_enrollments(
         raise ValueError(
             _REALIZED_FILTER_ERROR_TEMPLATE.format("realized_only", "waiting_only")
         )
+    external_user_key_regex = None
+    if external_user_keys:
+        external_user_key_regex = r'^(' + '|'.join([re.escape(b) for b in external_user_keys]) + ')$'
     filters = {
         "curriculum_uuid__in": curriculum_uuids,
         "user__in": users,
-        "external_user_key__in": external_user_keys,
+        "external_user_key__iregex": external_user_key_regex,
         "status__in": program_enrollment_statuses,
     }
     if realized_only:
@@ -202,10 +206,13 @@ def fetch_program_course_enrollments(
         raise ValueError(
             _REALIZED_FILTER_ERROR_TEMPLATE.format("realized_only", "waiting_only")
         )
+    external_user_key_regex = None
+    if external_user_keys:
+        external_user_key_regex = r'^(' + '|'.join([re.escape(b) for b in external_user_keys]) + ')$'
     filters = {
         "program_enrollment__curriculum_uuid__in": curriculum_uuids,
         "program_enrollment__user__in": users,
-        "program_enrollment__external_user_key__in": external_user_keys,
+        "program_enrollment__external_user_key__iregex": external_user_key_regex,
         "program_enrollment__status__in": program_enrollment_statuses,
         "program_enrollment__in": program_enrollments,
     }
@@ -301,9 +308,12 @@ def fetch_program_enrollments_by_students(
         raise ValueError(
             _REALIZED_FILTER_ERROR_TEMPLATE.format("realized_only", "waiting_only")
         )
+    external_user_key_regex = None
+    if external_user_keys:
+        external_user_key_regex = r'^(' + '|'.join([re.escape(b) for b in external_user_keys]) + ')$'
     filters = {
         "user__in": users,
-        "external_user_key__in": external_user_keys,
+        "external_user_key__iregex": external_user_key_regex,
         "status__in": program_enrollment_statuses,
     }
     if realized_only:
@@ -357,9 +367,12 @@ def fetch_program_course_enrollments_by_students(
         raise ValueError(
             _REALIZED_FILTER_ERROR_TEMPLATE.format("realized_only", "waiting_only")
         )
+    external_user_key_regex = None
+    if external_user_keys:
+        external_user_key_regex = r'^(' + '|'.join([re.escape(b) for b in external_user_keys]) + ')$'
     filters = {
         "program_enrollment__user__in": users,
-        "program_enrollment__external_user_key__in": external_user_keys,
+        "program_enrollment__external_user_key__iregex": external_user_key_regex,
         "program_enrollment__program_uuid__in": program_uuids,
         "program_enrollment__curriculum_uuid__in": curriculum_uuids,
         "course_key__in": course_keys,
@@ -502,7 +515,7 @@ def get_saml_providers_by_org_key(org_key):
     try:
         organization = Organization.objects.get(short_name=org_key)
     except Organization.DoesNotExist:
-        raise BadOrganizationShortNameException(org_key)  # lint-amnesty, pylint: disable=raise-missing-from
+        raise BadOrganizationShortNameException(org_key)  # pylint: disable=raise-missing-from  # noqa: B904
     return get_saml_providers_for_organization(organization)
 
 
@@ -547,8 +560,14 @@ def get_saml_providers_for_organization(organization):
     """
     provider_configs = organization.samlproviderconfig_set.current_set().filter(enabled=True)
     if not provider_configs:
-        raise ProviderDoesNotExistException(organization)  # lint-amnesty, pylint: disable=raise-missing-from
+        raise ProviderDoesNotExistException(organization)  # pylint: disable=raise-missing-from
     return list(provider_configs)
+
+
+def remove_prefix(text, prefix):
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
 
 
 def get_provider_slug(provider_config):
@@ -560,7 +579,7 @@ def get_provider_slug(provider_config):
 
     Returns: str
     """
-    return provider_config.provider_id.strip('saml-')
+    return remove_prefix(provider_config.provider_id, 'saml-')
 
 
 def is_course_staff_enrollment(program_course_enrollment):

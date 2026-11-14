@@ -1,10 +1,16 @@
-define(['edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers', 'js/ccx/schedule'],
-    function(AjaxHelpers) {
+define(['sinon', 'edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers', 'js/ccx/schedule'],
+    function(sinon, AjaxHelpers) {
         describe('edx.ccx.schedule.ScheduleView', function() {
             var view = null;
             var data;
+            var requests, xhrFactory;
 
             beforeEach(function() {
+                xhrFactory = sinon.useFakeXMLHttpRequest();
+                requests = [];
+                requests.currentIndex = 0;
+                requests.restore = function() { xhrFactory.restore(); };
+                xhrFactory.onCreate = function(req) { requests.push(req); };
                 loadFixtures('js/fixtures/ccx/schedule.html');
 
                 var scheduleFixture = readFixtures('templates/ccx/schedule.underscore');
@@ -49,6 +55,10 @@ define(['edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers', 'js/ccx/schedule'],
                 view = new edx.ccx.schedule.ScheduleView({el: $('#new-ccx-schedule')});
                 view.schedule_collection.set(data);
                 view.render();
+            });
+
+            afterEach(function() {
+                requests.restore();
             });
 
             it('verifies correct view setup', function() {
@@ -138,6 +148,7 @@ define(['edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers', 'js/ccx/schedule'],
                 val = 'i4x://edX/DemoX/sequential/edx_introduction';
                 view.sequential_select.val(val);
                 view.sequential_select.change();
+                // eslint-disable-next-line no-unused-expressions, no-sequences
                 val = 'i4x://edX/DemoX/vertical/vertical_0270f6de40fc',
                 view.vertical_select.val(val);
                 view.vertical_select.change();
@@ -203,7 +214,6 @@ define(['edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers', 'js/ccx/schedule'],
             });
 
             it('saves schedule changes', function() {
-                requests = AjaxHelpers.requests(this);
                 view.save();
                 expect(requests.length).toEqual(1);
                 AjaxHelpers.expectJsonRequest(requests, 'POST', 'save_ccx', view.schedule);
@@ -216,7 +226,6 @@ define(['edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers', 'js/ccx/schedule'],
             });
 
             it('displays an error if the sync fails', function() {
-                requests = AjaxHelpers.requests(this);
                 view.save();
                 requests[0].respond(500);
                 expect($('#ajax-error')).toHaveCss({display: 'block'});

@@ -1,4 +1,4 @@
-"""  # lint-amnesty, pylint: disable=cyclic-import
+"""  # pylint: disable=cyclic-import
 Tests for the course grading API view
 """
 
@@ -7,32 +7,44 @@ import json
 from collections import OrderedDict, namedtuple
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import ddt
 import pytest
+from ccx_keys.locator import CCXLocator
+from django.test.utils import override_settings
 from django.urls import reverse
 from edx_toggles.toggles.testutils import override_waffle_flag
 from freezegun import freeze_time
 from opaque_keys.edx.locator import BlockUsageLocator
+from openedx_learning.api import GradedObjectScore
 from pytz import UTC
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.response import Response
+from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
+from rest_framework.views import APIView
 
+import openedx.core.djangoapps.content.block_structure.api as bs_api
 from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.student.models.course_enrollment import CourseEnrollment
 from common.djangoapps.student.roles import (
     CourseBetaTesterRole,
     CourseCcxCoachRole,
     CourseDataResearcherRole,
     CourseInstructorRole,
-    CourseStaffRole
+    CourseStaffRole,
 )
-from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
-from common.djangoapps.student.tests.factories import InstructorFactory
-from common.djangoapps.student.tests.factories import StaffFactory
+from common.djangoapps.student.tests.factories import (
+    CourseEnrollmentFactory,
+    InstructorFactory,
+    StaffFactory,
+    UserFactory,
+)
+from lms.djangoapps.ccx.tests.utils import CcxTestCase
+from lms.djangoapps.certificates.api import create_or_update_eligible_certificate_for_user, get_certificate_for_user_id
 from lms.djangoapps.certificates.data import CertificateStatuses
-from lms.djangoapps.certificates.models import GeneratedCertificate
-from lms.djangoapps.grades.config.waffle import BULK_MANAGEMENT, WRITABLE_GRADEBOOK, waffle_flags
+from lms.djangoapps.grades.config.waffle import BULK_MANAGEMENT, WRITABLE_GRADEBOOK
 from lms.djangoapps.grades.constants import GradeOverrideFeatureEnum
 from lms.djangoapps.grades.course_data import CourseData
 from lms.djangoapps.grades.course_grade import CourseGrade
@@ -41,15 +53,17 @@ from lms.djangoapps.grades.models import (
     BlockRecordList,
     PersistentCourseGrade,
     PersistentSubsectionGrade,
-    PersistentSubsectionGradeOverride
+    PersistentSubsectionGradeOverride,
 )
+from lms.djangoapps.grades.rest_api.v1.gradebook_views import course_author_access_required
 from lms.djangoapps.grades.rest_api.v1.tests.mixins import GradeViewTestMixin
 from lms.djangoapps.grades.rest_api.v1.views import CourseEnrollmentPagination
 from lms.djangoapps.grades.subsection_grade import ReadSubsectionGrade
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangoapps.course_groups.tests.helpers import CohortFactory
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from openedx.core.lib.api.view_utils import DeveloperErrorViewMixin
+from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 # pylint: disable=unused-variable
@@ -58,7 +72,6 @@ class CourseGradingViewTest(SharedModuleStoreTestCase, APITestCase):
     Test course grading view via a RESTful API
     """
     view_name = 'grades_api:v1:course_gradebook_grading_info'
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     @classmethod
     def setUpClass(cls):
@@ -81,54 +94,54 @@ class CourseGradingViewTest(SharedModuleStoreTestCase, APITestCase):
         course.grade_cutoffs = {
             "Pass": 0.5,
         }
-        cls.section = ItemFactory.create(
+        cls.section = BlockFactory.create(
             parent_location=course.location,
             category="chapter",
         )
-        cls.subsection1 = ItemFactory.create(
+        cls.subsection1 = BlockFactory.create(
             parent_location=cls.section.location,
             category="sequential",
         )
-        unit1 = ItemFactory.create(
+        unit1 = BlockFactory.create(
             parent_location=cls.subsection1.location,
             category="vertical",
         )
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=unit1.location,
             category="video",
         )
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=unit1.location,
             category="problem",
         )
 
-        cls.subsection2 = ItemFactory.create(
+        cls.subsection2 = BlockFactory.create(
             parent_location=cls.section.location,
             category="sequential",
         )
-        unit2 = ItemFactory.create(
+        unit2 = BlockFactory.create(  # noqa: F841
             parent_location=cls.subsection2.location,
             category="vertical",
         )
-        unit3 = ItemFactory.create(
+        unit3 = BlockFactory.create(
             parent_location=cls.subsection2.location,
             category="vertical",
         )
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=unit3.location,
             category="video",
         )
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=unit3.location,
             category="video",
         )
-        cls.homework = ItemFactory.create(
+        cls.homework = BlockFactory.create(
             parent_location=cls.section.location,
             category="sequential",
             graded=True,
             format='Homework',
         )
-        cls.midterm = ItemFactory.create(
+        cls.midterm = BlockFactory.create(
             parent_location=cls.section.location,
             category="sequential",
             graded=True,
@@ -142,7 +155,7 @@ class CourseGradingViewTest(SharedModuleStoreTestCase, APITestCase):
         return reverse(
             self.view_name,
             kwargs={
-                'course_id': course_id
+                'course_id': course_id,
             }
         )
 
@@ -271,7 +284,7 @@ class CourseGradingViewTest(SharedModuleStoreTestCase, APITestCase):
         assert resp.status_code == status.HTTP_200_OK
         assert resp.data['can_see_bulk_management'] is True
 
-    @override_waffle_flag(waffle_flags()[BULK_MANAGEMENT], active=True)
+    @override_waffle_flag(BULK_MANAGEMENT, active=True)
     def test_can_see_bulk_management_force_enabled(self):
         # Given a course without (or with) a master's track where bulk management is enabled with the config flag
         # When getting course grading view
@@ -291,25 +304,25 @@ class GradebookViewTestBase(GradeViewTestMixin, APITestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.namespaced_url = 'grades_api:v1:course_gradebook'
-        cls.waffle_flag = waffle_flags()[WRITABLE_GRADEBOOK]
+        cls.waffle_flag = WRITABLE_GRADEBOOK
 
         cls.course = CourseFactory.create(display_name='test-course', run='run-1')
         cls.course_key = cls.course.id
         cls.course_overview = CourseOverviewFactory.create(id=cls.course.id)
 
-        cls.chapter_1 = ItemFactory.create(
+        cls.chapter_1 = BlockFactory.create(
             category='chapter',
             parent_location=cls.course.location,
             display_name="Chapter 1",
         )
-        cls.chapter_2 = ItemFactory.create(
+        cls.chapter_2 = BlockFactory.create(
             category='chapter',
             parent_location=cls.course.location,
             display_name="Chapter 2",
         )
         cls.subsections = {
             cls.chapter_1.location: [
-                ItemFactory.create(
+                BlockFactory.create(
                     category='sequential',
                     parent_location=cls.chapter_1.location,
                     due=datetime(2017, 12, 18, 11, 30, 00),
@@ -317,7 +330,7 @@ class GradebookViewTestBase(GradeViewTestMixin, APITestCase):
                     format='Homework',
                     graded=True,
                 ),
-                ItemFactory.create(
+                BlockFactory.create(
                     category='sequential',
                     parent_location=cls.chapter_1.location,
                     due=datetime(2017, 12, 18, 11, 30, 00),
@@ -327,7 +340,7 @@ class GradebookViewTestBase(GradeViewTestMixin, APITestCase):
                 ),
             ],
             cls.chapter_2.location: [
-                ItemFactory.create(
+                BlockFactory.create(
                     category='sequential',
                     parent_location=cls.chapter_2.location,
                     due=datetime(2017, 12, 18, 11, 30, 00),
@@ -335,7 +348,7 @@ class GradebookViewTestBase(GradeViewTestMixin, APITestCase):
                     format='Homework',
                     graded=True,
                 ),
-                ItemFactory.create(
+                BlockFactory.create(
                     category='sequential',
                     parent_location=cls.chapter_2.location,
                     due=datetime(2017, 12, 18, 11, 30, 00),
@@ -348,7 +361,7 @@ class GradebookViewTestBase(GradeViewTestMixin, APITestCase):
 
         # Data about graded subsections visible to staff only
         # should not be exposed via the gradebook API
-        cls.hidden_subsection = ItemFactory.create(
+        cls.hidden_subsection = BlockFactory.create(
             parent_location=cls.chapter_1.location,
             category='sequential',
             graded=True,
@@ -780,6 +793,7 @@ class GradebookViewTest(GradebookViewTestBase):
                     OrderedDict([
                         ('user_id', self.program_masters_student.id),
                         ('username', self.program_masters_student.username),
+                        ('full_name', self.program_masters_student.profile.name),
                         ('email', self.program_masters_student.email),
                         ('external_user_key', 'program_user_key_0'),
                         ('percent', 0.75),
@@ -828,6 +842,7 @@ class GradebookViewTest(GradebookViewTestBase):
                     OrderedDict([
                         ('user_id', self.program_masters_student.id),
                         ('username', self.program_masters_student.username),
+                        ('full_name', self.program_masters_student.profile.name),
                         ('email', self.program_masters_student.email),
                         ('external_user_key', 'program_user_key_0'),
                         ('percent', 0.75),
@@ -914,6 +929,7 @@ class GradebookViewTest(GradebookViewTestBase):
                     OrderedDict([
                         ('user_id', self.program_masters_student.id),
                         ('username', self.program_masters_student.username),
+                        ('full_name', self.program_masters_student.profile.name),
                         ('email', self.program_masters_student.email),
                         ('external_user_key', 'program_user_key_0'),
                         ('percent', 0.75),
@@ -1081,7 +1097,7 @@ class GradebookViewTest(GradebookViewTestBase):
                 assert status.HTTP_200_OK == resp.status_code
                 actual_data = dict(resp.data)
                 expected_page_size = page_size or CourseEnrollmentPagination.page_size
-                if expected_page_size > user_size:  # lint-amnesty, pylint: disable=consider-using-min-builtin
+                if expected_page_size > user_size:  # pylint: disable=consider-using-min-builtin
                     expected_page_size = user_size
                 assert len(actual_data['results']) == expected_page_size
 
@@ -1463,6 +1479,47 @@ class GradebookViewTest(GradebookViewTestBase):
             ]
         )
 
+    def test_full_name__full_course(self):
+        """ Test that masters students have full_name and that no one else in the course does. """
+        self.login_course_staff()
+        with override_waffle_flag(self.waffle_flag, active=True):
+            with self._mock_all_course_grade_reads():
+                response = self.client.get(self.get_url(course_key=self.course.id))
+
+        assert status.HTTP_200_OK == response.status_code
+        response_data = dict(response.data)
+        assert response_data['next'] is None
+
+        usernames = set()
+        masters_students = set()
+        for row in response_data['results']:
+            username = row['username']
+            usernames.add(username)
+            enrollment = CourseEnrollment.objects.get(user__username=username, course_id=self.course.id)
+            if enrollment.mode == CourseMode.MASTERS:
+                masters_students.add(username)
+                assert 'full_name' in row
+                assert row['full_name'] == enrollment.user.profile.name
+            else:
+                assert 'full_name' not in row
+        assert self.program_masters_student.username in masters_students
+        assert self.program_masters_student.username in usernames
+
+    def test_full_name__single_student(self):
+        """ Test that a request for a masters student includes a full name """
+        self.login_course_staff()
+        with override_waffle_flag(self.waffle_flag, active=True):
+            with patch('lms.djangoapps.grades.course_grade_factory.CourseGradeFactory.read') as mock_grade:
+                mock_grade.return_value = self.mock_course_grade(self.student, passed=True, percent=0.85)
+                response = self.client.get(self.get_url(
+                    course_key=self.course.id,
+                    username=self.program_masters_student.username
+                ))
+
+        assert status.HTTP_200_OK == response.status_code
+        response_data = dict(response.data)
+        assert response_data['full_name'] == self.program_masters_student.profile.name
+
 
 @ddt.ddt
 class GradebookBulkUpdateViewTest(GradebookViewTestBase):
@@ -1666,6 +1723,28 @@ class GradebookBulkUpdateViewTest(GradebookViewTestBase):
             assert status.HTTP_422_UNPROCESSABLE_ENTITY == resp.status_code
             assert expected_data == resp.data
 
+    def test_override_for_unattempted_learner_records_competency_status(self):
+        """
+        A staff-entered grade counts toward competency status even though the learner never attempted the subsection.
+        """
+        subsection = self.subsections[self.chapter_1.location][0]
+        post_data = [{
+            'user_id': self.student.id,
+            'usage_id': str(subsection.location),
+            'grade': {'earned_graded_override': 1, 'possible_graded_override': 2},
+        }]
+
+        with override_waffle_flag(self.waffle_flag, active=True):
+            self.login_staff()
+            with patch('lms.djangoapps.grades.subsection_grade.record_graded_object_statuses') as mock_record:
+                resp = self.client.post(self.get_url(), data=json.dumps(post_data), content_type='application/json')
+
+        assert status.HTTP_202_ACCEPTED == resp.status_code
+        mock_record.assert_any_call(
+            user_id=self.student.id,
+            scores=[GradedObjectScore(object_id=str(subsection.location), fraction=Decimal('0.5'))],
+        )
+
     @ddt.data('login_staff', 'login_course_staff', 'login_course_admin')
     def test_override_is_created(self, login_method):
         """
@@ -1673,7 +1752,7 @@ class GradebookBulkUpdateViewTest(GradebookViewTestBase):
         the score from the most recent request is recorded.
         """
         with override_waffle_flag(self.waffle_flag, active=True):
-            request_user = getattr(self, login_method)()
+            request_user = getattr(self, login_method)()  # noqa: F841
             post_data = [
                 {
                     'user_id': self.student.id,
@@ -1774,11 +1853,12 @@ class GradebookBulkUpdateViewTest(GradebookViewTestBase):
         Test that when we update a user's grade to failing, their certificate is marked notpassing
         """
         with override_waffle_flag(self.waffle_flag, active=True):
-            GeneratedCertificate.eligible_certificates.create(
-                user=self.student,
-                course_id=self.course.id,
-                status=CertificateStatuses.downloadable,
-            )
+            cert_args = {
+                "user": self.student,
+                "course_id": self.course.id,
+                "status": CertificateStatuses.downloadable,
+            }
+            create_or_update_eligible_certificate_for_user(**cert_args)
             self.login_staff()
             post_data = [
                 {
@@ -1808,7 +1888,7 @@ class GradebookBulkUpdateViewTest(GradebookViewTestBase):
                 content_type='application/json',
             )
             assert status.HTTP_202_ACCEPTED == resp.status_code
-            cert = GeneratedCertificate.certificate_for_student(self.student, self.course.id)
+            cert = get_certificate_for_user_id(self.student, self.course.id)
             assert cert.status == CertificateStatuses.notpassing
 
 
@@ -1849,7 +1929,7 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
         }
         cls.grade = PersistentSubsectionGrade.update_or_create_grade(**cls.params)
 
-    def get_url(self, subsection_id=None, user_id=None):  # pylint: disable=arguments-differ
+    def get_url(self, subsection_id=None, user_id=None, history_record_limit=5):  # pylint: disable=arguments-differ
         """
         Helper function to create the course gradebook API url.
         """
@@ -1859,7 +1939,7 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
                 'subsection_id': subsection_id or self.subsection_id,
             }
         )
-        return f"{base_url}?user_id={user_id or self.user_id}"
+        return f"{base_url}?user_id={user_id or self.user_id}&history_record_limit={history_record_limit}"
 
     @patch('lms.djangoapps.grades.subsection_grade_factory.SubsectionGradeFactory.create')
     @ddt.data(
@@ -1948,7 +2028,7 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
     def test_with_override_no_modification(self, login_method):
         getattr(self, login_method)()
 
-        override = PersistentSubsectionGradeOverride.objects.create(
+        override = PersistentSubsectionGradeOverride.objects.create(  # noqa: F841
             grade=self.grade,
             earned_all_override=0.0,
             possible_all_override=12.0,
@@ -1997,6 +2077,32 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
 
         assert expected_data == resp.data
 
+    @freeze_time('2019-01-01')
+    def test_with_override_with_long_history(self):
+        """
+        Test that history is truncated to 5 most recent entries
+        """
+        self.login_staff()
+
+        for i in range(6):
+            override = PersistentSubsectionGradeOverride.update_or_create_override(  # noqa: F841
+                requesting_user=self.global_staff,
+                subsection_grade_model=self.grade,
+                earned_all_override=i,
+                earned_graded_override=i,
+                feature=GradeOverrideFeatureEnum.gradebook,
+            )
+
+        resp = self.client.get(
+            self.get_url(
+                subsection_id=self.usage_key,
+                history_record_limit=5,
+            )
+        )
+
+        assert len(resp.data['history']) == 5
+        assert resp.data['history'][0]['earned_all_override'] != 0.0
+
     @ddt.data(
         'login_staff',
         'login_course_admin',
@@ -2006,7 +2112,7 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
     def test_with_override_with_history(self, login_method):
         getattr(self, login_method)()
 
-        override = PersistentSubsectionGradeOverride.update_or_create_override(
+        override = PersistentSubsectionGradeOverride.update_or_create_override(  # noqa: F841
             requesting_user=self.global_staff,
             subsection_grade_model=self.grade,
             earned_all_override=0.0,
@@ -2061,7 +2167,7 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
         """
         proctoring_failure_fake_comment = "Failed Test Proctoring"
         self.login_course_staff()
-        override = PersistentSubsectionGradeOverride.update_or_create_override(
+        override = PersistentSubsectionGradeOverride.update_or_create_override(  # noqa: F841
             requesting_user=self.global_staff,
             subsection_grade_model=self.grade,
             earned_all_override=0.0,
@@ -2108,7 +2214,7 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
     def test_with_valid_subsection_id_and_valid_user_id_but_no_record(self, login_method):
         getattr(self, login_method)()
 
-        override = PersistentSubsectionGradeOverride.update_or_create_override(
+        override = PersistentSubsectionGradeOverride.update_or_create_override(  # noqa: F841
             requesting_user=self.global_staff,
             subsection_grade_model=self.grade,
             earned_all_override=0.0,
@@ -2147,16 +2253,19 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
 
         assert status.HTTP_403_FORBIDDEN == resp.status_code
 
-    @patch.dict('django.conf.settings.FEATURES', {'DISABLE_START_DATES': False})
+    @override_settings(DISABLE_START_DATES=False)
     def test_get_override_for_unreleased_block(self):
         self.login_course_staff()
-        unreleased_subsection = ItemFactory.create(
+        unreleased_subsection = BlockFactory.create(
             parent_location=self.chapter_1.location,
             category='sequential',
             graded=True,
             start=datetime(2999, 1, 1, tzinfo=UTC),  # arbitrary future date
             display_name='Unreleased Section',
         )
+
+        # We need to update the course in the cache after we create the new block.
+        bs_api.update_course_in_cache(self.course_data.course_key)
 
         resp = self.client.get(
             self.get_url(subsection_id=unreleased_subsection.location)
@@ -2178,3 +2287,104 @@ class SubsectionGradeViewTest(GradebookViewTestBase):
             'history': []
         }
         assert expected_data == resp.data
+
+
+class _StubGradebookAuthView(DeveloperErrorViewMixin, APIView):
+    """Minimal APIView used to exercise `course_author_access_required` in isolation."""
+
+    @course_author_access_required
+    def get(self, request, course_key):  # pylint: disable=arguments-differ
+        return Response({'course_key': str(course_key)}, status=status.HTTP_200_OK)
+
+
+@ddt.ddt
+class CourseAuthorAccessRequiredCCXTests(CcxTestCase):
+    """
+    Tests for the CCX branch added to `course_author_access_required`.
+
+    For CCX ids `has_course_author_access` always returns False (Studio does
+    not support CCX), so access is instead granted to: Django site staff, a
+    staff/instructor on the CCX, or a CCX coach on the underlying master course.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.make_coach()
+        self.ccx = self.make_ccx()
+        self.ccx_key = CCXLocator.from_course_locator(self.course.id, str(self.ccx.id))
+        self.factory = APIRequestFactory()
+        self.view = _StubGradebookAuthView.as_view()
+
+    def _call(self, user, course_id=None):
+        """Invoke the stub view as `user` against a CCX id (default) or the given id."""
+        request = self.factory.get('/fake-gradebook-endpoint/')
+        force_authenticate(request, user=user)
+        return self.view(request, course_id=course_id or str(self.ccx_key))
+
+    def _make_user_with_ccx_access(self, kind):
+        """Build a user with the requested flavor of access to `self.ccx_key`."""
+        if kind == 'coach':
+            return self.coach
+        if kind == 'site_staff':
+            return UserFactory.create(is_staff=True)
+        user = UserFactory.create()
+        if kind == 'ccx_staff':
+            CourseStaffRole(self.ccx_key).add_users(user)
+        elif kind == 'ccx_instructor':
+            CourseInstructorRole(self.ccx_key).add_users(user)
+        else:
+            raise ValueError(f'unknown actor kind: {kind}')
+        return user
+
+    @ddt.data('coach', 'ccx_staff', 'ccx_instructor', 'site_staff')
+    def test_ccx_access_allowed(self, actor):
+        """Each supported CCX-access flavor is granted 200 on a CCX id."""
+        user = self._make_user_with_ccx_access(actor)
+
+        response = self._call(user)
+
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_unrelated_user_is_forbidden(self):
+        """A user with no CCX-related access is rejected with 403 `user_permissions`."""
+        outsider = UserFactory.create()
+
+        response = self._call(outsider)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data.get('error_code') == 'user_permissions'
+
+    def test_master_course_id_still_uses_studio_access_check(self):
+        """Non-CCX ids must keep going through `has_course_author_access`."""
+        outsider = UserFactory.create()
+
+        with patch(
+            'lms.djangoapps.grades.rest_api.v1.gradebook_views.has_course_author_access',
+            return_value=True,
+        ) as mock_has_access:
+            response = self._call(outsider, course_id=str(self.course.id))
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_has_access.assert_called_once_with(outsider, self.course.id)
+
+    def test_ccx_access_denied_when_custom_courses_edx_disabled(self):
+        """The CCX branch respects the platform-level `CUSTOM_COURSES_EDX` toggle."""
+        with override_settings(CUSTOM_COURSES_EDX=False):
+            response = self._call(self.coach)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data.get('error_code') == 'user_permissions'
+
+    def test_ccx_access_denied_when_master_course_disables_ccx(self):
+        """If the master course has `enable_ccx=False`, even the coach is rejected."""
+        master_course = self.store.get_course(self.course.id)
+        master_course.enable_ccx = False
+
+        with patch(
+            'lms.djangoapps.grades.rest_api.v1.gradebook_views.get_course_by_id',
+            return_value=master_course,
+        ):
+            response = self._call(self.coach)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data.get('error_code') == 'user_permissions'

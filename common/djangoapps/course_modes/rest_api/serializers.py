@@ -3,6 +3,7 @@ Course modes API serializers.
 """
 
 
+from opaque_keys.edx.keys import CourseKey
 from rest_framework import serializers
 
 from common.djangoapps.course_modes.models import CourseMode
@@ -39,7 +40,8 @@ class CourseModeSerializer(serializers.Serializer):
         ListCreateAPIView.
         """
         if 'course_id' in validated_data:
-            course_overview = CourseOverview.get_from_id(validated_data['course_id'])
+            course_id = CourseKey.from_string(validated_data['course_id'])
+            course_overview = CourseOverview.get_from_id(course_id)
             del validated_data['course_id']
             validated_data['course'] = course_overview
 

@@ -6,11 +6,12 @@ from collections import defaultdict
 
 import search
 from django.conf import settings
-from django.contrib.auth.models import AnonymousUser, User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import AnonymousUser, User  # pylint: disable=imported-auth-user
 from django.urls import reverse
 from edx_django_utils.monitoring import function_trace
 from edx_when.api import get_dates_for_course
 from opaque_keys.edx.django.models import CourseKeyField
+from opaque_keys.edx.keys import CourseKey
 from rest_framework.exceptions import PermissionDenied
 
 from common.djangoapps.student.models import CourseAccessRole, CourseEnrollment
@@ -19,14 +20,15 @@ from lms.djangoapps.courseware.access import has_access
 from lms.djangoapps.courseware.courses import (
     get_course_overview_with_access,
     get_courses,
-    get_permission_for_course_about
+    get_permission_for_course_about,
 )
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.content.learning_sequences.api import get_course_outline
 from openedx.core.djangoapps.content.learning_sequences.data import CourseOutlineData
 from openedx.core.lib.api.view_utils import LazySequence
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from openedx.features.course_experience import course_home_url
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
 
 from .exceptions import OverEnrollmentLimitException
 from .permissions import can_view_courses_for_username
@@ -80,11 +82,11 @@ def course_detail(request, username, course_key):
     return overview
 
 
-def _filter_by_search(course_queryset, search_term):
+def _filter_by_search(course_queryset, search_term, mobile_search=False):
     """
     Filters a course queryset by the specified search term.
     """
-    if not settings.FEATURES['ENABLE_COURSEWARE_SEARCH'] or not search_term:
+    if not settings.ENABLE_COURSEWARE_SEARCH or not search_term:
         return course_queryset
 
     # Return all the results, 10K is the maximum allowed value for ElasticSearch.
@@ -99,6 +101,13 @@ def _filter_by_search(course_queryset, search_term):
 
     search_courses_ids = {course['data']['id'] for course in search_courses['results']}
 
+    if mobile_search is True:
+        course_limit = getattr(settings, 'MOBILE_SEARCH_COURSE_LIMIT', 100)
+        courses = [course for course in course_queryset[:course_limit] if str(course.id) in search_courses_ids]
+        return LazySequence(
+            iter(courses),
+            est_len=len(courses)
+        )
     return LazySequence(
         (
             course for course in course_queryset
@@ -113,7 +122,10 @@ def list_courses(request,
                  org=None,
                  filter_=None,
                  search_term=None,
-                 permissions=None):
+                 permissions=None,
+                 active_only=False,
+                 course_keys=None,
+                 mobile_search=False):
     """
     Yield all available courses.
 
@@ -142,13 +154,22 @@ def list_courses(request,
         permissions (list[str]):
             If specified, it filters visible `CourseOverview` objects by
             checking if each permission specified is granted for the username.
+        active_only (bool): Optional parameter that enables fetching active courses only.
+        course_keys (list[str]):
+            If specified, it filters visible `CourseOverview` objects by
+            the course keys (ids) provided
+        mobile_search (bool):
+            Optional parameter that limits the number of returned courses
+            to MOBILE_SEARCH_COURSE_LIMIT.
 
     Return value:
         Yield `CourseOverview` objects representing the collection of courses.
     """
     user = get_effective_user(request.user, username)
-    course_qs = get_courses(user, org=org, filter_=filter_, permissions=permissions)
-    course_qs = _filter_by_search(course_qs, search_term)
+    course_qs = get_courses(
+        user, org=org, filter_=filter_, permissions=permissions, active_only=active_only, course_keys=course_keys
+    )
+    course_qs = _filter_by_search(course_qs, search_term, mobile_search)
     return course_qs
 
 
@@ -285,8 +306,8 @@ def get_course_run_url(request, course_id):
     Returns:
         (string): the URL to the course run associated with course_id
     """
-    course_run_url = reverse('openedx.course_experience.course_home', args=[course_id])
-    return request.build_absolute_uri(course_run_url)
+    course_key = CourseKey.from_string(str(course_id))
+    return request.build_absolute_uri(course_home_url(course_key))
 
 
 def get_course_members(course_key):

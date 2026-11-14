@@ -11,7 +11,6 @@ from django.contrib.auth.decorators import login_required
 from django.http import Http404, HttpResponse
 from django.urls import reverse
 from django.views.decorators.http import require_GET
-from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from opaque_keys.edx.keys import CourseKey
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -19,9 +18,9 @@ from rest_framework.views import APIView
 
 from common.djangoapps.edxmako.shortcuts import render_to_response
 from common.djangoapps.util.json_request import JsonResponse, JsonResponseBadRequest
+from lms.djangoapps.courseware.block_render import get_block_for_descriptor
 from lms.djangoapps.courseware.courses import get_course_with_access
 from lms.djangoapps.courseware.model_data import FieldDataCache
-from lms.djangoapps.courseware.module_render import get_module_for_descriptor
 from lms.djangoapps.edxnotes.exceptions import EdxNotesParseError, EdxNotesServiceUnavailable
 from lms.djangoapps.edxnotes.helpers import (
     DEFAULT_PAGE,
@@ -31,7 +30,7 @@ from lms.djangoapps.edxnotes.helpers import (
     get_course_position,
     get_edxnotes_id_token,
     get_notes,
-    is_feature_enabled
+    is_feature_enabled,
 )
 from openedx.core.djangoapps.user_api.accounts.permissions import CanRetireUser
 from openedx.core.djangoapps.user_api.models import RetirementStateError, UserRetirementStatus
@@ -71,13 +70,13 @@ def edxnotes(request, course_id):
     }
 
     if not has_notes:
-        field_data_cache = FieldDataCache.cache_for_descriptor_descendents(
+        field_data_cache = FieldDataCache.cache_for_block_descendents(
             course.id, request.user, course, depth=2
         )
-        course_module = get_module_for_descriptor(
+        course_block = get_block_for_descriptor(
             request.user, request, course, field_data_cache, course_key, course=course
         )
-        position = get_course_position(course_module)
+        position = get_course_position(course_block)
         if position:
             context.update({
                 'position': position,
@@ -176,11 +175,11 @@ def notes(request, course_id):
     except (EdxNotesParseError, EdxNotesServiceUnavailable) as err:
         return JsonResponseBadRequest({"error": str(err)}, status=500)
 
-    return HttpResponse(json.dumps(notes_info, cls=NoteJSONEncoder), content_type="application/json")  # lint-amnesty, pylint: disable=http-response-with-content-type-json, http-response-with-json-dumps
+    return HttpResponse(json.dumps(notes_info, cls=NoteJSONEncoder), content_type="application/json")  # pylint: disable=http-response-with-content-type-json, http-response-with-json-dumps
 
 
 @login_required
-def get_token(request, course_id):  # lint-amnesty, pylint: disable=unused-argument
+def get_token(request, course_id):  # pylint: disable=unused-argument
     """
     Get JWT ID-Token, in case you need new one.
     """
@@ -195,7 +194,7 @@ def edxnotes_visibility(request, course_id):
     course_key = CourseKey.from_string(course_id)
     course = get_course_with_access(request.user, "load", course_key)
     field_data_cache = FieldDataCache([course], course_key, request.user)
-    course_module = get_module_for_descriptor(
+    course_block = get_block_for_descriptor(
         request.user, request, course, field_data_cache, course_key, course=course
     )
 
@@ -204,8 +203,8 @@ def edxnotes_visibility(request, course_id):
 
     try:
         visibility = json.loads(request.body.decode('utf8'))["visibility"]
-        course_module.edxnotes_visibility = visibility
-        course_module.save()
+        course_block.edxnotes_visibility = visibility
+        course_block.save()
         return JsonResponse(status=200)
     except (ValueError, KeyError):
         log.warning(
@@ -244,7 +243,6 @@ class RetireUserView(APIView):
           - EdxNotesServiceUnavailable is thrown: the edx-notes-api IDA is not available.
     """
 
-    authentication_classes = (JwtAuthentication,)
     permission_classes = (permissions.IsAuthenticated, CanRetireUser)
 
     def post(self, request):

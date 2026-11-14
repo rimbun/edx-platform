@@ -5,14 +5,16 @@ Test the student dashboard view.
 
 import itertools
 import json
-import re
 import unittest
-from datetime import timedelta  # lint-amnesty, pylint: disable=unused-import
+from datetime import datetime, timedelta  # pylint: disable=unused-import
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import ddt
 from completion.test_utils import CompletionWaffleTestMixin, submit_completions_for_testing
 from django.conf import settings
+from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils.timezone import now
 from milestones.tests.utils import MilestonesTestCaseMixin
@@ -21,39 +23,52 @@ from opaque_keys.edx.keys import CourseKey
 from pyquery import PyQuery as pq
 
 from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from common.djangoapps.entitlements.tests.factories import CourseEntitlementFactory
 from common.djangoapps.student.helpers import DISABLE_UNENROLL_CERT_STATES
 from common.djangoapps.student.models import CourseEnrollment, UserProfile
 from common.djangoapps.student.signals import REFUND_ORDER
-from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
+from common.djangoapps.student.tests.factories import TEST_PASSWORD, CourseEnrollmentFactory, UserFactory
+from common.djangoapps.student.views.dashboard import check_for_unacknowledged_notices
 from common.djangoapps.util.milestones_helpers import (
     get_course_milestones,
     remove_prerequisite_course,
-    set_prerequisite_courses
+    set_prerequisite_courses,
 )
-from common.djangoapps.util.testing import UrlResetMixin  # lint-amnesty, pylint: disable=unused-import
-from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFactory
+from common.djangoapps.util.testing import UrlResetMixin  # pylint: disable=unused-import  # noqa: F401
 from lms.djangoapps.certificates.data import CertificateStatuses
+from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFactory
+from lms.djangoapps.commerce.utils import EcommerceService
 from openedx.core.djangoapps.catalog.tests.factories import ProgramFactory
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration_context
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 from openedx.features.course_duration_limits.models import CourseDurationLimitConfig
 from openedx.features.course_experience.tests.views.helpers import add_course_mode
-from xmodule.data import CertificatesDisplayBehaviors
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.data import CertificatesDisplayBehaviors  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
-PASSWORD = 'test'
 TOMORROW = now() + timedelta(days=1)
 ONE_WEEK_AGO = now() - timedelta(weeks=1)
-THREE_YEARS_FROM_NOW = now() + timedelta(days=(365 * 3))
-THREE_YEARS_AGO = now() - timedelta(days=(365 * 3))
+THREE_YEARS_FROM_NOW = now() + timedelta(days=365 * 3)
+THREE_YEARS_AGO = now() - timedelta(days=365 * 3)
+
+# Name of the method to mock for Content Type Gating.
+GATING_METHOD_NAME = 'openedx.features.content_type_gating.models.ContentTypeGatingConfig.enabled_for_enrollment'
+
+# Name of the method to mock for Course Duration Limits.
+CDL_METHOD_NAME = 'openedx.features.course_duration_limits.models.CourseDurationLimitConfig.enabled_for_enrollment'
 
 
 @ddt.ddt
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 class TestStudentDashboardUnenrollments(SharedModuleStoreTestCase):
     """
     Test to ensure that the student dashboard does not show the unenroll button for users with certificates.
@@ -71,7 +86,7 @@ class TestStudentDashboardUnenrollments(SharedModuleStoreTestCase):
         self.user = UserFactory()
         self.enrollment = CourseEnrollmentFactory(course_id=self.course.id, user=self.user)
         self.cert_status = 'processing'
-        self.client.login(username=self.user.username, password=PASSWORD)
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
     def mock_cert(self, _user, _course_overview):
         """ Return a preset certificate status. """
@@ -141,13 +156,14 @@ class TestStudentDashboardUnenrollments(SharedModuleStoreTestCase):
 
     def test_course_run_refund_status_successful(self):
         """ Assert that view:course_run_refund_status returns correct Json for successful refund call."""
-        with patch('common.djangoapps.student.models.CourseEnrollment.refundable', return_value=True):
+        with patch('common.djangoapps.student.models.course_enrollment.CourseEnrollment.refundable', return_value=True):
             response = self.client.get(reverse('course_run_refund_status', kwargs={'course_id': self.course.id}))
 
         assert json.loads(response.content.decode('utf-8')) == {'course_refundable_status': True}
         assert response.status_code == 200
 
-        with patch('common.djangoapps.student.models.CourseEnrollment.refundable', return_value=False):
+        REFUNDABLE_METHOD_NAME = 'common.djangoapps.student.models.course_enrollment.CourseEnrollment.refundable'
+        with patch(REFUNDABLE_METHOD_NAME, return_value=False):
             response = self.client.get(reverse('course_run_refund_status', kwargs={'course_id': self.course.id}))
 
         assert json.loads(response.content.decode('utf-8')) == {'course_refundable_status': False}
@@ -168,7 +184,7 @@ class TestStudentDashboardUnenrollments(SharedModuleStoreTestCase):
 
 
 @ddt.ddt
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, CompletionWaffleTestMixin):
     """
     Tests for the student dashboard.
@@ -177,11 +193,8 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
     EMAIL_SETTINGS_ELEMENT_ID = "#actions-item-email-settings-0"
     ENABLED_SIGNALS = ['course_published']
     MOCK_SETTINGS = {
-        'FEATURES': {
-            'DISABLE_START_DATES': False,
-            'ENABLE_MKTG_SITE': True,
-            'DISABLE_SET_JWT_COOKIES_FOR_TESTS': True,
-        },
+        'DISABLE_START_DATES': False,
+        'DISABLE_SET_JWT_COOKIES_FOR_TESTS': True,
         'SOCIAL_SHARING_SETTINGS': {
             'CUSTOM_COURSE_URLS': True,
             'DASHBOARD_FACEBOOK': True,
@@ -189,10 +202,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         },
     }
     MOCK_SETTINGS_HIDE_COURSES = {
-        'FEATURES': {
-            'HIDE_DASHBOARD_COURSES_UNTIL_ACTIVATED': True,
-            'DISABLE_SET_JWT_COOKIES_FOR_TESTS': True,
-        }
+        'DISABLE_SET_JWT_COOKIES_FOR_TESTS': True,
     }
 
     def setUp(self):
@@ -201,7 +211,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         """
         super().setUp()
         self.user = UserFactory()
-        self.client.login(username=self.user.username, password=PASSWORD)
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
         self.path = reverse('dashboard')
 
     def set_course_sharing_urls(self, set_marketing, set_social_sharing):
@@ -223,7 +233,16 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         """
         UserProfile.objects.get(user=self.user).delete()
         response = self.client.get(self.path)
-        self.assertRedirects(response, reverse('account_settings'))
+        self.assertRedirects(response, settings.ACCOUNT_MICROFRONTEND_URL, target_status_code=302)
+
+    @patch('common.djangoapps.student.views.dashboard.learner_home_mfe_enabled')
+    def test_redirect_to_learner_home(self, mock_learner_home_mfe_enabled):
+        """
+        if learner home mfe is enabled, redirect to learner home mfe
+        """
+        mock_learner_home_mfe_enabled.return_value = True
+        response = self.client.get(self.path)
+        self.assertRedirects(response, settings.LEARNER_HOME_MICROFRONTEND_URL, fetch_redirect_response=False)
 
     def test_course_cert_available_message_after_course_end(self):
         course_key = CourseKey.from_string('course-v1:edX+DemoX+Demo_Course')
@@ -278,17 +297,16 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         *itertools.product(
             [True, False],
             [True, False],
-            [ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split],
         )
     )
     @ddt.unpack
-    def test_sharing_icons_for_future_course(self, set_marketing, set_social_sharing, modulestore_type):
+    def test_sharing_icons_for_future_course(self, set_marketing, set_social_sharing):
         """
         Verify that the course sharing icons show up if course is starting in future and
         any of marketing or social sharing urls are set.
         """
-        self.course = CourseFactory.create(start=TOMORROW, emit_signals=True, default_store=modulestore_type)  # lint-amnesty, pylint: disable=attribute-defined-outside-init
-        self.course_enrollment = CourseEnrollmentFactory(course_id=self.course.id, user=self.user)  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.course = CourseFactory.create(start=TOMORROW, emit_signals=True)  # pylint: disable=attribute-defined-outside-init
+        self.course_enrollment = CourseEnrollmentFactory(course_id=self.course.id, user=self.user)  # pylint: disable=attribute-defined-outside-init
         self.set_course_sharing_urls(set_marketing, set_social_sharing)
 
         # Assert course sharing icons
@@ -296,21 +314,21 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         assert ('Share on Twitter' in response.content.decode('utf-8')) == (set_marketing or set_social_sharing)
         assert ('Share on Facebook' in response.content.decode('utf-8')) == (set_marketing or set_social_sharing)
 
-    @patch.dict("django.conf.settings.FEATURES", {'ENABLE_PREREQUISITE_COURSES': True})
+    @override_settings(ENABLE_PREREQUISITE_COURSES=True)
     def test_pre_requisites_appear_on_dashboard(self):
         """
         When a course has a prerequisite, the dashboard should display the prerequisite.
         If we remove the prerequisite and access the dashboard again, the prerequisite
         should not appear.
         """
-        self.pre_requisite_course = CourseFactory.create(org='edx', number='999', display_name='Pre requisite Course')  # lint-amnesty, pylint: disable=attribute-defined-outside-init
-        self.course = CourseFactory.create(  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.pre_requisite_course = CourseFactory.create(org='edx', number='999', display_name='Pre requisite Course')  # pylint: disable=attribute-defined-outside-init
+        self.course = CourseFactory.create(  # pylint: disable=attribute-defined-outside-init
             org='edx',
             number='998',
             display_name='Test Course',
             pre_requisite_courses=[str(self.pre_requisite_course.id)]
         )
-        self.course_enrollment = CourseEnrollmentFactory(course_id=self.course.id, user=self.user)  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.course_enrollment = CourseEnrollmentFactory(course_id=self.course.id, user=self.user)  # pylint: disable=attribute-defined-outside-init
 
         set_prerequisite_courses(self.course.id, [str(self.pre_requisite_course.id)])
         response = self.client.get(reverse('dashboard'))
@@ -524,7 +542,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
             start=TOMORROW, self_paced=True, enrollment_end=TOMORROW
         )
         mock_course_overview.return_value = mocked_course_overview
-        course_enrollment = CourseEnrollmentFactory(user=self.user, course_id=str(mocked_course_overview.id), created=THREE_YEARS_AGO)  # lint-amnesty, pylint: disable=line-too-long
+        course_enrollment = CourseEnrollmentFactory(user=self.user, course_id=str(mocked_course_overview.id), created=THREE_YEARS_AGO)  # pylint: disable=line-too-long
         mock_course_runs.return_value = [
             {
                 'key': str(mocked_course_overview.id),
@@ -534,7 +552,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
                 'status': 'published'
             }
         ]
-        entitlement = CourseEntitlementFactory(user=self.user, enrollment_course_run=course_enrollment, created=THREE_YEARS_AGO)  # lint-amnesty, pylint: disable=line-too-long
+        entitlement = CourseEntitlementFactory(user=self.user, enrollment_course_run=course_enrollment, created=THREE_YEARS_AGO)  # pylint: disable=line-too-long
         program = ProgramFactory()
         program['courses'][0]['course_runs'] = [{'key': str(mocked_course_overview.id)}]
         program['courses'][0]['uuid'] = entitlement.course_uuid
@@ -577,6 +595,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         response = self.client.get(self.path)
         assert pq(response.content)(self.EMAIL_SETTINGS_ELEMENT_ID).length == 0
 
+    @override_settings(HIDE_DASHBOARD_COURSES_UNTIL_ACTIVATED=True)
     @patch.multiple('django.conf.settings', **MOCK_SETTINGS_HIDE_COURSES)
     def test_hide_dashboard_courses_until_activated(self):
         """
@@ -637,16 +656,13 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         return ''.join(response.content.decode('utf-8').split())
 
     @staticmethod
-    def _pull_course_run_from_course_key(course_key_string):  # lint-amnesty, pylint: disable=missing-function-docstring
-        search_results = re.search(r'Run_[0-9]+$', course_key_string)
-        assert search_results
-        course_run_string = search_results.group(0).replace('_', ' ')
-        return course_run_string
+    def _pull_course_run_from_course_key(course_key: CourseKey):  # pylint: disable=missing-function-docstring
+        return course_key.run.replace('_', ' ')
 
     @staticmethod
     def _get_html_for_view_course_button(course_key_string, course_run_string):
         return '''
-            <a href="/courses/{course_key}/course/"
+            <a href="http://learning-mfe/course/{course_key}/home"
                class="course-target-link enter-course"
                data-course-key="{course_key}">
               View Course
@@ -654,7 +670,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
                 &nbsp;{course_run}
               </span>
             </a>
-        '''.format(course_key=course_key_string, course_run=course_run_string)
+        '''.format(course_key=course_key_string, course_run=course_run_string)  # noqa: UP032
 
     @staticmethod
     def _get_html_for_resume_course_button(course_key_string, resume_block_key_string, course_run_string):
@@ -667,14 +683,14 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
                 &nbsp;{course_run}
               </span>
             </a>
-        '''.format(
+        '''.format(  # noqa: UP032
             course_key=course_key_string,
             url_to_block=resume_block_key_string,
             course_run=course_run_string
         )
 
     @staticmethod
-    def _get_html_for_entitlement_button(course_key_string):
+    def _get_html_for_entitlement_button(course_key: CourseKey):
         return'''
             <div class="course-info">
             <span class="info-university">{org} - </span>
@@ -683,9 +699,9 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
             <button class="change-session btn-link ">Change or Leave Session</button>
             </span>
             </div>
-        '''.format(
-            org=course_key_string.split('/')[0],
-            course=course_key_string.split('/')[1]
+        '''.format(  # noqa: UP032
+            org=course_key.org,
+            course=course_key.course,
         )
 
     def test_view_course_appears_on_dashboard(self):
@@ -706,7 +722,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
         course_key_string = str(course.id)
         # No completion data means there's no block from which to resume.
         resume_block_key_string = ''
-        course_run_string = self._pull_course_run_from_course_key(course_key_string)
+        course_run_string = self._pull_course_run_from_course_key(course.id)
 
         view_button_html = self._get_html_for_view_course_button(
             course_key_string,
@@ -740,7 +756,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
 
         course_key = course.id
         block_keys = [
-            ItemFactory.create(
+            BlockFactory.create(
                 category='video',
                 parent_location=course.location,
                 display_name=f'Video {str(number)}'
@@ -754,7 +770,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
 
         course_key_string = str(course_key)
         resume_block_key_string = str(block_keys[-1])
-        course_run_string = self._pull_course_run_from_course_key(course_key_string)
+        course_run_string = self._pull_course_run_from_course_key(course_key)
 
         view_button_html = self._get_html_for_view_course_button(
             course_key_string,
@@ -835,13 +851,12 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
 
             else:
                 last_completed_block_string = ''
-                course_run_string = self._pull_course_run_from_course_key(
-                    course_key_string)
+                course_run_string = self._pull_course_run_from_course_key(course_key)
 
             # Submit completed course blocks in even-numbered courses.
             if isEven(i):
                 block_keys = [
-                    ItemFactory.create(
+                    BlockFactory.create(
                         category='video',
                         parent_location=course.location,
                         display_name=f'Video {str(number)}'
@@ -866,9 +881,7 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
                 )
             )
             html_for_entitlement.append(
-                self._get_html_for_entitlement_button(
-                    course_key_string
-                )
+                self._get_html_for_entitlement_button(course_key)
             )
 
         response = self.client.get(reverse('dashboard'))
@@ -905,3 +918,242 @@ class StudentDashboardTests(SharedModuleStoreTestCase, MilestonesTestCaseMixin, 
 
             assert expected_button in dashboard_html
             assert unexpected_button not in dashboard_html
+
+    @ddt.data(
+        # Ecommerce is not enabled
+        (False, True, False, 'abcdef', False),
+        # No verified mode
+        (True, False, False, 'abcdef', False),
+        # User has an entitlement
+        (True, True, True, 'abcdef', False),
+        # No SKU
+        (True, True, False, None, False),
+        (True, True, False, 'abcdef', True)
+    )
+    @ddt.unpack
+    def test_course_upgrade_notification(
+        self, ecommerce_enabled, has_verified_mode, has_entitlement, sku, should_display
+    ):
+        """
+        Upgrade notification for a course should appear if:
+            - Ecommerce service is enabled
+            - The course has a paid/verified mode
+            - The user doesn't have an entitlement for the course
+            - The course has an associated SKU
+        """
+        with patch.object(EcommerceService, 'is_enabled', return_value=ecommerce_enabled):
+            course = CourseFactory.create()
+
+            if has_verified_mode:
+                CourseModeFactory.create(
+                    course_id=course.id,
+                    mode_slug='verified',
+                    mode_display_name='Verified',
+                    expiration_datetime=datetime.now(ZoneInfo("UTC")) + timedelta(days=1),
+                    sku=sku
+                )
+
+            enrollment = CourseEnrollmentFactory(
+                user=self.user,
+                course_id=course.id
+            )
+
+            if has_entitlement:
+                CourseEntitlementFactory(user=self.user, enrollment_course_run=enrollment)
+
+            response = self.client.get(reverse('dashboard'))
+            html_fragment = '<div class="message message-upsell has-actions is-shown">'
+            if should_display:
+                self.assertContains(response, html_fragment)
+            else:
+                self.assertNotContains(response, html_fragment)
+
+    @ddt.data(
+        # gated_content_on, course_duration_limits_on, upgrade_message
+        (True, True, 'Upgrade to get full access to the course material'),
+        (True, False, 'Upgrade to earn'),
+        (False, True, 'Upgrade to earn'),
+        (False, False, 'Upgrade to earn'),
+    )
+    @ddt.unpack
+    def test_happy_path_upgrade_message(
+        self,
+        gated_content_on,
+        course_duration_limits_on,
+        upgrade_message
+    ):
+        """
+        Upgrade message should be different for a course depending if it's happy or non-happy path.
+        Happy path requirements:
+        - Learner can upgrade (verified_mode)
+        - FBE is on (has an audit_access_deadline and is able to see gated_content)
+        """
+        with patch.object(EcommerceService, 'is_enabled', return_value=True):
+            course = CourseFactory.create()
+            CourseEnrollmentFactory.create(
+                user=self.user,
+                course_id=course.id
+            )
+
+            CourseModeFactory.create(
+                course_id=course.id,
+                mode_slug='verified',
+                mode_display_name='Verified',
+                min_price=149,
+                sku='abcdef',
+            )
+
+            with patch(GATING_METHOD_NAME, return_value=gated_content_on):
+                with patch(CDL_METHOD_NAME, return_value=course_duration_limits_on):
+                    response = self.client.get(reverse('dashboard'))
+                    self.assertContains(response, upgrade_message)
+
+
+@skip_unless_lms
+# TODO: It seems like ENABLE_NOTICES does not exist on the backend at all. There's a
+# frontend config flag called ENABLE_NOTICES, but it's unaffected by anything on the
+# backend. We should remove this skipUnless and the override_settings calls, and get
+# then get these tests to pass as-is.
+@unittest.skipUnless(getattr(settings, "ENABLE_NOTICES", False), 'Notices plugin is not enabled')
+class TestCourseDashboardNoticesRedirects(SharedModuleStoreTestCase):
+    """
+    Tests for the Dashboard redirect functionality introduced via the Notices plugin.
+    """
+    def setUp(self):
+        super().setUp()
+        self.user = UserFactory()
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
+        self.path = reverse('dashboard')
+
+    def test_check_for_unacknowledged_notices(self):
+        """
+        Happy path. Verifies that we return a URL in the proper form for a user that has an unack'd Notice.
+        """
+        context = {
+            "plugins": {
+                "notices": {
+                    "unacknowledged_notices": [
+                        '/notices/render/1/',
+                        '/notices/render/2/',
+                    ],
+                }
+            }
+        }
+
+        path = reverse("notices:notice-detail", kwargs={"pk": 1})
+        expected_results = f"{settings.LMS_ROOT_URL}{path}?next={settings.LMS_ROOT_URL}/dashboard/"
+
+        results = check_for_unacknowledged_notices(context)
+        assert results == expected_results
+
+    def test_check_for_unacknowledged_notices_no_unacknowledged_notices(self):
+        """
+        Verifies that we will return None if the user has no unack'd Notices in the plugin context data.
+        """
+        context = {
+            "plugins": {
+                "notices": {
+                    "unacknowledged_notices": [],
+                }
+            }
+        }
+
+        results = check_for_unacknowledged_notices(context)
+        assert results is None
+
+    def test_check_for_unacknowledged_notices_incorrect_data(self):
+        """
+        Verifies that we will return None (and no Exceptions are thrown) if the plugin context data doesn't match the
+        expected form.
+        """
+        context = {
+            "plugins": {
+                "notices": {
+                    "incorrect_key": [
+                        '/notices/render/1/',
+                        '/notices/render/2/',
+                    ],
+                }
+            }
+        }
+
+        results = check_for_unacknowledged_notices(context)
+
+        assert results is None
+
+    @patch('common.djangoapps.student.views.dashboard.check_for_unacknowledged_notices')
+    def test_user_with_unacknowledged_notice(self, mock_notices):
+        """
+        Verifies that we will redirect the learner to the URL returned from the `check_for_unacknowledged_notices`
+        function.
+        """
+        mock_notices.return_value = reverse("root")
+
+        with override_settings(ENABLE_NOTICES=True):
+            response = self.client.get(self.path)
+
+        assert response.status_code == 302
+        assert response.url == "/"
+        mock_notices.assert_called_once()
+
+    @patch('common.djangoapps.student.views.dashboard.check_for_unacknowledged_notices')
+    def test_user_with_unacknowledged_notice_no_notices(self, mock_notices):
+        """
+        Verifies that we will NOT redirect the user if the result of calling the `check_for_unacknowledged_notices`
+        function is None.
+        """
+        mock_notices.return_value = None
+
+        with override_settings(ENABLE_NOTICES=True):
+            response = self.client.get(self.path)
+
+        assert response.status_code == 200
+        mock_notices.assert_called_once()
+
+    @patch('common.djangoapps.student.views.dashboard.check_for_unacknowledged_notices')
+    def test_user_with_unacknowledged_notice_plugin_disabled(self, mock_notices):
+        """
+        Verifies that the `check_for_unacknowledged_notices` function is NOT called if the feature is disabled.
+        """
+        mock_notices.return_value = None
+
+        with override_settings(ENABLE_NOTICES=False):
+            response = self.client.get(self.path)
+
+        assert response.status_code == 200
+        mock_notices.assert_not_called()
+
+
+@ddt.ddt
+@skip_unless_lms
+@patch('common.djangoapps.student.views.management.log')
+class ChangeEmailSettingsLogTest(TestCase):
+    """
+    The change_email_settings logs identify the user by id, without username or email, when
+    SQUELCH_PII_IN_LOGS is enabled.
+    """
+
+    COURSE_ID = 'course-v1:edX+Demo+2026'
+
+    def setUp(self):
+        super().setUp()
+        self.user = UserFactory.create()
+        assert self.client.login(username=self.user.username, password=TEST_PASSWORD)
+
+    @ddt.data(
+        (True, True, 'User %s opted in to receive emails from course %s'),
+        (False, True, 'User %s opted in to receive emails from course %s'),
+        (True, False, 'User %s opted out of receiving emails from course %s'),
+        (False, False, 'User %s opted out of receiving emails from course %s'),
+    )
+    @ddt.unpack
+    def test_log_squelches_pii(self, squelch_pii, receive_emails, message, mock_log):
+        data = {'course_id': self.COURSE_ID}
+        if receive_emails:
+            data['receive_emails'] = 'on'
+        with override_settings(SQUELCH_PII_IN_LOGS=squelch_pii):
+            response = self.client.post(reverse('change_email_settings'), data)
+
+        assert response.status_code == 200
+        expected_identifier = self.user.id if squelch_pii else f'{self.user.username} ({self.user.email})'
+        mock_log.info.assert_called_once_with(message, expected_identifier, self.COURSE_ID)

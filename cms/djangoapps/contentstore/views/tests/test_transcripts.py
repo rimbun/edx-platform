@@ -15,23 +15,27 @@ from django.test.utils import override_settings
 from django.urls import reverse
 from edxval.api import create_video
 from opaque_keys.edx.keys import UsageKey
+from organizations.tests.factories import OrganizationFactory
 
-from cms.djangoapps.contentstore.tests.utils import CourseTestCase, mock_requests_get
+from cms.djangoapps.contentstore.tests.utils import CourseTestCase, setup_caption_responses
+from openedx.core.djangoapps.content_libraries import api as lib_api
 from openedx.core.djangoapps.contentserver.caching import del_cached_content
-from xmodule.contentstore.content import StaticContent
-from xmodule.contentstore.django import contentstore
-from xmodule.exceptions import NotFoundError
-from xmodule.modulestore.django import modulestore
-from xmodule.video_module import VideoBlock
-from xmodule.video_module.transcripts_utils import (
+from openedx.core.djangoapps.video_config.transcripts_utils import (  # pylint: disable=wrong-import-order
     GetTranscriptsFromYouTubeException,
     Transcript,
+    get_transcript,
     get_video_transcript_content,
-    remove_subs_from_store
+    remove_subs_from_store,
 )
+from openedx.core.djangoapps.xblock import api as xblock_api
+from xmodule.contentstore.content import StaticContent  # pylint: disable=wrong-import-order
+from xmodule.contentstore.django import contentstore  # pylint: disable=wrong-import-order
+from xmodule.exceptions import NotFoundError  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.video_block import VideoBlock  # pylint: disable=wrong-import-order
 
 TEST_DATA_CONTENTSTORE = copy.deepcopy(settings.CONTENTSTORE)
-TEST_DATA_CONTENTSTORE['DOC_STORE_CONFIG']['db'] = 'test_xcontent_%s' % uuid4().hex
+TEST_DATA_CONTENTSTORE['DOC_STORE_CONFIG']['db'] = 'test_xcontent_%s' % uuid4().hex  # noqa: UP031
 
 SRT_TRANSCRIPT_CONTENT = """0
 00:00:10,500 --> 00:00:13,000
@@ -83,14 +87,29 @@ class BaseTranscripts(CourseTestCase):
         """Create initial data."""
         super().setUp()
 
-        # Add video module
+        # Add video block
         data = {
             'parent_locator': str(self.course.location),
             'category': 'video',
             'type': 'video'
         }
         resp = self.client.ajax_post('/xblock/', data)
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 200)  # noqa: PT009
+
+        self.library = lib_api.create_library(
+            org=OrganizationFactory.create(short_name="org1"),
+            slug="lib",
+            title="Library",
+        )
+        self.library_block_metadata = lib_api.create_library_block(
+            self.library.key,
+            "video",
+            "video-transcript",
+        )
+        self.library_block = xblock_api.load_block(
+            self.library_block_metadata.usage_key,
+            self.user,
+        )
 
         self.video_usage_key = self._get_usage_key(resp)
         self.item = modulestore().get_item(self.video_usage_key)
@@ -102,7 +121,7 @@ class BaseTranscripts(CourseTestCase):
         modulestore().update_item(self.item, self.user.id)
 
         self.item = modulestore().get_item(self.video_usage_key)
-        # Remove all transcripts for current module.
+        # Remove all transcripts for current block.
         self.clear_subs_content()
 
     def _get_usage_key(self, resp):
@@ -121,27 +140,27 @@ class BaseTranscripts(CourseTestCase):
             1.5: item.youtube_id_1_5
         }
 
-    def create_non_video_module(self):
+    def create_non_video_block(self):
         """
-        Setup non video module for tests.
+        Setup non video block for tests.
         """
         data = {
             'parent_locator': str(self.course.location),
-            'category': 'non_video',
-            'type': 'non_video'
+            'category': 'problem',
+            'type': 'problem'
         }
         response = self.client.ajax_post('/xblock/', data)
         usage_key = self._get_usage_key(response)
         item = modulestore().get_item(usage_key)
-        self.set_fields_from_xml(self.item, '<non_video youtube="0.75:JMD_ifUUfsU,1.0:hI10vDNYz4M" />')
+        self.set_fields_from_xml(self.item, '<problem youtube="0.75:JMD_ifUUfsU,1.0:hI10vDNYz4M" />')
         modulestore().update_item(item, self.user.id)
 
         return usage_key
 
     def assert_response(self, response, expected_status_code, expected_message):
         response_content = json.loads(response.content.decode('utf-8'))
-        self.assertEqual(response.status_code, expected_status_code)
-        self.assertEqual(response_content['status'], expected_message)
+        self.assertEqual(response.status_code, expected_status_code)  # noqa: PT009
+        self.assertEqual(response_content['status'], expected_message)  # noqa: PT009
 
     def set_fields_from_xml(self, item, xml):
         fields_data = VideoBlock.parse_video_xml(xml)
@@ -183,12 +202,12 @@ class TestUploadTranscripts(BaseTranscripts):
         """
         Setup a transcript file with suffix and content.
         """
-        transcript_file = tempfile.NamedTemporaryFile(suffix=suffix)  # lint-amnesty, pylint: disable=consider-using-with
+        transcript_file = tempfile.NamedTemporaryFile(suffix=suffix)  # pylint: disable=consider-using-with
         wrapped_content = textwrap.dedent(content)
         if include_bom:
             wrapped_content = wrapped_content.encode('utf-8-sig')
             # Verify that ufeff(BOM) character is in content.
-            self.assertIn(BOM_UTF8, wrapped_content)
+            self.assertIn(BOM_UTF8, wrapped_content)  # noqa: PT009
             transcript_file.write(wrapped_content)
         else:
             transcript_file.write(wrapped_content.encode('utf-8'))
@@ -255,7 +274,8 @@ class TestUploadTranscripts(BaseTranscripts):
         json_response = json.loads(response.content.decode('utf-8'))
         expected_edx_video_id = edx_video_id if edx_video_id else json_response['edx_video_id']
         video = modulestore().get_item(self.video_usage_key)
-        self.assertEqual(video.edx_video_id, expected_edx_video_id)
+        self.assertEqual(video.edx_video_id, expected_edx_video_id)  # noqa: PT009
+        self.assertDictEqual(video.transcripts, {'en': f'{expected_edx_video_id}-en.srt'})  # noqa: PT009
 
         # Verify transcript content
         actual_transcript = get_video_transcript_content(video.edx_video_id, language_code='en')
@@ -265,7 +285,7 @@ class TestUploadTranscripts(BaseTranscripts):
             input_format=Transcript.SRT,
             output_format=Transcript.SJSON
         ))
-        self.assertDictEqual(actual_sjson_content, expected_sjson_content)
+        self.assertDictEqual(actual_sjson_content, expected_sjson_content)  # noqa: PT009
 
     def test_transcript_upload_without_locator(self):
         """
@@ -319,19 +339,21 @@ class TestUploadTranscripts(BaseTranscripts):
             expected_status_code=400,
             expected_message='There is a problem with this transcript file. Try to upload a different file.'
         )
+        video = modulestore().get_item(self.video_usage_key)
+        self.assertDictEqual(video.transcripts, {})  # noqa: PT009
 
     def test_transcript_upload_unknown_category(self):
         """
         Test that transcript upload validation fails if item's category is other than video.
         """
-        # non_video module setup - i.e. an item whose category is not 'video'.
-        usage_key = self.create_non_video_module()
+        # non_video block setup - i.e. an item whose category is not 'video'.
+        usage_key = self.create_non_video_block()
         # Request to upload transcript for the item
         response = self.upload_transcript(locator=usage_key, transcript_file=self.good_srt_file, edx_video_id='')
         self.assert_response(
             response,
             expected_status_code=400,
-            expected_message='Transcripts are supported only for "video" modules.'
+            expected_message='Transcripts are supported only for "video" blocks.'
         )
 
     def test_transcript_upload_non_existent_item(self):
@@ -364,7 +386,7 @@ class TestUploadTranscripts(BaseTranscripts):
     def test_transcript_upload_with_non_existant_edx_video_id(self):
         """
         Test that transcript upload works as expected if `edx_video_id` set on
-        video descriptor is different from `edx_video_id` received in POST request.
+        video block is different from `edx_video_id` received in POST request.
         """
         non_existant_edx_video_id = '1111-2222-3333-4444'
 
@@ -378,7 +400,7 @@ class TestUploadTranscripts(BaseTranscripts):
         self.assert_response(response, expected_status_code=400, expected_message='Invalid Video ID')
 
         # Verify transcript does not exist for non-existant `edx_video_id`
-        self.assertIsNone(get_video_transcript_content(non_existant_edx_video_id, language_code='en'))
+        self.assertIsNone(get_video_transcript_content(non_existant_edx_video_id, language_code='en'))  # noqa: PT009
 
 
 @ddt.ddt
@@ -443,13 +465,13 @@ class TestChooseTranscripts(BaseTranscripts):
         json_response = json.loads(response.content.decode('utf-8'))
         expected_edx_video_id = edx_video_id if edx_video_id else json_response['edx_video_id']
         video = modulestore().get_item(self.video_usage_key)
-        self.assertEqual(video.edx_video_id, expected_edx_video_id)
+        self.assertEqual(video.edx_video_id, expected_edx_video_id)  # noqa: PT009
 
         # Verify transcript content
         actual_transcript = get_video_transcript_content(video.edx_video_id, language_code='en')
         actual_sjson_content = json.loads(actual_transcript['content'].decode('utf-8'))
         expected_sjson_content = json.loads(self.sjson_subs)
-        self.assertDictEqual(actual_sjson_content, expected_sjson_content)
+        self.assertDictEqual(actual_sjson_content, expected_sjson_content)  # noqa: PT009
 
     def test_choose_transcript_fails_without_data(self):
         """
@@ -489,14 +511,14 @@ class TestChooseTranscripts(BaseTranscripts):
         """
         Test that transcript choose validation fails if item's category is other than video.
         """
-        # non_video module setup - i.e. an item whose category is not 'video'.
-        usage_key = self.create_non_video_module()
+        # non_video block setup - i.e. an item whose category is not 'video'.
+        usage_key = self.create_non_video_block()
         # Request to choose transcript for the item
         response = self.choose_transcript(locator=usage_key, chosen_html5_id=self.chosen_html5_id)
         self.assert_response(
             response,
             expected_status_code=400,
-            expected_message='Transcripts are supported only for "video" modules.'
+            expected_message='Transcripts are supported only for "video" blocks.'
         )
 
 
@@ -560,13 +582,13 @@ class TestRenameTranscripts(BaseTranscripts):
         json_response = json.loads(response.content.decode('utf-8'))
         expected_edx_video_id = edx_video_id if edx_video_id else json_response['edx_video_id']
         video = modulestore().get_item(self.video_usage_key)
-        self.assertEqual(video.edx_video_id, expected_edx_video_id)
+        self.assertEqual(video.edx_video_id, expected_edx_video_id)  # noqa: PT009
 
         # Verify transcript content
         actual_transcript = get_video_transcript_content(video.edx_video_id, language_code='en')
         actual_sjson_content = json.loads(actual_transcript['content'].decode('utf-8'))
         expected_sjson_content = json.loads(self.sjson_subs)
-        self.assertDictEqual(actual_sjson_content, expected_sjson_content)
+        self.assertDictEqual(actual_sjson_content, expected_sjson_content)  # noqa: PT009
 
     def test_rename_transcript_fails_without_data(self):
         """
@@ -611,21 +633,21 @@ class TestRenameTranscripts(BaseTranscripts):
         """
         Test that validation fails if item's category is other than video.
         """
-        # non_video module setup - i.e. an item whose category is not 'video'.
-        usage_key = self.create_non_video_module()
+        # non_video block setup - i.e. an item whose category is not 'video'.
+        usage_key = self.create_non_video_block()
         # Make call to use current transcript from contentstore.
         response = self.rename_transcript(usage_key)
         self.assert_response(
             response,
             expected_status_code=400,
-            expected_message='Transcripts are supported only for "video" modules.'
+            expected_message='Transcripts are supported only for "video" blocks.'
         )
 
 
 @ddt.ddt
 @patch(
     'cms.djangoapps.contentstore.views.transcripts_ajax.download_youtube_subs',
-    Mock(return_value=SJSON_TRANSCRIPT_CONTENT)
+    Mock(return_value=[['en', SJSON_TRANSCRIPT_CONTENT]])
 )
 class TestReplaceTranscripts(BaseTranscripts):
     """
@@ -691,13 +713,32 @@ class TestReplaceTranscripts(BaseTranscripts):
         json_response = json.loads(response.content.decode('utf-8'))
         expected_edx_video_id = edx_video_id if edx_video_id else json_response['edx_video_id']
         video = modulestore().get_item(self.video_usage_key)
-        self.assertEqual(video.edx_video_id, expected_edx_video_id)
+        self.assertEqual(video.edx_video_id, expected_edx_video_id)  # noqa: PT009
 
         # Verify transcript content
         actual_transcript = get_video_transcript_content(video.edx_video_id, language_code='en')
         actual_sjson_content = json.loads(actual_transcript['content'].decode('utf-8'))
         expected_sjson_content = json.loads(SJSON_TRANSCRIPT_CONTENT)
-        self.assertDictEqual(actual_sjson_content, expected_sjson_content)
+        self.assertDictEqual(actual_sjson_content, expected_sjson_content)  # noqa: PT009
+
+    def test_replace_transcript_library_content_success(self):
+        # Make call to replace transcripts from youtube
+        response = self.replace_transcript(self.library_block_metadata.usage_key, self.youtube_id)
+
+        # Verify the response
+        self.assert_response(response, expected_status_code=200, expected_message='Success')
+
+        # Obtain updated block
+        updated_block = xblock_api.load_block(
+            self.library_block_metadata.usage_key,
+            self.user,
+        )
+
+        # Verify transcript content
+        transcript = get_transcript(updated_block, 'en', Transcript.SJSON)
+        actual_sjson_content = json.loads(transcript[0])
+        expected_sjson_content = json.loads(SJSON_TRANSCRIPT_CONTENT)
+        self.assertDictEqual(actual_sjson_content, expected_sjson_content)  # noqa: PT009
 
     def test_replace_transcript_fails_without_data(self):
         """
@@ -747,13 +788,13 @@ class TestReplaceTranscripts(BaseTranscripts):
         """
         Test that validation fails if item's category is other than video.
         """
-        # non_video module setup - i.e. an item whose category is not 'video'.
-        usage_key = self.create_non_video_module()
+        # non_video block setup - i.e. an item whose category is not 'video'.
+        usage_key = self.create_non_video_block()
         response = self.replace_transcript(usage_key, youtube_id=self.youtube_id)
         self.assert_response(
             response,
             expected_status_code=400,
-            expected_message='Transcripts are supported only for "video" modules.'
+            expected_message='Transcripts are supported only for "video" blocks.'
         )
 
 
@@ -791,7 +832,7 @@ class TestDownloadTranscripts(BaseTranscripts):
         """
         Verify transcript download response.
         """
-        self.assertEqual(response.status_code, expected_status_code)
+        self.assertEqual(response.status_code, expected_status_code)  # noqa: PT009
         if expected_content:
             assert response.content.decode('utf-8') == expected_content
 
@@ -825,11 +866,11 @@ class TestDownloadTranscripts(BaseTranscripts):
         response = self.download_transcript(locator='invalid-locator')
         self.assert_download_response(response, expected_status_code=404)
 
-    def test_download_transcript_404_for_non_video_module(self):
+    def test_download_transcript_404_for_non_video_block(self):
         """
-        Verify that download transcript returns 404 for a non video module.
+        Verify that download transcript returns 404 for a non video block.
         """
-        usage_key = self.create_non_video_module()
+        usage_key = self.create_non_video_block()
         response = self.download_transcript(locator=usage_key)
         self.assert_download_response(response, expected_status_code=404)
 
@@ -856,7 +897,7 @@ class TestCheckTranscripts(BaseTranscripts):
                 <source src="http://www.quirksmode.org/html5/videos/big_buck_bunny.webm"/>
                 <source src="http://www.quirksmode.org/html5/videos/big_buck_bunny.ogv"/>
             </video>
-        """.format(subs_id))
+        """.format(subs_id))  # noqa: UP032
         modulestore().update_item(self.item, self.user.id)
 
         subs = {
@@ -880,8 +921,8 @@ class TestCheckTranscripts(BaseTranscripts):
         }
         link = reverse('check_transcripts')
         resp = self.client.get(link, {'data': json.dumps(data)})
-        self.assertEqual(resp.status_code, 200)
-        self.assertDictEqual(
+        self.assertEqual(resp.status_code, 200)  # noqa: PT009
+        self.assertDictEqual(  # noqa: PT009
             json.loads(resp.content.decode('utf-8')),
             {
                 'status': 'Success',
@@ -924,8 +965,8 @@ class TestCheckTranscripts(BaseTranscripts):
 
         resp = self.client.get(link, {'data': json.dumps(data)})
 
-        self.assertEqual(resp.status_code, 200)
-        self.assertDictEqual(
+        self.assertEqual(resp.status_code, 200)  # noqa: PT009
+        self.assertDictEqual(  # noqa: PT009
             json.loads(resp.content.decode('utf-8')),
             {
                 'status': 'Success',
@@ -940,7 +981,7 @@ class TestCheckTranscripts(BaseTranscripts):
             }
         )
 
-    @patch('xmodule.video_module.transcripts_utils.requests.get', side_effect=mock_requests_get)
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.requests.get')
     def test_check_youtube_with_transcript_name(self, mock_get):
         """
         Test that the transcripts are fetched correctly when the the transcript name is set
@@ -958,6 +999,7 @@ class TestCheckTranscripts(BaseTranscripts):
             ]
         }
         self.save_subs_to_store(subs, 'good_id_2')
+        setup_caption_responses(mock_get, 'en', 'caption_response_string')
         link = reverse('check_transcripts')
         data = {
             'locator': str(self.video_usage_key),
@@ -969,14 +1011,13 @@ class TestCheckTranscripts(BaseTranscripts):
         }
         resp = self.client.get(link, {'data': json.dumps(data)})
 
-        mock_get.assert_any_call(
-            'http://video.google.com/timedtext',
-            params={'lang': 'en', 'v': 'good_id_2', 'name': 'Custom'}
-        )
+        self.assertEqual(2, len(mock_get.mock_calls))  # noqa: PT009
+        args, kwargs = mock_get.call_args_list[0]
+        self.assertEqual(args[0], 'https://www.youtube.com/watch?v=good_id_2')  # noqa: PT009
 
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 200)  # noqa: PT009
 
-        self.assertDictEqual(
+        self.assertDictEqual(  # noqa: PT009
             json.loads(resp.content.decode('utf-8')),
             {
                 'status': 'Success',
@@ -1002,8 +1043,8 @@ class TestCheckTranscripts(BaseTranscripts):
             }]
         }
         resp = self.client.get(link, {'data': json.dumps(data)})
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(json.loads(resp.content.decode('utf-8')).get('status'), "Can't find item by locator.")
+        self.assertEqual(resp.status_code, 400)  # noqa: PT009
+        self.assertEqual(json.loads(resp.content.decode('utf-8')).get('status'), "Can't find item by locator.")  # noqa: PT009  # pylint: disable=line-too-long
 
     def test_fail_data_with_bad_locator(self):
         # Test for raising `InvalidLocationError` exception.
@@ -1017,8 +1058,8 @@ class TestCheckTranscripts(BaseTranscripts):
             }]
         }
         resp = self.client.get(link, {'data': json.dumps(data)})
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(json.loads(resp.content.decode('utf-8')).get('status'), "Can't find item by locator.")
+        self.assertEqual(resp.status_code, 400)  # noqa: PT009
+        self.assertEqual(json.loads(resp.content.decode('utf-8')).get('status'), "Can't find item by locator.")  # noqa: PT009  # pylint: disable=line-too-long
 
         # Test for raising `ItemNotFoundError` exception.
         data = {
@@ -1030,27 +1071,27 @@ class TestCheckTranscripts(BaseTranscripts):
             }]
         }
         resp = self.client.get(link, {'data': json.dumps(data)})
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(json.loads(resp.content.decode('utf-8')).get('status'), "Can't find item by locator.")
+        self.assertEqual(resp.status_code, 400)  # noqa: PT009
+        self.assertEqual(json.loads(resp.content.decode('utf-8')).get('status'), "Can't find item by locator.")  # noqa: PT009  # pylint: disable=line-too-long
 
-    def test_fail_for_non_video_module(self):
-        # Not video module: setup
+    def test_fail_for_non_video_block(self):
+        # Not video block: setup
         data = {
             'parent_locator': str(self.course.location),
-            'category': 'not_video',
-            'type': 'not_video'
+            'category': 'problem',
+            'type': 'problem'
         }
         resp = self.client.ajax_post('/xblock/', data)
         usage_key = self._get_usage_key(resp)
         subs_id = str(uuid4())
         item = modulestore().get_item(usage_key)
         self.set_fields_from_xml(self.item, ("""
-            <not_video youtube="" sub="{}">
+            <problem youtube="" sub="{}">
                 <source src="http://www.quirksmode.org/html5/videos/big_buck_bunny.mp4"/>
                 <source src="http://www.quirksmode.org/html5/videos/big_buck_bunny.webm"/>
                 <source src="http://www.quirksmode.org/html5/videos/big_buck_bunny.ogv"/>
-            </not_video>
-        """.format(subs_id)))
+            </problem>
+        """.format(subs_id)))  # noqa: UP032
         modulestore().update_item(item, self.user.id)
 
         subs = {
@@ -1074,13 +1115,13 @@ class TestCheckTranscripts(BaseTranscripts):
         }
         link = reverse('check_transcripts')
         resp = self.client.get(link, {'data': json.dumps(data)})
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(
+        self.assertEqual(resp.status_code, 400)  # noqa: PT009
+        self.assertEqual(  # noqa: PT009
             json.loads(resp.content.decode('utf-8')).get('status'),
-            'Transcripts are supported only for "video" modules.',
+            'Transcripts are supported only for "video" blocks.',
         )
 
-    @patch('xmodule.video_module.transcripts_utils.get_video_transcript_content')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.get_video_transcript_content')
     def test_command_for_fallback_transcript(self, mock_get_video_transcript_content):
         """
         Verify the command if a transcript is there in edx-val.
@@ -1117,8 +1158,8 @@ class TestCheckTranscripts(BaseTranscripts):
         response = self.client.get(check_transcripts_url, {'data': json.dumps(data)})
 
         # Assert the response
-        self.assertEqual(response.status_code, 200)
-        self.assertDictEqual(
+        self.assertEqual(response.status_code, 200)  # noqa: PT009
+        self.assertDictEqual(  # noqa: PT009
             json.loads(response.content.decode('utf-8')),
             {
                 'status': 'Success',

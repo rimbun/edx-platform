@@ -4,6 +4,7 @@
 import logging
 
 from eventtracking import tracker
+from forum import api as forum_api
 
 from . import models, settings, utils
 
@@ -11,7 +12,6 @@ log = logging.getLogger(__name__)
 
 
 class Thread(models.Model):
-
     # accessible_fields can be set and retrieved on the model
     accessible_fields = [
         'id', 'title', 'body', 'anonymous', 'anonymous_to_peers', 'course_id',
@@ -21,19 +21,15 @@ class Thread(models.Model):
         'highlighted_body', 'endorsed', 'read', 'group_id', 'group_name', 'pinned',
         'abuse_flaggers', 'resp_skip', 'resp_limit', 'resp_total', 'thread_type',
         'endorsed_responses', 'non_endorsed_responses', 'non_endorsed_resp_total',
-        'context', 'last_activity_at',
+        'context', 'last_activity_at', 'closed_by', 'close_reason_code', 'edit_history',
+        'is_spam',
     ]
 
     # updateable_fields are sent in PUT requests
     updatable_fields = [
         'title', 'body', 'anonymous', 'anonymous_to_peers', 'course_id', 'read',
-        'closed', 'user_id', 'commentable_id', 'group_id', 'group_name', 'pinned', 'thread_type'
-    ]
-
-    # metric_tag_fields are used by Datadog to record metrics about the model
-    metric_tag_fields = [
-        'course_id', 'group_id', 'pinned', 'closed', 'anonymous', 'anonymous_to_peers',
-        'endorsed', 'read'
+        'closed', 'user_id', 'commentable_id', 'group_id', 'group_name', 'pinned', 'thread_type',
+        'close_reason_code', 'edit_reason_code', 'closing_user_id', 'editing_user_id',
     ]
 
     # initializable_fields are sent in POST requests
@@ -59,20 +55,29 @@ class Thread(models.Model):
             utils.strip_blank(utils.strip_none(query_params))
         )
 
-        if query_params.get('text'):
-            url = cls.url(action='search')
+        # Convert user_id and author_id to strings if present
+        for field in ['user_id', 'author_id']:
+            if value := params.get(field):
+                params[field] = str(value)
+
+        # Handle commentable_ids/commentable_id conversion
+        if commentable_ids := params.get('commentable_ids'):
+            params['commentable_ids'] = commentable_ids.split(',')
+        elif commentable_id := params.get('commentable_id'):
+            params['commentable_ids'] = [commentable_id]
+            params.pop('commentable_id', None)
+
+        params = utils.clean_forum_params(params)
+        if query_params.get('text'):                    # Handle group_ids/group_id conversion
+            if group_ids := params.get('group_ids'):
+                params['group_ids'] = [int(group_id) for group_id in group_ids.split(',')]
+            elif group_id := params.get('group_id'):
+                params['group_ids'] = [int(group_id)]
+                params.pop('group_id', None)
+            response = forum_api.search_threads(**params)
         else:
-            url = cls.url(action='get_all', params=utils.extract(params, 'commentable_id'))
-            if params.get('commentable_id'):
-                del params['commentable_id']
-        response = utils.perform_request(
-            'get',
-            url,
-            params,
-            metric_tags=['course_id:{}'.format(query_params['course_id'])],
-            metric_action='thread.search',
-            paged_results=True
-        )
+            response = forum_api.get_user_threads(**params)
+
         if query_params.get('text'):
             search_query = query_params['text']
             course_id = query_params['course_id']
@@ -86,6 +91,7 @@ class Thread(models.Model):
                 'edx.forum.searched',
                 {
                     'query': search_query,
+                    'search_type': 'Content',
                     'corrected_text': corrected_text,
                     'group_id': group_id,
                     'page': requested_page,
@@ -93,7 +99,7 @@ class Thread(models.Model):
                 }
             )
             log.info(
-                'forum_text_search query="{search_query}" corrected_text="{corrected_text}" course_id={course_id} '
+                'forum_text_search query="{search_query}" corrected_text="{corrected_text}" course_id={course_id} '  # noqa: UP032  # pylint: disable=line-too-long
                 'group_id={group_id} page={requested_page} total_results={total_results}'.format(
                     search_query=search_query,
                     corrected_text=corrected_text,
@@ -103,7 +109,6 @@ class Thread(models.Model):
                     total_results=total_results
                 )
             )
-
         return utils.CommentClientPaginatedResult(
             collection=response.get('collection', []),
             page=response.get('page', 1),
@@ -141,7 +146,6 @@ class Thread(models.Model):
     # for the request. Model._retrieve should be modified to handle this such
     # that subclasses don't need to override for this.
     def _retrieve(self, *args, **kwargs):
-        url = self.url(action='get', params=self.attributes)
         request_params = {
             'recursive': kwargs.get('recursive'),
             'with_responses': kwargs.get('with_responses', False),
@@ -149,88 +153,82 @@ class Thread(models.Model):
             'mark_as_read': kwargs.get('mark_as_read', True),
             'resp_skip': kwargs.get('response_skip'),
             'resp_limit': kwargs.get('response_limit'),
+            'reverse_order': kwargs.get('reverse_order', False),
+            'merge_question_type_responses': kwargs.get('merge_question_type_responses', False)
         }
-        request_params = utils.strip_none(request_params)
-
-        response = utils.perform_request(
-            'get',
-            url,
-            request_params,
-            metric_action='model.retrieve',
-            metric_tags=self._metric_tags
+        request_params = utils.clean_forum_params(request_params)
+        course_id = kwargs.get("course_id")
+        if not course_id:
+            course_id = forum_api.get_course_id_by_thread(self.id)
+        if user_id := request_params.get('user_id'):
+            request_params['user_id'] = str(user_id)
+        response = forum_api.get_thread(
+            thread_id=self.id,
+            params=request_params,
+            course_id=course_id,
         )
         self._update_from_response(response)
 
-    def flagAbuse(self, user, voteable):
-        if voteable.type == 'thread':
-            url = _url_for_flag_abuse_thread(voteable.id)
-        else:
-            raise utils.CommentClientRequestError("Can only flag/unflag threads or comments")
-        params = {'user_id': user.id}
-        response = utils.perform_request(
-            'put',
-            url,
-            params,
-            metric_action='thread.abuse.flagged',
-            metric_tags=self._metric_tags
+    def flagAbuse(self, user, voteable, course_id=None):
+        if voteable.type != 'thread':
+            raise utils.CommentClientRequestError("Can only flag threads")
+
+        course_key = utils.get_course_key(self.attributes.get("course_id") or course_id)
+        response = forum_api.update_thread_flag(
+            thread_id=voteable.id,
+            action="flag",
+            user_id=str(user.id),
+            course_id=str(course_key)
         )
         voteable._update_from_response(response)
 
-    def unFlagAbuse(self, user, voteable, removeAll):
-        if voteable.type == 'thread':
-            url = _url_for_unflag_abuse_thread(voteable.id)
-        else:
-            raise utils.CommentClientRequestError("Can only flag/unflag for threads or comments")
-        params = {'user_id': user.id}
-        #if you're an admin, when you unflag, remove ALL flags
-        if removeAll:
-            params['all'] = True
+    def unFlagAbuse(self, user, voteable, removeAll, course_id=None):
+        if voteable.type != 'thread':
+            raise utils.CommentClientRequestError("Can only unflag threads")
 
-        response = utils.perform_request(
-            'put',
-            url,
-            params,
-            metric_tags=self._metric_tags,
-            metric_action='thread.abuse.unflagged'
+        course_key = utils.get_course_key(self.attributes.get("course_id") or course_id)
+        response = forum_api.update_thread_flag(
+            thread_id=voteable.id,
+            action="unflag",
+            user_id=user.id,
+            update_all=bool(removeAll),
+            course_id=str(course_key)
         )
+
         voteable._update_from_response(response)
 
-    def pin(self, user, thread_id):
-        url = _url_for_pin_thread(thread_id)
-        params = {'user_id': user.id}
-        response = utils.perform_request(
-            'put',
-            url,
-            params,
-            metric_tags=self._metric_tags,
-            metric_action='thread.pin'
+    def pin(self, user, thread_id, course_id=None):
+        course_key = utils.get_course_key(self.attributes.get("course_id") or course_id)
+        response = forum_api.pin_thread(
+            user_id=user.id,
+            thread_id=thread_id,
+            course_id=str(course_key)
         )
         self._update_from_response(response)
 
-    def un_pin(self, user, thread_id):
-        url = _url_for_un_pin_thread(thread_id)
-        params = {'user_id': user.id}
-        response = utils.perform_request(
-            'put',
-            url,
-            params,
-            metric_tags=self._metric_tags,
-            metric_action='thread.unpin'
+    def un_pin(self, user, thread_id, course_id=None):
+        course_key = utils.get_course_key(self.attributes.get("course_id") or course_id)
+        response = forum_api.unpin_thread(
+            user_id=user.id,
+            thread_id=thread_id,
+            course_id=str(course_key)
         )
         self._update_from_response(response)
 
 
-def _url_for_flag_abuse_thread(thread_id):
-    return f"{settings.PREFIX}/threads/{thread_id}/abuse_flag"
 
-
-def _url_for_unflag_abuse_thread(thread_id):
-    return f"{settings.PREFIX}/threads/{thread_id}/abuse_unflag"
-
-
-def _url_for_pin_thread(thread_id):
-    return f"{settings.PREFIX}/threads/{thread_id}/pin"
-
-
-def _url_for_un_pin_thread(thread_id):
-    return f"{settings.PREFIX}/threads/{thread_id}/unpin"
+def _clean_forum_params(params):
+    """Convert string booleans to actual booleans and remove None values from forum parameters."""
+    result = {}
+    for k, v in params.items():
+        if v is not None:
+            if isinstance(v, str):
+                if v.lower() == 'true':
+                    result[k] = True
+                elif v.lower() == 'false':
+                    result[k] = False
+                else:
+                    result[k] = v
+            else:
+                result[k] = v
+    return result

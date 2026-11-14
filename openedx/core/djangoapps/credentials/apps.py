@@ -4,7 +4,7 @@ Credentials Configuration
 
 
 from django.apps import AppConfig
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from edx_django_utils.plugins import PluginSettings, PluginSignals
 
 from openedx.core.djangoapps.plugins.constants import ProjectType, SettingsType
@@ -44,4 +44,6 @@ class CredentialsConfig(AppConfig):
 
     def ready(self):
         # Register celery workers
-        from openedx.core.djangoapps.credentials.tasks.v1 import tasks  # lint-amnesty, pylint: disable=unused-import, unused-variable
+        from openedx.core.djangoapps.credentials.tasks.v1 import (  # pylint: disable=unused-import, unused-variable
+            tasks,  # noqa: F401
+        )

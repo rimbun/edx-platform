@@ -6,13 +6,13 @@ Tests for exporting OLX content.
 import shutil
 import tarfile
 import unittest
-from io import StringIO
+from io import BytesIO
 from tempfile import mkdtemp
 
-import ddt
 from django.core.management import CommandError, call_command
 from path import Path as path
 
+from openedx.core.djangoapps.content_tagging.tests.test_objecttag_export_helpers import TaggedCourseMixin
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import modulestore
 from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
@@ -28,12 +28,11 @@ class TestArgParsingCourseExportOlx(unittest.TestCase):
         Test export command with no arguments
         """
         errstring = "Error: the following arguments are required: course_id"
-        with self.assertRaisesRegex(CommandError, errstring):
+        with self.assertRaisesRegex(CommandError, errstring):  # noqa: PT027
             call_command('export_olx')
 
 
-@ddt.ddt
-class TestCourseExportOlx(ModuleStoreTestCase):
+class TestCourseExportOlx(TaggedCourseMixin, ModuleStoreTestCase):
     """
     Test exporting OLX content from a course or library.
     """
@@ -43,7 +42,7 @@ class TestCourseExportOlx(ModuleStoreTestCase):
         Test export command with an invalid course key.
         """
         errstring = "Unparsable course_id"
-        with self.assertRaisesRegex(CommandError, errstring):
+        with self.assertRaisesRegex(CommandError, errstring):  # noqa: PT027
             call_command('export_olx', 'InvalidCourseID')
 
     def test_course_key_not_found(self):
@@ -51,32 +50,36 @@ class TestCourseExportOlx(ModuleStoreTestCase):
         Test export command with a valid course key that doesn't exist.
         """
         errstring = "Invalid course_id"
-        with self.assertRaisesRegex(CommandError, errstring):
+        with self.assertRaisesRegex(CommandError, errstring):  # noqa: PT027
             call_command('export_olx', 'x/y/z')
 
     def create_dummy_course(self, store_type):
         """Create small course."""
         course = CourseFactory.create(default_store=store_type)
-        self.assertTrue(
+        self.assertTrue(  # noqa: PT009
             modulestore().has_course(course.id),
             f"Could not find course in {store_type}"
         )
         return course.id
 
-    def check_export_file(self, tar_file, course_key):
+    def check_export_file(self, tar_file, course_key, with_tags=False):
         """Check content of export file."""
         names = tar_file.getnames()
-        dirname = "{0.org}-{0.course}-{0.run}".format(course_key)
-        self.assertIn(dirname, names)
+        dirname = "{0.org}-{0.course}-{0.run}".format(course_key)  # noqa: UP032
+        self.assertIn(dirname, names)  # noqa: PT009
         # Check if some of the files are present, without being exhaustive.
-        self.assertIn(f"{dirname}/about", names)
-        self.assertIn(f"{dirname}/about/overview.html", names)
-        self.assertIn(f"{dirname}/assets/assets.xml", names)
-        self.assertIn(f"{dirname}/policies", names)
+        self.assertIn(f"{dirname}/about", names)  # noqa: PT009
+        self.assertIn(f"{dirname}/about/overview.html", names)  # noqa: PT009
+        self.assertIn(f"{dirname}/assets/assets.xml", names)  # noqa: PT009
+        assert tar_file.extractfile(f"{dirname}/assets/assets.xml").read() == b'<assets/>'
+        self.assertIn(f"{dirname}/policies", names)  # noqa: PT009
+        if with_tags:
+            self.assertIn(f"{dirname}/tags.csv", names)  # noqa: PT009
+        else:
+            self.assertNotIn(f"{dirname}/tags.csv", names)  # noqa: PT009
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_export_course(self, store_type):
-        test_course_key = self.create_dummy_course(store_type)
+    def test_export_course(self):
+        test_course_key = self.create_dummy_course(ModuleStoreEnum.Type.split)
         tmp_dir = path(mkdtemp())
         self.addCleanup(shutil.rmtree, tmp_dir)
         filename = tmp_dir / 'test.tar.gz'
@@ -84,19 +87,28 @@ class TestCourseExportOlx(ModuleStoreTestCase):
         with tarfile.open(filename) as tar_file:
             self.check_export_file(tar_file, test_course_key)
 
-    # There is a bug in the underlying management/base code that tries to make
-    # all manageent command output be unicode.  This management command
-    # outputs the binary tar file data and so breaks in python3.  In python2
-    # the code is happy to pass bytes back and forth and in later versions of
-    # django this is fixed.  Howevere it's not possible to get this test to
-    # pass in Python3 and django 1.11
-    @unittest.skip("Bug in django 1.11 prevents this from working in python3.  Re-enable after django 2.x upgrade.")
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_export_course_stdout(self, store_type):
-        test_course_key = self.create_dummy_course(store_type)
-        out = StringIO()
-        call_command('export_olx', str(test_course_key), stdout=out)
-        out.seek(0)
-        output = out.read()
-        with tarfile.open(fileobj=StringIO(output)) as tar_file:
+    def test_export_course_stdout(self):
+        """Check content of stdout."""
+
+        class BytesIOBufferWrapper:
+            """wrapper to facilitate operations with a BytesIO as a buffer"""
+
+            def __init__(self, bytes_io):
+                self.bytes_io = bytes_io
+                self.buffer = bytes_io
+
+        test_course_key = self.create_dummy_course(ModuleStoreEnum.Type.split)
+        output_wrapper = BytesIOBufferWrapper(BytesIO())
+        call_command('export_olx', str(test_course_key), stdout=output_wrapper)
+        output_wrapper.bytes_io.seek(0)
+        output = output_wrapper.bytes_io.read()
+        with tarfile.open(fileobj=BytesIO(output), mode="r:gz") as tar_file:
             self.check_export_file(tar_file, test_course_key)
+
+    def test_export_course_with_tags(self):
+        tmp_dir = path(mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_dir)
+        filename = tmp_dir / 'test.tar.gz'
+        call_command('export_olx', '--output', filename, str(self.course.id))
+        with tarfile.open(filename) as tar_file:
+            self.check_export_file(tar_file, self.course.id, with_tags=True)

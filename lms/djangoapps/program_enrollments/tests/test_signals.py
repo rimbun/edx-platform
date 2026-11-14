@@ -5,6 +5,7 @@ Test signal handlers for program_enrollments
 
 from unittest import mock
 
+import ddt
 import pytest
 from django.core.cache import cache
 from edx_django_utils.cache import RequestCache
@@ -99,7 +100,24 @@ class ProgramEnrollmentRetireSignalTests(ModuleStoreTestCase):
 
         self.assert_enrollment_and_history_retired(enrollment)
 
+    def test_retire_signal_handler_tolerates_extra_kwargs(self):
+        """
+        Ensure program_enrollments retirement receiver does not break with additional kwargs.
+        """
+        enrollment = self.create_enrollment_and_history()
 
+        # Simulate the signal being sent with extra kwargs.
+        _listen_for_lms_retire(
+            sender=self.__class__,
+            user=enrollment.user,
+            retired_username='retired-test-username',
+            retired_email='retired-test@example.com',
+        )
+
+        self.assert_enrollment_and_history_retired(enrollment)
+
+
+@ddt.ddt
 class SocialAuthEnrollmentCompletionSignalTest(CacheIsolationTestCase):
     """
     Test post-save handler on UserSocialAuth
@@ -110,7 +128,7 @@ class SocialAuthEnrollmentCompletionSignalTest(CacheIsolationTestCase):
     def setUpClass(cls):
         super().setUpClass()
 
-        cls.external_id = '0000'
+        cls.external_id = 'learner1a'
         cls.provider_slug = 'uox'
         cls.course_keys = [
             CourseKey.from_string('course-v1:edX+DemoX+Test_Course'),
@@ -197,13 +215,18 @@ class SocialAuthEnrollmentCompletionSignalTest(CacheIsolationTestCase):
         for program_course_enrollment in program_course_enrollments:
             self._assert_program_course_enrollment(program_course_enrollment)
 
-    def test_waiting_course_enrollments_completed(self):
+    @ddt.data(
+        'learner1a',
+        'LEarnER1A',
+        'LEARNER1A',
+    )
+    def test_waiting_course_enrollments_completed(self, auth_user_key):
         program_enrollment = self._create_waiting_program_enrollment()
         program_course_enrollments = self._create_waiting_course_enrollments(program_enrollment)
 
         UserSocialAuth.objects.create(
             user=self.user,
-            uid=f'{self.provider_slug}:{self.external_id}'
+            uid=f'{self.provider_slug}:{auth_user_key}'
         )
 
         self._assert_program_enrollment_user(program_enrollment, self.user)
@@ -371,7 +394,7 @@ class SocialAuthEnrollmentCompletionSignalTest(CacheIsolationTestCase):
         program_enrollment = self._create_waiting_program_enrollment()
         self._create_waiting_course_enrollments(program_enrollment)
 
-        with mock.patch('common.djangoapps.student.models.CourseEnrollment.enroll') as enrollMock:
+        with mock.patch('common.djangoapps.student.models.course_enrollment.CourseEnrollment.enroll') as enrollMock:
             enrollMock.side_effect = CourseEnrollmentException('something has gone wrong')
             with pytest.raises(CourseEnrollmentException):
                 UserSocialAuth.objects.create(
@@ -389,7 +412,7 @@ class SocialAuthEnrollmentCompletionSignalTest(CacheIsolationTestCase):
         with mock.patch('lms.djangoapps.program_enrollments.api.linking.enroll_in_masters_track') as enrollMock:
             enrollMock.side_effect = Exception('unexpected error')
             with LogCapture(logger.name) as log:
-                with self.assertRaisesRegex(Exception, 'unexpected error'):
+                with self.assertRaisesRegex(Exception, 'unexpected error'):  # noqa: PT027
                     UserSocialAuth.objects.create(
                         user=self.user,
                         uid=f'{self.provider_slug}:{self.external_id}',

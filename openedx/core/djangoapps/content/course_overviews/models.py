@@ -5,36 +5,34 @@ Declaration of CourseOverview model
 
 import json
 import logging
+from datetime import datetime
 from urllib.parse import urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 from ccx_keys.locator import CCXLocator
 from config_models.models import ConfigurationModel
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models import Q
-from django.db.models.fields import (
-    BooleanField, DateTimeField, DecimalField, FloatField, IntegerField, NullBooleanField, TextField
-)
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_delete, post_save
 from django.db.utils import IntegrityError
 from django.template import defaultfilters
-
 from django.utils.functional import cached_property
 from model_utils.models import TimeStampedModel
 from opaque_keys.edx.django.models import CourseKeyField, UsageKeyField
 from simple_history.models import HistoricalRecords
 
-from lms.djangoapps.discussion import django_comment_client
+from common.djangoapps.static_replace.models import AssetBaseUrlConfig
+from lms.djangoapps.courseware.model_data import FieldDataCache
 from openedx.core.djangoapps.catalog.models import CatalogIntegration
 from openedx.core.djangoapps.lang_pref.api import get_closest_released_language
 from openedx.core.djangoapps.models.course_details import CourseDetails
-from openedx.core.lib.cache_utils import request_cached, RequestCache
-from common.djangoapps.static_replace.models import AssetBaseUrlConfig
-from xmodule import block_metadata_utils, course_metadata_utils
-from xmodule.course_module import DEFAULT_START_DATE, CourseBlock
-from xmodule.error_module import ErrorBlock
-from xmodule.modulestore.django import modulestore
-from xmodule.tabs import CourseTab
+from openedx.core.lib.cache_utils import RequestCache, request_cached
+from xmodule import block_metadata_utils, course_metadata_utils  # pylint: disable=wrong-import-order
+from xmodule.course_block import DEFAULT_START_DATE, CourseBlock  # pylint: disable=wrong-import-order
+from xmodule.error_block import ErrorBlock  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.tabs import CourseTab  # pylint: disable=wrong-import-order
 
 log = logging.getLogger(__name__)
 
@@ -58,94 +56,106 @@ class CourseOverview(TimeStampedModel):
     will cause a slew of modulestore reads as each course needs to be re-cached into
     the course overview.
 
-    .. no_pii:
+    .. pii: Contains proctoring_escalation_email, a staff contact address copied from CourseFields.
+    .. pii_types: email_address
+    .. pii_retirement: retained
     """
 
     class Meta:
         app_label = 'course_overviews'
 
     # IMPORTANT: Bump this whenever you modify this model and/or add a migration.
-    VERSION = 16
+    VERSION = 19
 
     # Cache entry versioning.
-    version = IntegerField()
+    version = models.IntegerField()
 
     # Course identification
     id = CourseKeyField(db_index=True, primary_key=True, max_length=255)
     _location = UsageKeyField(max_length=255)
-    org = TextField(max_length=255, default='outdated_entry')
-    display_name = TextField(null=True)
-    display_number_with_default = TextField()
-    display_org_with_default = TextField()
+    org = models.TextField(max_length=255, default='outdated_entry')
+    display_name = models.TextField(null=True)  # noqa: DJ001
+    display_number_with_default = models.TextField()
+    display_org_with_default = models.TextField()
 
-    start = DateTimeField(null=True)
-    end = DateTimeField(null=True)
+    start = models.DateTimeField(null=True, db_index=True)
+    end = models.DateTimeField(null=True)
 
     # These are deprecated and unused, but cannot be dropped via simple migration due to the size of the downstream
     # history table. See DENG-19 for details.
     # Please use start and end above for these values.
-    start_date = DateTimeField(null=True)
-    end_date = DateTimeField(null=True)
+    start_date = models.DateTimeField(null=True)
+    end_date = models.DateTimeField(null=True)
 
-    advertised_start = TextField(null=True)
-    announcement = DateTimeField(null=True)
+    advertised_start = models.TextField(null=True)  # noqa: DJ001
+    announcement = models.DateTimeField(null=True)
 
     # URLs
     # Not allowing null per django convention; not sure why many TextFields in this model do allow null
-    banner_image_url = TextField()
-    course_image_url = TextField()
-    social_sharing_url = TextField(null=True)
-    end_of_course_survey_url = TextField(null=True)
+    banner_image_url = models.TextField()
+    course_image_url = models.TextField()
+    social_sharing_url = models.TextField(null=True)  # noqa: DJ001
+    end_of_course_survey_url = models.TextField(null=True)  # noqa: DJ001
 
     # Certification data
-    certificates_display_behavior = TextField(null=True)
-    certificates_show_before_end = BooleanField(default=False)
-    cert_html_view_enabled = BooleanField(default=False)
-    has_any_active_web_certificate = BooleanField(default=False)
-    cert_name_short = TextField()
-    cert_name_long = TextField()
-    certificate_available_date = DateTimeField(default=None, null=True)
+    certificates_display_behavior = models.TextField(null=True)  # noqa: DJ001
+    certificates_show_before_end = models.BooleanField(default=False)
+    cert_html_view_enabled = models.BooleanField(default=False)
+    has_any_active_web_certificate = models.BooleanField(default=False)
+    cert_name_short = models.TextField()
+    cert_name_long = models.TextField()
+    certificate_available_date = models.DateTimeField(default=None, null=True)
 
     # Grading
-    lowest_passing_grade = DecimalField(max_digits=5, decimal_places=2, null=True)
+    lowest_passing_grade = models.DecimalField(max_digits=5, decimal_places=2, null=True)
 
     # Access parameters
-    days_early_for_beta = FloatField(null=True)
-    mobile_available = BooleanField(default=False)
-    visible_to_staff_only = BooleanField(default=False)
-    _pre_requisite_courses_json = TextField()  # JSON representation of list of CourseKey strings
+    days_early_for_beta = models.FloatField(null=True)
+    mobile_available = models.BooleanField(default=False)
+    visible_to_staff_only = models.BooleanField(default=False)
+    _pre_requisite_courses_json = models.TextField()  # JSON representation of list of CourseKey strings
 
     # Enrollment details
-    enrollment_start = DateTimeField(null=True)
-    enrollment_end = DateTimeField(null=True)
-    enrollment_domain = TextField(null=True)
-    invitation_only = BooleanField(default=False)
-    max_student_enrollments_allowed = IntegerField(null=True)
+    enrollment_start = models.DateTimeField(null=True)
+    enrollment_end = models.DateTimeField(null=True)
+    enrollment_domain = models.TextField(null=True)  # noqa: DJ001
+    invitation_only = models.BooleanField(default=False)
+    max_student_enrollments_allowed = models.IntegerField(null=True)
 
     # Catalog information
-    catalog_visibility = TextField(null=True)
-    short_description = TextField(null=True)
-    course_video_url = TextField(null=True)
-    effort = TextField(null=True)
-    self_paced = BooleanField(default=False)
-    marketing_url = TextField(null=True)
-    eligible_for_financial_aid = BooleanField(default=True)
+    catalog_visibility = models.TextField(null=True)  # noqa: DJ001
+    short_description = models.TextField(null=True)  # noqa: DJ001
+    course_video_url = models.TextField(null=True)  # noqa: DJ001
+    effort = models.TextField(null=True)  # noqa: DJ001
+    self_paced = models.BooleanField(default=False)
+    marketing_url = models.TextField(null=True)  # noqa: DJ001
+    eligible_for_financial_aid = models.BooleanField(default=True)
 
     # Course highlight info, used to guide course update emails
-    has_highlights = NullBooleanField(default=None)  # if None, you have to look up the answer yourself
+    has_highlights = models.BooleanField(null=True, default=None)  # if None, you have to look up the answer yourself
 
     # Proctoring
-    enable_proctored_exams = BooleanField(default=False)
-    proctoring_provider = TextField(null=True)
-    proctoring_escalation_email = TextField(null=True)
-    allow_proctoring_opt_out = BooleanField(default=False)
+    enable_proctored_exams = models.BooleanField(default=False)
+    proctoring_provider = models.TextField(null=True)  # noqa: DJ001
+    proctoring_escalation_email = models.TextField(null=True)  # noqa: DJ001
+    allow_proctoring_opt_out = models.BooleanField(default=False)
 
-    language = TextField(null=True)
+    # Entrance Exam information
+    entrance_exam_enabled = models.BooleanField(default=False)
+    entrance_exam_id = models.CharField(max_length=255, blank=True)
+    entrance_exam_minimum_score_pct = models.FloatField(default=0.65)
 
-    history = HistoricalRecords()
+    # Open Response Assessment configuration
+    force_on_flexible_peer_openassessments = models.BooleanField(default=False)
+
+    external_id = models.CharField(max_length=128, null=True, blank=True)  # noqa: DJ001
+
+    language = models.TextField(null=True)  # noqa: DJ001
+
+    history = HistoricalRecords(no_db_index=["start"])
 
     @classmethod
-    def _create_or_update(cls, course):  # lint-amnesty, pylint: disable=too-many-statements
+    def _create_or_update(cls, course):  # pylint: disable=too-many-statements
         """
         Creates or updates a CourseOverview object from a CourseBlock.
 
@@ -153,7 +163,7 @@ class CourseOverview(TimeStampedModel):
         from the given course.
 
         Arguments:
-            course (CourseBlock): any course descriptor object
+            course (CourseBlock): any course block object
 
         Returns:
             CourseOverview: created or updated overview extracted from the given course
@@ -198,7 +208,7 @@ class CourseOverview(TimeStampedModel):
 
         course_overview.version = cls.VERSION
         course_overview.id = course.id
-        course_overview._location = course.location  # lint-amnesty, pylint: disable=protected-access
+        course_overview._location = course.location  # pylint: disable=protected-access
         course_overview.org = course.location.org
         course_overview.display_name = display_name
         course_overview.display_number_with_default = course.display_number_with_default
@@ -231,7 +241,7 @@ class CourseOverview(TimeStampedModel):
         course_overview.days_early_for_beta = course.days_early_for_beta
         course_overview.mobile_available = course.mobile_available
         course_overview.visible_to_staff_only = course.visible_to_staff_only
-        course_overview._pre_requisite_courses_json = json.dumps(course.pre_requisite_courses)  # lint-amnesty, pylint: disable=protected-access
+        course_overview._pre_requisite_courses_json = json.dumps(course.pre_requisite_courses)  # pylint: disable=protected-access
 
         course_overview.enrollment_start = course.enrollment_start
         course_overview.enrollment_end = course.enrollment_end
@@ -251,6 +261,28 @@ class CourseOverview(TimeStampedModel):
         course_overview.proctoring_provider = course.proctoring_provider
         course_overview.proctoring_escalation_email = course.proctoring_escalation_email
         course_overview.allow_proctoring_opt_out = course.allow_proctoring_opt_out
+
+        course_overview.entrance_exam_enabled = course.entrance_exam_enabled
+        # entrance_exam_id defaults to None in the course object, but '' is more reasonable for a string field
+        course_overview.entrance_exam_id = course.entrance_exam_id or ''
+        # Despite it being a float, the course object defaults to an int. So we will detect that case and update
+        # it to be a float like everything else.
+        # Extra handling: entrance_exam_minimum_score_pct can be None (e.g. when exams are disabled in Studio),
+        # so we fall back to settings.ENTRANCE_EXAM_MIN_SCORE_PCT to prevent CourseOverview save failures.
+        if course.entrance_exam_minimum_score_pct is None:
+            entrance_exam_minimum_score_pct = float(settings.ENTRANCE_EXAM_MIN_SCORE_PCT)
+        else:
+            entrance_exam_minimum_score_pct = course.entrance_exam_minimum_score_pct
+
+        if (
+            isinstance(entrance_exam_minimum_score_pct, int)
+            or (isinstance(entrance_exam_minimum_score_pct, float) and entrance_exam_minimum_score_pct.is_integer())
+        ):
+            entrance_exam_minimum_score_pct = entrance_exam_minimum_score_pct / 100
+
+        course_overview.entrance_exam_minimum_score_pct = entrance_exam_minimum_score_pct
+
+        course_overview.force_on_flexible_peer_openassessments = course.force_on_flexible_peer_openassessments
 
         if not CatalogIntegration.is_enabled():
             course_overview.language = course.language
@@ -329,7 +361,7 @@ class CourseOverview(TimeStampedModel):
 
                 return course_overview
             elif course is not None:
-                raise OSError(  # lint-amnesty, pylint: disable=raising-format-tuple
+                raise OSError(  # pylint: disable=raising-format-tuple
                     "Error while loading CourseOverview for course {} "
                     "from the module store: {}",
                     str(course_id),
@@ -447,9 +479,9 @@ class CourseOverview(TimeStampedModel):
         return course_metadata_utils.clean_course_key(self.location.course_key, padding_char)
 
     @property
-    def location(self):
+    def usage_key(self):
         """
-        Returns the UsageKey of this course.
+        Returns the UsageKey of the root block of this course.
 
         UsageKeyField has a strange behavior where it fails to parse the "run"
         of a course out of the serialized form of a Mongo Draft UsageKey. This
@@ -459,6 +491,13 @@ class CourseOverview(TimeStampedModel):
         if self._location.run is None:
             self._location = self._location.map_into_course(self.id)
         return self._location
+
+    @property
+    def location(self):
+        """
+        The old name for `usage_key`. This method is analogous to `XModuleMixin.location`.
+        """
+        return self.usage_key
 
     @property
     def number(self):
@@ -475,9 +514,9 @@ class CourseOverview(TimeStampedModel):
     @property
     def url_name(self):
         """
-        Returns this course's URL name.
+        The old name for `block_id`. This method is analogous to `XModuleMixin.url_name`.
         """
-        return block_metadata_utils.url_name_for_block(self)
+        return self.usage_key.block_id
 
     @property
     def display_name_with_default(self):
@@ -520,11 +559,17 @@ class CourseOverview(TimeStampedModel):
         """
         return course_metadata_utils.has_course_ended(self.end)
 
+    def is_enrollment_open(self):
+        """
+        Returns True if course enrollment is open
+        """
+        return course_metadata_utils.is_enrollment_open(self.enrollment_start, self.enrollment_end)
+
     def has_marketing_url(self):
         """
         Returns whether the course has marketing url.
         """
-        return settings.FEATURES.get('ENABLE_MKTG_SITE') and bool(self.marketing_url)
+        return bool(self.marketing_url)
 
     def has_social_sharing_url(self):
         """
@@ -602,7 +647,7 @@ class CourseOverview(TimeStampedModel):
         cause a lot of issues. These should not be mutable after
         construction, so for now we just eat this.
         """
-        pass  # lint-amnesty, pylint: disable=unnecessary-pass
+        pass  # pylint: disable=unnecessary-pass
 
     @classmethod
     def update_select_courses(cls, course_keys, force_update=False):
@@ -635,7 +680,10 @@ class CourseOverview(TimeStampedModel):
         log.info('Finished generating course overviews.')
 
     @classmethod
-    def get_all_courses(cls, orgs=None, filter_=None):
+    def get_all_courses(
+        cls, orgs=None, filter_=None, active_only=False, course_keys=None,
+        start_date_on_or_after=None, start_date_on_or_before=None,
+    ) -> models.QuerySet["CourseOverview"]:
         """
         Return a queryset containing all CourseOverview objects in the database.
 
@@ -643,11 +691,29 @@ class CourseOverview(TimeStampedModel):
             orgs (list[string]): Optional parameter that allows case-insensitive
                 filtering by organization.
             filter_ (dict): Optional parameter that allows custom filtering.
+            active_only (bool): If provided, only the courses that have not ended will be returned.
+            course_keys (list[string]): Optional parameter that allows case-insensitive
+                filter by course ids
+            start_date_on_or_after (datetime, timezone-aware): Optional parameter that limits the results
+                to courses starting at or after this instant.
+            start_date_on_or_before (datetime, timezone-aware): Optional parameter that limits the results
+                to courses starting at or before this instant.
         """
         # Note: If a newly created course is not returned in this QueryList,
         # make sure the "publish" signal was emitted when the course was
         # created. For tests using CourseFactory, use emit_signals=True.
         course_overviews = CourseOverview.objects.all()
+
+        if start_date_on_or_after or start_date_on_or_before:
+            date_range_filter = {}
+            if start_date_on_or_after:
+                date_range_filter["start__gte"] = start_date_on_or_after
+            if start_date_on_or_before:
+                date_range_filter["start__lte"] = start_date_on_or_before
+            course_overviews = course_overviews.filter(**date_range_filter)
+
+        if course_keys:
+            course_overviews = course_overviews.filter(id__in=course_keys)
 
         if orgs:
             # In rare cases, courses belonging to the same org may be accidentally assigned
@@ -660,7 +726,47 @@ class CourseOverview(TimeStampedModel):
 
         if filter_:
             course_overviews = course_overviews.filter(**filter_)
+        if active_only:
+            course_overviews = course_overviews.filter(
+                Q(end__isnull=True) | Q(end__gte=datetime.now().replace(tzinfo=ZoneInfo("UTC")))
+            )
 
+        return course_overviews
+
+    @classmethod
+    def get_courses_matching_query(cls, query, course_overviews):
+        """
+        Return a queryset of CourseOverview objects filtered bythe given query.
+
+        Args:
+            query: required parameter that allows filtering based on the CourseOverview.
+            course_overviews: queryset of CourseOverview objects to filter on.
+        """
+        return course_overviews.filter(
+            Q(display_name__icontains=query) |
+            Q(display_number_with_default__icontains=query) |
+            Q(org__icontains=query) |
+            Q(id__icontains=query)
+        )
+
+    @classmethod
+    def get_courses_by_status(cls, active_only, archived_only, course_overviews):
+        """
+        Return a queryset of CourseOverview objects based on the given status.
+
+        Args:
+            active_only: when True, only active courses will be returned.
+            archived_only: when True, only archived courses will be returned.
+            course_overviews: queryset of CourseOverview objects to filter on.
+        """
+        if active_only:
+            return course_overviews.filter(
+                Q(end__isnull=True) | Q(end__gte=datetime.now().replace(tzinfo=ZoneInfo("UTC")))
+            )
+        if archived_only:
+            return course_overviews.filter(
+                end__lt=datetime.now().replace(tzinfo=ZoneInfo("UTC"))
+            )
         return course_overviews
 
     @classmethod
@@ -670,15 +776,17 @@ class CourseOverview(TimeStampedModel):
         """
         return CourseOverview.objects.values_list('id', flat=True)
 
-    def is_discussion_tab_enabled(self):
+    def is_discussion_tab_enabled(self, user=None):
         """
         Returns True if course has discussion tab and is enabled
         """
+        # Importing here to avoid circular import
+        from lms.djangoapps.discussion.plugins import DiscussionTab
         tabs = self.tab_set.all()
         # creates circular import; hence explicitly referenced is_discussion_enabled
         for tab in tabs:
-            if tab.tab_id == "discussion" and django_comment_client.utils.is_discussion_enabled(self.id):
-                return True
+            if tab.tab_id == "discussion":
+                return DiscussionTab.is_enabled(self, user)
         return False
 
     @property
@@ -807,6 +915,23 @@ class CourseOverview(TimeStampedModel):
         """
         return modulestore().get_course(self.id)
 
+    def bind_course_for_student(self, request):
+        """
+        Bind user-specific field data to the Course XBlock.
+
+        By default, the retrieved course XBlock is "unbound" - it means that any field from the `user_info` scope
+        (like `edxnotes_visibility`) returns its default value.
+        """
+        # Delay import until here to avoid circular dependency.
+        from lms.djangoapps.courseware.block_render import get_block_for_descriptor
+        get_block_for_descriptor(
+            request.user,
+            request,
+            self._original_course,
+            FieldDataCache([self._original_course], self._original_course.id, request.user),
+            self._original_course.id,
+        )
+
     @property
     def allow_public_wiki_access(self):
         """
@@ -897,11 +1022,11 @@ class CourseOverviewTab(models.Model):
     """
     tab_id = models.CharField(max_length=50)
     course_overview = models.ForeignKey(CourseOverview, db_index=True, related_name="tab_set", on_delete=models.CASCADE)
-    type = models.CharField(max_length=50, null=True)
-    name = models.TextField(null=True)
+    type = models.CharField(max_length=50, null=True)  # noqa: DJ001
+    name = models.TextField(null=True)  # noqa: DJ001
     course_staff_only = models.BooleanField(default=False)
-    url_slug = models.TextField(null=True)
-    link = models.TextField(null=True)
+    url_slug = models.TextField(null=True)  # noqa: DJ001
+    link = models.TextField(null=True)  # noqa: DJ001
     is_hidden = models.BooleanField(default=False)
 
     def __str__(self):
@@ -1045,7 +1170,7 @@ class CourseOverviewImageSet(TimeStampedModel):
             pass
 
     def __str__(self):
-        return "CourseOverviewImageSet({}, small_url={}, large_url={})".format(
+        return "CourseOverviewImageSet({}, small_url={}, large_url={})".format(  # noqa: UP032
             self.course_overview_id, self.small_url, self.large_url
         )
 
@@ -1080,7 +1205,7 @@ class CourseOverviewImageConfig(ConfigurationModel):
         return (self.large_width, self.large_height)
 
     def __str__(self):
-        return "CourseOverviewImageConfig(enabled={}, small={}, large={})".format(
+        return "CourseOverviewImageConfig(enabled={}, small={}, large={})".format(  # noqa: UP032
             self.enabled, self.small, self.large
         )
 

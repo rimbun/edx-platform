@@ -2,28 +2,30 @@
 
 
 import logging
+from urllib.parse import urljoin
 
-from django.urls import reverse
-from edx_rest_api_client import exceptions
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
-from rest_framework.authentication import SessionAuthentication
+from requests.exceptions import HTTPError
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.status import HTTP_406_NOT_ACCEPTABLE, HTTP_409_CONFLICT
+from rest_framework.status import HTTP_400_BAD_REQUEST, HTTP_403_FORBIDDEN, HTTP_406_NOT_ACCEPTABLE, HTTP_409_CONFLICT
 from rest_framework.views import APIView
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.entitlements.models import CourseEntitlement
-from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.models import CourseEnrollment, EnrollmentNotAllowed
 from common.djangoapps.util.json_request import JsonResponse
 from lms.djangoapps.courseware import courses
-from openedx.core.djangoapps.commerce.utils import ecommerce_api_client
+from openedx.core.djangoapps.commerce.utils import get_ecommerce_api_base_url, get_ecommerce_api_client
 from openedx.core.djangoapps.embargo import api as embargo_api
 from openedx.core.djangoapps.enrollments.api import add_enrollment
+from openedx.core.djangoapps.enrollments.errors import InvalidEnrollmentAttribute
 from openedx.core.djangoapps.enrollments.views import EnrollmentCrossDomainSessionAuth
 from openedx.core.djangoapps.user_api.preferences.api import update_email_opt_in
 from openedx.core.lib.api.authentication import BearerAuthenticationAllowInactiveUser
+from openedx.core.lib.log_utils import get_username_or_pii_safe_user_id_for_log
+from openedx.features.course_experience.url_helpers import make_learning_mfe_courseware_url
 
 from ...constants import Messages
 from ...http import DetailResponse
@@ -81,10 +83,12 @@ class BasketsView(APIView):
             except Exception:  # pylint: disable=broad-except
                 # log the error, return silently
                 log.exception(
-                    'Failed to handle marketing opt-in flag: user="%s", course="%s"', user.username, course_key
+                    'Failed to handle marketing opt-in flag: user="%s", course="%s"',
+                    get_username_or_pii_safe_user_id_for_log(user),
+                    course_key,
                 )
 
-    def post(self, request, *args, **kwargs):  # lint-amnesty, pylint: disable=unused-argument
+    def post(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         """
         Attempt to enroll the user.
         """
@@ -122,7 +126,7 @@ class BasketsView(APIView):
         if CourseEntitlement.check_for_existing_entitlement_and_enroll(user=user, course_run_key=course_key):
             return JsonResponse(
                 {
-                    'redirect_destination': reverse('courseware', args=[str(course_id)]),
+                    'redirect_destination': make_learning_mfe_courseware_url(course_id),
                 },
             )
 
@@ -149,25 +153,71 @@ class BasketsView(APIView):
                     announcement=course_announcement
                 )
             log.info(msg)
-            self._enroll(course_key, user, default_enrollment_mode.slug)
-            mode = CourseMode.AUDIT if audit_mode else CourseMode.HONOR  # lint-amnesty, pylint: disable=unused-variable
+
+            try:
+                self._enroll(course_key, user, default_enrollment_mode.slug)
+            except InvalidEnrollmentAttribute as e:
+                # Exception handling for InvalidEnrollmentAttribute
+                return self._handle_enrollment_error(
+                    e,
+                    user,
+                    course_id,
+                    "Invalid enrollment attribute ",
+                    HTTP_400_BAD_REQUEST
+                )
+            except EnrollmentNotAllowed as e:
+                # Exception handling for EnrollmentNotAllowed
+                return self._handle_enrollment_error(
+                    e,
+                    user,
+                    course_id,
+                    "Enrollment not allowed ",
+                    HTTP_403_FORBIDDEN
+                )
+
+            mode = CourseMode.AUDIT if audit_mode else CourseMode.HONOR  # pylint: disable=unused-variable  # noqa: F841
             self._handle_marketing_opt_in(request, course_key, user)
             return DetailResponse(msg)
         else:
             msg = Messages.NO_DEFAULT_ENROLLMENT_MODE.format(course_id=course_id)
             return DetailResponse(msg, status=HTTP_406_NOT_ACCEPTABLE)
 
+    def _handle_enrollment_error(self, exception, user, course_id, log_message, status_code):
+        """
+        Helper function to handle enrollment exceptions.
+
+        Args:
+            exception (Exception): The exception raised.
+            user (User): The user attempting to enroll.
+            course_id (str): The course ID.
+            log_message (str): The log message template.
+            status_code (int): The HTTP status code to return.
+
+        Returns:
+            DetailResponse: The response with the error message and status code.
+        """
+        log.exception(log_message, str(exception))
+        error_msg = f"{log_message.format(str(exception))} for user {user.username} in course {course_id}: {str(exception)}"  # pylint: disable=line-too-long
+        return DetailResponse(error_msg, status=status_code)
+
 
 class BasketOrderView(APIView):
-    """ Retrieve the order associated with a basket. """
+    """
+    Retrieve the order associated with a basket.
+    """
 
-    authentication_classes = (SessionAuthentication,)
     permission_classes = (IsAuthenticated,)
 
     def get(self, request, *_args, **kwargs):
-        """ HTTP handler. """
+        """
+        HTTP handler.
+        """
         try:
-            order = ecommerce_api_client(request.user).baskets(kwargs['basket_id']).order.get()
-            return JsonResponse(order)
-        except exceptions.HttpNotFoundError:
-            return JsonResponse(status=404)
+            api_url = urljoin(f"{get_ecommerce_api_base_url()}/", f"baskets/{kwargs['basket_id']}/order/")
+            response = get_ecommerce_api_client(request.user).get(api_url)
+            response.raise_for_status()
+            return JsonResponse(response.json())
+        except HTTPError as err:
+            if err.response.status_code == 404:
+                return JsonResponse(status=404)
+            raise

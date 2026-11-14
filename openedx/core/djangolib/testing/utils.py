@@ -17,10 +17,58 @@ import crum
 from django.conf import settings
 from django.contrib import sites
 from django.core.cache import caches
+from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, connections
 from django.test import RequestFactory, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from edx_django_utils.cache import RequestCache
+
+from openedx.core.lib import ensure_cms, ensure_lms
+
+# Used to ignore queries against authz tables when using assertNumQueries in FilteredQueryCountMixin
+AUTHZ_TABLES = [
+    "casbin_rule",
+    "openedx_authz_policycachecontrol",
+    "django_migrations",
+]
+
+
+def assert_redact_before_delete(
+    sql_list,
+    table,
+    expected_redacted_value_list,
+    num_redact_delete_pairs=1,
+):
+    """
+    Assert that PII is redacted before deleted.
+
+    Redacting before deleting protects downstream sync of data from holding PII
+    in soft-deleted records. This helper ensures UPDATE and DELETE queries for
+    ``table`` occur in consecutive pairs, and that each UPDATE contains the
+    expected redacted values.
+    """
+    assert expected_redacted_value_list
+
+    table_key = table.upper()
+    expected_sql_list = [
+        sql for sql in sql_list
+        if table_key in sql.upper() and ('UPDATE' in sql.upper() or 'DELETE' in sql.upper())
+    ]
+
+    assert len(expected_sql_list) == num_redact_delete_pairs * 2, (
+        f'Expected {num_redact_delete_pairs * 2} UPDATE/DELETE queries on {table}, '
+        f'got {len(expected_sql_list)}'
+    )
+
+    for index in range(0, len(expected_sql_list), 2):
+        update_sql = expected_sql_list[index]
+        delete_sql = expected_sql_list[index + 1]
+        assert 'UPDATE' in update_sql.upper(), f'Expected UPDATE at position {index} for {table}'
+        assert 'DELETE' in delete_sql.upper(), f'Expected DELETE at position {index + 1} for {table}'
+        for expected_redacted_value in expected_redacted_value_list:
+            assert expected_redacted_value.upper() in update_sql.upper(), (
+                f'Expected UPDATE to set redacted value {expected_redacted_value} for {table}'
+            )
 
 
 class CacheIsolationMixin:
@@ -101,7 +149,7 @@ class CacheIsolationMixin:
 
         cls.__old_settings.append(copy.deepcopy(settings.CACHES))
         override = override_settings(CACHES=cache_settings)
-        override.__enter__()
+        override.__enter__()  # pylint: disable=unnecessary-dunder-call
         cls.__settings_overrides.append(override)
 
         assert settings.CACHES == cache_settings
@@ -152,36 +200,36 @@ class CacheIsolationTestCase(CacheIsolationMixin, TestCase):
 class _AssertNumQueriesContext(CaptureQueriesContext):
     """
     This is a copy of Django's internal class of the same name, with the
-    addition of being able to provide a table_blacklist used to filter queries
+    addition of being able to provide a table_ignorelist used to filter queries
     before comparing the count.
     """
-    def __init__(self, test_case, num, connection, table_blacklist=None):
+    def __init__(self, test_case, num, connection, table_ignorelist=None):
         """
         Same as Django's _AssertNumQueriesContext __init__, with the addition of
         the following argument:
-            table_blacklist (List): A list of table names to filter out of the
+            table_ignorelist (List): A list of table names to filter out of the
                 set of queries that get counted.
         """
         self.test_case = test_case
         self.num = num
-        self.table_blacklist = table_blacklist
+        self.table_ignorelist = table_ignorelist
         super().__init__(connection)
 
     def __exit__(self, exc_type, exc_value, traceback):
         def is_unfiltered_query(query):
             """
-            Returns True if the query does not contain a blacklisted table, and
+            Returns True if the query does not contain a ignorelisted table, and
             False otherwise.
 
             Note: This is a simple naive implementation that makes no attempt
             to parse the query.
             """
-            if self.table_blacklist:
-                for table in self.table_blacklist:
+            if self.table_ignorelist:
+                for table in self.table_ignorelist:
                     # SQL contains the following format for columns:
-                    # "table_name"."column_name".  The regex ensures there is no
-                    # "." before the name to avoid matching columns.
-                    if re.search(fr'[^.]"{table}"', query['sql']):
+                    # "table_name"."column_name" or table_name.column_name.
+                    # The regex ensures there is no "." before the name to avoid matching columns.
+                    if re.search(fr'[^."]"?{table}"?', query['sql']):
                         return False
             return True
 
@@ -192,7 +240,7 @@ class _AssertNumQueriesContext(CaptureQueriesContext):
         executed = len(filtered_queries)
 
         assert executed == self.num, (
-            '%d queries executed, %d expected\nCaptured queries were:\n%s' % (
+            '%d queries executed, %d expected\nCaptured queries were:\n%s' % (  # noqa: UP031
                 executed, self.num, '\n'.join(query['sql'] for query in filtered_queries)
             )
         )
@@ -201,20 +249,22 @@ class _AssertNumQueriesContext(CaptureQueriesContext):
 class FilteredQueryCountMixin:
     """
     Mixin to add to any subclass of Django's TestCase that replaces
-    assertNumQueries with one that accepts a blacklist of tables to filter out
+    assertNumQueries with one that accepts a ignorelist of tables to filter out
     of the count.
     """
-    def assertNumQueries(self, num, func=None, table_blacklist=None, *args, **kwargs):  # lint-amnesty, pylint: disable=keyword-arg-before-vararg
+    def assertNumQueries(self, num, func=None, table_ignorelist=None, *args, **kwargs):  # pylint: disable=keyword-arg-before-vararg
         """
         Used to replace Django's assertNumQueries with the same capability, with
         the addition of the following argument:
-            table_blacklist (List): A list of table names to filter out of the
+            table_ignorelist (List): A list of table names to filter out of the
                 set of queries that get counted.
+
+        Important: TestCase must include FilteredQueryCountMixin for this to work.
         """
         using = kwargs.pop("using", DEFAULT_DB_ALIAS)
         conn = connections[using]
 
-        context = _AssertNumQueriesContext(self, num, conn, table_blacklist=table_blacklist)
+        context = _AssertNumQueriesContext(self, num, conn, table_ignorelist=table_ignorelist)
         if func is None:
             return context
 
@@ -243,11 +293,23 @@ def skip_unless_cms(func):
     """
     Only run the decorated test in the CMS test suite
     """
-    return skipUnless(settings.ROOT_URLCONF == 'cms.urls', 'Test only valid in CMS')(func)
+    try:
+        ensure_cms()
+    except ImproperlyConfigured:
+        is_cms = False
+    else:
+        is_cms = True
+    return skipUnless(is_cms, 'Test only valid in CMS')(func)
 
 
 def skip_unless_lms(func):
     """
     Only run the decorated test in the LMS test suite
     """
-    return skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in LMS')(func)
+    try:
+        ensure_lms()
+    except ImproperlyConfigured:
+        is_lms = False
+    else:
+        is_lms = True
+    return skipUnless(is_lms, 'Test only valid in LMS')(func)

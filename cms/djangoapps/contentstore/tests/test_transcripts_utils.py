@@ -1,12 +1,13 @@
 """ Tests for transcripts_utils. """
 
-
 import copy
 import json
+import re
 import tempfile
 import textwrap
 import unittest
-from unittest.mock import Mock, patch
+from contextlib import contextmanager
+from unittest.mock import patch
 from uuid import uuid4
 
 import ddt
@@ -14,18 +15,24 @@ import pytest
 from django.conf import settings
 from django.test.utils import override_settings
 from django.utils import translation
+from xblock_video.exceptions import TranscriptsGenerationException
 
-from cms.djangoapps.contentstore.tests.utils import mock_requests_get
+from cms.djangoapps.contentstore.tests.utils import setup_caption_responses
 from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.contentstore.content import StaticContent
-from xmodule.contentstore.django import contentstore
-from xmodule.exceptions import NotFoundError
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
-from xmodule.video_module import transcripts_utils
+from openedx.core.djangoapps.video_config import transcripts_utils  # pylint: disable=wrong-import-order
+from xmodule.contentstore.content import StaticContent  # pylint: disable=wrong-import-order
+from xmodule.contentstore.django import contentstore  # pylint: disable=wrong-import-order
+from xmodule.exceptions import NotFoundError  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 TEST_DATA_CONTENTSTORE = copy.deepcopy(settings.CONTENTSTORE)
-TEST_DATA_CONTENTSTORE['DOC_STORE_CONFIG']['db'] = 'test_xcontent_%s' % uuid4().hex
+TEST_DATA_CONTENTSTORE['DOC_STORE_CONFIG']['db'] = 'test_xcontent_%s' % uuid4().hex  # noqa: UP031
 
 
 class TestGenerateSubs(unittest.TestCase):
@@ -47,7 +54,7 @@ class TestGenerateSubs(unittest.TestCase):
 
     def test_generate_subs_increase_speed(self):
         subs = transcripts_utils.generate_subs(2, 1, self.source_subs)
-        self.assertDictEqual(
+        self.assertDictEqual(  # noqa: PT009
             subs,
             {
                 'start': [200, 400, 480, 780, 2000],
@@ -58,7 +65,7 @@ class TestGenerateSubs(unittest.TestCase):
 
     def test_generate_subs_decrease_speed_1(self):
         subs = transcripts_utils.generate_subs(0.5, 1, self.source_subs)
-        self.assertDictEqual(
+        self.assertDictEqual(  # noqa: PT009
             subs,
             {
                 'start': [50, 100, 120, 195, 500],
@@ -70,7 +77,7 @@ class TestGenerateSubs(unittest.TestCase):
     def test_generate_subs_decrease_speed_2(self):
         """Test for correct devision during `generate_subs` process."""
         subs = transcripts_utils.generate_subs(1, 2, self.source_subs)
-        self.assertDictEqual(
+        self.assertDictEqual(  # noqa: PT009
             subs,
             {
                 'start': [50, 100, 120, 195, 500],
@@ -140,15 +147,8 @@ class TestSaveSubsToStore(SharedModuleStoreTestCase):
         self.addCleanup(self.clear_subs_content)
         self.clear_subs_content()
 
-    def test_save_unicode_filename(self):
-        # Mock a video item
-        item = Mock(location=Mock(course_key=self.course.id))
-        transcripts_utils.save_subs_to_store(self.subs, self.subs_id, self.course)
-        transcripts_utils.copy_or_rename_transcript(self.subs_copied_id, self.subs_id, item)
-        self.assertTrue(contentstore().find(self.content_copied_location))
-
     def test_save_subs_to_store(self):
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             contentstore().find(self.content_location)
 
         result_location = transcripts_utils.save_subs_to_store(
@@ -156,23 +156,23 @@ class TestSaveSubsToStore(SharedModuleStoreTestCase):
             self.subs_id,
             self.course)
 
-        self.assertTrue(contentstore().find(self.content_location))
-        self.assertEqual(result_location, self.content_location)
+        self.assertTrue(contentstore().find(self.content_location))  # noqa: PT009
+        self.assertEqual(result_location, self.content_location)  # noqa: PT009
 
     def test_save_unjsonable_subs_to_store(self):
         """
         Ensures that subs, that can't be dumped, can't be found later.
         """
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             contentstore().find(self.content_location_unjsonable)
 
-        with self.assertRaises(TypeError):
+        with self.assertRaises(TypeError):  # noqa: PT027
             transcripts_utils.save_subs_to_store(
                 self.unjsonable_subs,
                 self.unjsonable_subs_id,
                 self.course)
 
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             contentstore().find(self.content_location_unjsonable)
 
 
@@ -186,7 +186,7 @@ class TestYoutubeSubsBase(SharedModuleStoreTestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.course = CourseFactory.create(
-            org=cls.org, number=cls.number, display_name=cls.display_name)  # lint-amnesty, pylint: disable=no-member
+            org=cls.org, number=cls.number, display_name=cls.display_name)  # pylint: disable=no-member
 
 
 @override_settings(CONTENTSTORE=TEST_DATA_CONTENTSTORE)
@@ -222,7 +222,7 @@ class TestDownloadYoutubeSubs(TestYoutubeSubsBase):
 
     def test_success_downloading_subs(self):
 
-        response = textwrap.dedent("""<?xml version="1.0" encoding="utf-8" ?>
+        caption_response_string = textwrap.dedent("""<?xml version="1.0" encoding="utf-8" ?>
                 <transcript>
                     <text start="0" dur="0.27"></text>
                     <text start="0.27" dur="2.45">Test text 1.</text>
@@ -233,12 +233,16 @@ class TestDownloadYoutubeSubs(TestYoutubeSubsBase):
         good_youtube_sub = 'good_id_2'
         self.clear_sub_content(good_youtube_sub)
 
-        with patch('xmodule.video_module.transcripts_utils.requests.get') as mock_get:
-            mock_get.return_value = Mock(status_code=200, text=response, content=response.encode('utf-8'))
-            # Check transcripts_utils.GetTranscriptsFromYouTubeException not thrown
+        language_code = 'en'
+        with patch('openedx.core.djangoapps.video_config.transcripts_utils.requests.get') as mock_get:
+            setup_caption_responses(mock_get, language_code, caption_response_string)
             transcripts_utils.download_youtube_subs(good_youtube_sub, self.course, settings)
 
-        mock_get.assert_any_call('http://video.google.com/timedtext', params={'lang': 'en', 'v': 'good_id_2'})
+            self.assertEqual(2, len(mock_get.mock_calls))  # noqa: PT009
+            args, kwargs = mock_get.call_args_list[0]
+            self.assertEqual(args[0], 'https://www.youtube.com/watch?v=good_id_2')  # noqa: PT009
+            args, kwargs = mock_get.call_args_list[1]
+            self.assertTrue(re.match(r"^https://www\.youtube\.com/api/timedtext.*", args[0]))  # noqa: PT009
 
     def test_subs_for_html5_vid_with_periods(self):
         """
@@ -247,21 +251,22 @@ class TestDownloadYoutubeSubs(TestYoutubeSubsBase):
         incorrect subs name parsing
         """
         html5_ids = transcripts_utils.get_html5_ids(['foo.mp4', 'foo.1.bar.mp4', 'foo/bar/baz.1.4.mp4', 'foo'])
-        self.assertEqual(4, len(html5_ids))
-        self.assertEqual(html5_ids[0], 'foo')
-        self.assertEqual(html5_ids[1], 'foo.1.bar')
-        self.assertEqual(html5_ids[2], 'baz.1.4')
-        self.assertEqual(html5_ids[3], 'foo')
+        self.assertEqual(4, len(html5_ids))  # noqa: PT009
+        self.assertEqual(html5_ids[0], 'foo')  # noqa: PT009
+        self.assertEqual(html5_ids[1], 'foo.1.bar')  # noqa: PT009
+        self.assertEqual(html5_ids[2], 'baz.1.4')  # noqa: PT009
+        self.assertEqual(html5_ids[3], 'foo')  # noqa: PT009
 
-    @patch('xmodule.video_module.transcripts_utils.requests.get')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.requests.get')
     def test_fail_downloading_subs(self, mock_get):
 
-        mock_get.return_value = Mock(status_code=404, text='Error 404')
+        track_status_code = 404
+        setup_caption_responses(mock_get, 'en', 'Error 404', track_status_code)
 
         bad_youtube_sub = 'BAD_YOUTUBE_ID2'
         self.clear_sub_content(bad_youtube_sub)
 
-        with self.assertRaises(transcripts_utils.GetTranscriptsFromYouTubeException):
+        with self.assertRaises(transcripts_utils.GetTranscriptsFromYouTubeException):  # noqa: PT027
             transcripts_utils.download_youtube_subs(bad_youtube_sub, self.course, settings)
 
     def test_success_downloading_chinese_transcripts(self):
@@ -278,82 +283,17 @@ class TestDownloadYoutubeSubs(TestYoutubeSubsBase):
         transcripts_utils.download_youtube_subs(good_youtube_sub, self.course, settings)
 
         # Check assets status after importing subtitles.
-        for subs_id in good_youtube_subs.values():  # lint-amnesty, pylint: disable=undefined-variable
+        for subs_id in good_youtube_subs.values():  # pylint: disable=undefined-variable  # noqa: F821
             filename = f'subs_{subs_id}.srt.sjson'
             content_location = StaticContent.compute_location(
                 self.course.id, filename
             )
-            self.assertTrue(contentstore().find(content_location))
+            self.assertTrue(contentstore().find(content_location))  # noqa: PT009
 
         self.clear_sub_content(good_youtube_sub)
 
-    @patch('xmodule.video_module.transcripts_utils.requests.get')
-    def test_get_transcript_name_youtube_server_success(self, mock_get):
-        """
-        Get transcript name from transcript_list fetch from youtube server api
-        depends on language code, default language in YOUTUBE Text Api is "en"
-        """
-        youtube_text_api = copy.deepcopy(settings.YOUTUBE['TEXT_API'])
-        youtube_text_api['params']['v'] = 'dummy_video_id'
-        response_success = """
-        <transcript_list>
-            <track id="1" name="Custom" lang_code="en" />
-            <track id="0" name="Custom1" lang_code="en-GB"/>
-        </transcript_list>
-        """
-        mock_get.return_value = Mock(status_code=200, text=response_success, content=response_success.encode('utf-8'))
 
-        transcript_name = transcripts_utils.youtube_video_transcript_name(youtube_text_api)
-        self.assertEqual(transcript_name, 'Custom')
-
-    @patch('xmodule.video_module.transcripts_utils.requests.get')
-    def test_get_transcript_name_youtube_server_no_transcripts(self, mock_get):
-        """
-        When there are no transcripts of video transcript name will be None
-        """
-        youtube_text_api = copy.deepcopy(settings.YOUTUBE['TEXT_API'])
-        youtube_text_api['params']['v'] = 'dummy_video_id'
-        response_success = "<transcript_list></transcript_list>"
-        mock_get.return_value = Mock(status_code=200, text=response_success, content=response_success.encode('utf-8'))
-
-        transcript_name = transcripts_utils.youtube_video_transcript_name(youtube_text_api)
-        self.assertIsNone(transcript_name)
-
-    @patch('xmodule.video_module.transcripts_utils.requests.get')
-    def test_get_transcript_name_youtube_server_language_not_exist(self, mock_get):
-        """
-        When the language does not exist in transcript_list transcript name will be None
-        """
-        youtube_text_api = copy.deepcopy(settings.YOUTUBE['TEXT_API'])
-        youtube_text_api['params']['v'] = 'dummy_video_id'
-        youtube_text_api['params']['lang'] = 'abc'
-        response_success = """
-        <transcript_list>
-            <track id="1" name="Custom" lang_code="en" />
-            <track id="0" name="Custom1" lang_code="en-GB"/>
-        </transcript_list>
-        """
-        mock_get.return_value = Mock(status_code=200, text=response_success, content=response_success.encode('utf-8'))
-
-        transcript_name = transcripts_utils.youtube_video_transcript_name(youtube_text_api)
-        self.assertIsNone(transcript_name)
-
-    @patch('xmodule.video_module.transcripts_utils.requests.get', side_effect=mock_requests_get)
-    def test_downloading_subs_using_transcript_name(self, mock_get):
-        """
-        Download transcript using transcript name in url
-        """
-        good_youtube_sub = 'good_id_2'
-        self.clear_sub_content(good_youtube_sub)
-
-        transcripts_utils.download_youtube_subs(good_youtube_sub, self.course, settings)
-        mock_get.assert_any_call(
-            'http://video.google.com/timedtext',
-            params={'lang': 'en', 'v': 'good_id_2', 'name': 'Custom'}
-        )
-
-
-class TestGenerateSubsFromSource(TestDownloadYoutubeSubs):  # lint-amnesty, pylint: disable=test-inherits-tests
+class TestGenerateSubsFromSource(TestDownloadYoutubeSubs):  # pylint: disable=test-inherits-tests
     """Tests for `generate_subs_from_source` function."""
 
     def test_success_generating_subs(self):
@@ -373,7 +313,7 @@ class TestGenerateSubsFromSource(TestDownloadYoutubeSubs):  # lint-amnesty, pyli
         """)
         self.clear_subs_content(youtube_subs)
 
-        # Check transcripts_utils.TranscriptsGenerationException not thrown.
+        # Check TranscriptsGenerationException not thrown.
         # Also checks that uppercase file extensions are supported.
         transcripts_utils.generate_subs_from_source(youtube_subs, 'SRT', srt_filedata, self.course)
 
@@ -383,7 +323,7 @@ class TestGenerateSubsFromSource(TestDownloadYoutubeSubs):  # lint-amnesty, pyli
             content_location = StaticContent.compute_location(
                 self.course.id, filename
             )
-            self.assertTrue(contentstore().find(content_location))
+            self.assertTrue(contentstore().find(content_location))  # noqa: PT009
 
         self.clear_subs_content(youtube_subs)
 
@@ -404,10 +344,10 @@ class TestGenerateSubsFromSource(TestDownloadYoutubeSubs):  # lint-amnesty, pyli
             At the left we can see...
         """)
 
-        with self.assertRaises(transcripts_utils.TranscriptsGenerationException) as cm:
+        with self.assertRaises(TranscriptsGenerationException) as cm:  # noqa: PT027
             transcripts_utils.generate_subs_from_source(youtube_subs, 'BAD_FORMAT', srt_filedata, self.course)
         exception_message = str(cm.exception)
-        self.assertEqual(exception_message, "We support only SubRip (*.srt) transcripts format.")
+        self.assertEqual(exception_message, "We support only SubRip (*.srt) transcripts format.")  # noqa: PT009
 
     def test_fail_bad_subs_filedata(self):
         youtube_subs = {
@@ -418,13 +358,13 @@ class TestGenerateSubsFromSource(TestDownloadYoutubeSubs):  # lint-amnesty, pyli
 
         srt_filedata = """BAD_DATA"""
 
-        with self.assertRaises(transcripts_utils.TranscriptsGenerationException) as cm:
+        with self.assertRaises(TranscriptsGenerationException) as cm:  # noqa: PT027
             transcripts_utils.generate_subs_from_source(youtube_subs, 'srt', srt_filedata, self.course)
         exception_message = str(cm.exception)
-        self.assertEqual(exception_message, "Something wrong with SubRip transcripts file during parsing.")
+        self.assertEqual(exception_message, "Something wrong with SubRip transcripts file during parsing.")  # noqa: PT009  # pylint: disable=line-too-long
 
 
-class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint: disable=test-inherits-tests
+class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # pylint: disable=test-inherits-tests
     """Tests for `generate_srt_from_sjson` function."""
 
     def test_success_generating_subs(self):
@@ -440,7 +380,7 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
             ]
         }
         srt_subs = transcripts_utils.generate_srt_from_sjson(sjson_subs, 1)
-        self.assertTrue(srt_subs)
+        self.assertTrue(srt_subs)  # noqa: PT009
         expected_subs = [
             '00:00:00,100 --> 00:00:00,200\nsubs #1',
             '00:00:00,200 --> 00:00:00,240\nsubs #2',
@@ -450,7 +390,7 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
         ]
 
         for sub in expected_subs:
-            self.assertIn(sub, srt_subs)
+            self.assertIn(sub, srt_subs)  # noqa: PT009
 
     def test_success_generating_subs_speed_up(self):
         sjson_subs = {
@@ -465,7 +405,7 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
             ]
         }
         srt_subs = transcripts_utils.generate_srt_from_sjson(sjson_subs, 0.5)
-        self.assertTrue(srt_subs)
+        self.assertTrue(srt_subs)  # noqa: PT009
         expected_subs = [
             '00:00:00,050 --> 00:00:00,100\nsubs #1',
             '00:00:00,100 --> 00:00:00,120\nsubs #2',
@@ -474,7 +414,7 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
             '00:00:27,000 --> 00:00:39,200\nsubs #5',
         ]
         for sub in expected_subs:
-            self.assertIn(sub, srt_subs)
+            self.assertIn(sub, srt_subs)  # noqa: PT009
 
     def test_success_generating_subs_speed_down(self):
         sjson_subs = {
@@ -489,7 +429,7 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
             ]
         }
         srt_subs = transcripts_utils.generate_srt_from_sjson(sjson_subs, 2)
-        self.assertTrue(srt_subs)
+        self.assertTrue(srt_subs)  # noqa: PT009
 
         expected_subs = [
             '00:00:00,200 --> 00:00:00,400\nsubs #1',
@@ -499,7 +439,7 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
             '00:01:48,000 --> 00:02:36,800\nsubs #5',
         ]
         for sub in expected_subs:
-            self.assertIn(sub, srt_subs)
+            self.assertIn(sub, srt_subs)  # noqa: PT009
 
     def test_fail_generating_subs(self):
         sjson_subs = {
@@ -511,29 +451,32 @@ class TestGenerateSrtFromSjson(TestDownloadYoutubeSubs):  # lint-amnesty, pylint
             ]
         }
         srt_subs = transcripts_utils.generate_srt_from_sjson(sjson_subs, 1)
-        self.assertFalse(srt_subs)
+        self.assertFalse(srt_subs)  # noqa: PT009
 
 
 class TestYoutubeTranscripts(unittest.TestCase):
     """
     Tests for checking right datastructure returning when using youtube api.
     """
-    @patch('xmodule.video_module.transcripts_utils.requests.get')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.requests.get')
     def test_youtube_bad_status_code(self, mock_get):
-        mock_get.return_value = Mock(status_code=404, text='test')
+        track_status_code = 404
+        setup_caption_responses(mock_get, 'en', 'test', track_status_code)
         youtube_id = 'bad_youtube_id'
-        with self.assertRaises(transcripts_utils.GetTranscriptsFromYouTubeException):
-            transcripts_utils.get_transcripts_from_youtube(youtube_id, settings, translation)
+        with self.assertRaises(transcripts_utils.GetTranscriptsFromYouTubeException):  # noqa: PT027
+            link = transcripts_utils.get_transcript_links_from_youtube(youtube_id, settings, translation)
+            transcripts_utils.get_transcript_from_youtube(link, youtube_id, translation)
 
-    @patch('xmodule.video_module.transcripts_utils.requests.get')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.requests.get')
     def test_youtube_empty_text(self, mock_get):
-        mock_get.return_value = Mock(status_code=200, text='')
+        setup_caption_responses(mock_get, 'en', '')
         youtube_id = 'bad_youtube_id'
-        with self.assertRaises(transcripts_utils.GetTranscriptsFromYouTubeException):
-            transcripts_utils.get_transcripts_from_youtube(youtube_id, settings, translation)
+        with self.assertRaises(transcripts_utils.GetTranscriptsFromYouTubeException):  # noqa: PT027
+            link = transcripts_utils.get_transcript_links_from_youtube(youtube_id, settings, translation)
+            transcripts_utils.get_transcript_from_youtube(link, youtube_id, translation)
 
     def test_youtube_good_result(self):
-        response = textwrap.dedent("""<?xml version="1.0" encoding="utf-8" ?>
+        caption_response_string = textwrap.dedent("""<?xml version="1.0" encoding="utf-8" ?>
                 <transcript>
                     <text start="0" dur="0.27"></text>
                     <text start="0.27" dur="2.45">Test text 1.</text>
@@ -547,11 +490,18 @@ class TestYoutubeTranscripts(unittest.TestCase):
             'text': ['Test text 1.', 'Test text 2.', 'Test text 3.']
         }
         youtube_id = 'good_youtube_id'
-        with patch('xmodule.video_module.transcripts_utils.requests.get') as mock_get:
-            mock_get.return_value = Mock(status_code=200, text=response, content=response.encode('utf-8'))
-            transcripts = transcripts_utils.get_transcripts_from_youtube(youtube_id, settings, translation)
-        self.assertEqual(transcripts, expected_transcripts)
-        mock_get.assert_called_with('http://video.google.com/timedtext', params={'lang': 'en', 'v': 'good_youtube_id'})
+        language_code = 'en'
+        with patch('openedx.core.djangoapps.video_config.transcripts_utils.requests.get') as mock_get:
+            setup_caption_responses(mock_get, language_code, caption_response_string)
+            link = transcripts_utils.get_transcript_links_from_youtube(youtube_id, settings, translation)
+            transcripts = transcripts_utils.get_transcript_from_youtube(link['en'], youtube_id, translation)
+
+        self.assertEqual(transcripts, expected_transcripts)  # noqa: PT009
+        self.assertEqual(2, len(mock_get.mock_calls))  # noqa: PT009
+        args, kwargs = mock_get.call_args_list[0]
+        self.assertEqual(args[0], f'https://www.youtube.com/watch?v={youtube_id}')  # noqa: PT009
+        args, kwargs = mock_get.call_args_list[1]
+        self.assertTrue(re.match(r"^https://www\.youtube\.com/api/timedtext.*", args[0]))  # noqa: PT009
 
 
 class TestTranscript(unittest.TestCase):
@@ -597,7 +547,7 @@ class TestTranscript(unittest.TestCase):
         """
         expected = self.txt_transcript
         actual = transcripts_utils.Transcript.convert(self.srt_transcript, 'srt', 'txt')
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual, expected)  # noqa: PT009
 
     def test_convert_srt_to_srt(self):
         """
@@ -605,7 +555,7 @@ class TestTranscript(unittest.TestCase):
         """
         expected = self.srt_transcript
         actual = transcripts_utils.Transcript.convert(self.srt_transcript, 'srt', 'srt')
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual, expected)  # noqa: PT009
 
     def test_convert_sjson_to_txt(self):
         """
@@ -613,7 +563,7 @@ class TestTranscript(unittest.TestCase):
         """
         expected = self.txt_transcript
         actual = transcripts_utils.Transcript.convert(self.sjson_transcript, 'sjson', 'txt')
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual, expected)  # noqa: PT009
 
     def test_convert_sjson_to_srt(self):
         """
@@ -621,7 +571,7 @@ class TestTranscript(unittest.TestCase):
         """
         expected = self.srt_transcript
         actual = transcripts_utils.Transcript.convert(self.sjson_transcript, 'sjson', 'srt')
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual, expected)  # noqa: PT009
 
     def test_convert_srt_to_sjson(self):
         """
@@ -629,7 +579,7 @@ class TestTranscript(unittest.TestCase):
         """
         expected = self.sjson_transcript
         actual = transcripts_utils.Transcript.convert(self.srt_transcript, 'srt', 'sjson')
-        self.assertDictEqual(json.loads(actual), json.loads(expected))
+        self.assertDictEqual(json.loads(actual), json.loads(expected))  # noqa: PT009
 
     def test_convert_invalid_srt_to_sjson(self):
         """
@@ -637,7 +587,7 @@ class TestTranscript(unittest.TestCase):
         to convert invalid srt transcript to sjson.
         """
         invalid_srt_transcript = 'invalid SubRip file content'
-        with self.assertRaises(transcripts_utils.TranscriptsGenerationException):
+        with self.assertRaises(TranscriptsGenerationException):  # noqa: PT027
             transcripts_utils.Transcript.convert(invalid_srt_transcript, 'srt', 'sjson')
 
     def test_convert_invalid_invalid_sjson_to_srt(self):
@@ -650,10 +600,10 @@ class TestTranscript(unittest.TestCase):
         """
         Test `Transcript.asset` raises `NotFoundError` for dummy non-existent transcript.
         """
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             transcripts_utils.Transcript.asset(None, transcripts_utils.NON_EXISTENT_TRANSCRIPT)
 
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             transcripts_utils.Transcript.asset(None, None, filename=transcripts_utils.NON_EXISTENT_TRANSCRIPT)
 
     def test_latin1(self):
@@ -699,9 +649,9 @@ class TestSubsFilename(unittest.TestCase):
 
     def test_unicode(self):
         name = transcripts_utils.subs_filename("˙∆©ƒƒƒ")
-        self.assertEqual(name, 'subs_˙∆©ƒƒƒ.srt.sjson')
+        self.assertEqual(name, 'subs_˙∆©ƒƒƒ.srt.sjson')  # noqa: PT009
         name = transcripts_utils.subs_filename("˙∆©ƒƒƒ", 'uk')
-        self.assertEqual(name, 'uk_subs_˙∆©ƒƒƒ.srt.sjson')
+        self.assertEqual(name, 'uk_subs_˙∆©ƒƒƒ.srt.sjson')  # noqa: PT009
 
 
 @ddt.ddt
@@ -741,7 +691,7 @@ class TestVideoIdsInfo(unittest.TestCase):
         Verify that `get_video_ids_info` works as expected.
         """
         actual_result = transcripts_utils.get_video_ids_info(edx_video_id, youtube_id_1_0, html5_sources)
-        self.assertEqual(actual_result, expected_result)
+        self.assertEqual(actual_result, expected_result)  # noqa: PT009
 
 
 @ddt.ddt
@@ -778,8 +728,8 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         self.sjson_mime_type = transcripts_utils.Transcript.mime_types[transcripts_utils.Transcript.SJSON]
 
         self.user = UserFactory.create()
-        self.vertical = ItemFactory.create(category='vertical', parent_location=self.course.location)
-        self.video = ItemFactory.create(
+        self.vertical = BlockFactory.create(category='vertical', parent_location=self.course.location)
+        self.video = BlockFactory.create(
             category='video',
             parent_location=self.vertical.location,
             edx_video_id='1234-5678-90'
@@ -794,7 +744,7 @@ class TestGetTranscript(SharedModuleStoreTestCase):
             transcripts = {language: filename}
 
         html5_sources = html5_sources or []
-        self.video = ItemFactory.create(
+        self.video = BlockFactory.create(
             category='video',
             parent_location=self.vertical.location,
             sub=subs_id,
@@ -818,7 +768,7 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         """
         Create srt file.
         """
-        srt_file = tempfile.NamedTemporaryFile(suffix=".srt")  # lint-amnesty, pylint: disable=consider-using-with
+        srt_file = tempfile.NamedTemporaryFile(suffix=".srt")  # pylint: disable=consider-using-with
         srt_file.content_type = transcripts_utils.Transcript.SRT
         srt_file.write(content)
         srt_file.seek(0)
@@ -851,7 +801,7 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         """
         Verify that `NotFoundError` exception is raised when transcript is not found in both the content store and val.
         """
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             transcripts_utils.get_transcript(
                 self.video,
                 lang=lang
@@ -919,9 +869,9 @@ class TestGetTranscript(SharedModuleStoreTestCase):
             language
         )
 
-        self.assertEqual(content, self.subs[language])
-        self.assertEqual(file_name, expected_filename)
-        self.assertEqual(mimetype, self.srt_mime_type)
+        self.assertEqual(content, self.subs[language])  # noqa: PT009
+        self.assertEqual(file_name, expected_filename)  # noqa: PT009
+        self.assertEqual(mimetype, self.srt_mime_type)  # noqa: PT009
 
     def test_get_transcript_from_content_store_for_ur(self):
         """
@@ -935,11 +885,11 @@ class TestGetTranscript(SharedModuleStoreTestCase):
             output_format=transcripts_utils.Transcript.SJSON
         )
 
-        self.assertEqual(json.loads(content), self.subs_sjson)
-        self.assertEqual(filename, 'ur_video_101.sjson')
-        self.assertEqual(mimetype, self.sjson_mime_type)
+        self.assertEqual(json.loads(content), self.subs_sjson)  # noqa: PT009
+        self.assertEqual(filename, 'ur_video_101.sjson')  # noqa: PT009
+        self.assertEqual(mimetype, self.sjson_mime_type)  # noqa: PT009
 
-    @patch('xmodule.video_module.transcripts_utils.get_video_transcript_content')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.get_video_transcript_content')
     def test_get_transcript_from_val(self, mock_get_video_transcript_content):
         """
         Verify that `get_transcript` function returns correct data when transcript is in val.
@@ -952,15 +902,15 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         content, filename, mimetype = transcripts_utils.get_transcript(
             self.video,
         )
-        self.assertEqual(content, self.subs_srt)
-        self.assertEqual(filename, 'edx.srt')
-        self.assertEqual(mimetype, self.srt_mime_type)
+        self.assertEqual(content, self.subs_srt)  # noqa: PT009
+        self.assertEqual(filename, 'edx.srt')  # noqa: PT009
+        self.assertEqual(mimetype, self.srt_mime_type)  # noqa: PT009
 
     def test_get_transcript_invalid_format(self):
         """
         Verify that `get_transcript` raises correct exception if transcript format is invalid.
         """
-        with self.assertRaises(NotFoundError) as invalid_format_exception:
+        with self.assertRaises(NotFoundError) as invalid_format_exception:  # noqa: PT027
             transcripts_utils.get_transcript(
                 self.video,
                 'ur',
@@ -968,7 +918,7 @@ class TestGetTranscript(SharedModuleStoreTestCase):
             )
 
         exception_message = str(invalid_format_exception.exception)
-        self.assertEqual(exception_message, 'Invalid transcript format `mpeg`')
+        self.assertEqual(exception_message, 'Invalid transcript format `mpeg`')  # noqa: PT009
 
     def test_get_transcript_no_content(self):
         """
@@ -977,14 +927,14 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         self.upload_file(self.create_srt_file(b''), self.video.location, 'ur_video_101.srt')
         self.create_transcript('', 'ur', 'ur_video_101.srt')
 
-        with self.assertRaises(NotFoundError) as no_content_exception:
+        with self.assertRaises(NotFoundError) as no_content_exception:  # noqa: PT027
             transcripts_utils.get_transcript(
                 self.video,
                 'ur'
             )
 
         exception_message = str(no_content_exception.exception)
-        self.assertEqual(exception_message, 'No transcript content')
+        self.assertEqual(exception_message, 'No transcript content')  # noqa: PT009
 
     def test_get_transcript_no_en_transcript(self):
         """
@@ -992,16 +942,16 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         """
         self.video.youtube_id_1_0 = ''
         self.store.update_item(self.video, self.user.id)
-        with self.assertRaises(NotFoundError) as no_en_transcript_exception:
+        with self.assertRaises(NotFoundError) as no_en_transcript_exception:  # noqa: PT027
             transcripts_utils.get_transcript(
                 self.video,
                 'en'
             )
 
         exception_message = str(no_en_transcript_exception.exception)
-        self.assertEqual(exception_message, 'No transcript for `en` language')
+        self.assertEqual(exception_message, 'No transcript for `en` language')  # noqa: PT009
 
-    @patch('xmodule.video_module.transcripts_utils.edxval_api.get_video_transcript_data')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.edxval_api.get_video_transcript_data')
     def test_get_transcript_incorrect_json_(self, mock_get_video_transcript_data):
         """
         Verify that `get transcript` function returns a working json file if the original throws an error
@@ -1012,10 +962,10 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         assert error_transcript["text"][0] in content
 
     @ddt.data(
-        transcripts_utils.TranscriptsGenerationException,
+        TranscriptsGenerationException,
         UnicodeDecodeError('aliencodec', b'\x02\x01', 1, 2, 'alien codec found!')
     )
-    @patch('xmodule.video_module.transcripts_utils.Transcript')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.Transcript')
     def test_get_transcript_val_exceptions(self, exception_to_raise, mock_Transcript):
         """
         Verify that `get_transcript_from_val` function raises `NotFoundError` when specified exceptions raised.
@@ -1024,7 +974,7 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         transcripts_info = self.video.get_transcripts_info()
         lang = self.video.get_default_transcript_language(transcripts_info)
         edx_video_id = transcripts_utils.clean_video_id(self.video.edx_video_id)
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             transcripts_utils.get_transcript_from_val(
                 edx_video_id,
                 lang=lang,
@@ -1032,10 +982,10 @@ class TestGetTranscript(SharedModuleStoreTestCase):
             )
 
     @ddt.data(
-        transcripts_utils.TranscriptsGenerationException,
+        TranscriptsGenerationException,
         UnicodeDecodeError('aliencodec', b'\x02\x01', 1, 2, 'alien codec found!')
     )
-    @patch('xmodule.video_module.transcripts_utils.Transcript')
+    @patch('openedx.core.djangoapps.video_config.transcripts_utils.Transcript')
     def test_get_transcript_content_store_exceptions(self, exception_to_raise, mock_Transcript):
         """
         Verify that `get_transcript_from_contentstore` function raises `NotFoundError` when specified exceptions raised.
@@ -1043,10 +993,123 @@ class TestGetTranscript(SharedModuleStoreTestCase):
         mock_Transcript.asset.side_effect = exception_to_raise
         transcripts_info = self.video.get_transcripts_info()
         lang = self.video.get_default_transcript_language(transcripts_info)
-        with self.assertRaises(NotFoundError):
+        with self.assertRaises(NotFoundError):  # noqa: PT027
             transcripts_utils.get_transcript_from_contentstore(
                 self.video,
                 language=lang,
                 output_format=transcripts_utils.Transcript.SRT,
                 transcripts_info=transcripts_info
             )
+
+
+@ddt.ddt
+class TestResolveLanguageCodeToTranscriptCode(unittest.TestCase):
+    """ Tests for resolve_language_code_to_transcript_code """
+    TEST_OTHER_LANGS = {'ab': 1, 'ab-cd': 1, 'ab-EF': 1, 'cd': 1, 'cd-jk': 1}
+    TEST_TRANSCRIPTS = {'transcripts': TEST_OTHER_LANGS, 'sub': False}
+
+    @ddt.unpack
+    @ddt.data(
+        ('ab', 'ab'),
+        ('ab-CD', 'ab-cd'),
+        ('ab-ef', 'ab-EF'),
+        ('zx', None),
+        ('cd-lmao', 'cd'),
+    )
+    def test_resolve_lang(self, lang, expected):
+        """
+        Test that resolve_language_code_to_transcript_code will successfully match
+        language codes of different cases, and return None if it isn't found
+        """
+        self.assertEqual(  # noqa: PT009
+            transcripts_utils.resolve_language_code_to_transcript_code(self.TEST_TRANSCRIPTS, lang),
+            expected
+        )
+
+
+class TestGetEndonymOrLabel(unittest.TestCase):
+    """
+    tests for the get_endonym_or_label function
+    """
+    LANG_CODE = 'ab-cd'
+    GENERIC_CODE = 'ab'
+    LANG_ENTONYM = 'ab language entonym (cd)'
+    LANG_LABEL = 'ab-cd language english label'
+    GENERIC_LABEL = 'ab language english label'
+
+    TEST_LANGUAGE_DICT = {LANG_CODE: LANG_ENTONYM}
+    TEST_ALL_LANGUAGES = (
+        ["aa", "Afar"],
+        [GENERIC_CODE, GENERIC_LABEL],
+        [LANG_CODE, LANG_LABEL],
+        ["ur", "Urdu"],
+    )
+
+    @contextmanager
+    def mock_django_get_language_info(self, side_effect=None):
+        """
+        Helper for cleaner mocking
+        """
+        with patch('openedx.core.djangoapps.video_config.transcripts_utils.get_language_info') as mock_get:
+            if side_effect:
+                mock_get.side_effect = side_effect
+            yield mock_get
+
+    def test_language_in_languages(self):
+        """ If language is found in LANGUAGE_DICT that value should be returned """
+        with override_settings(LANGUAGE_DICT=self.TEST_LANGUAGE_DICT):
+            self.assertEqual(  # noqa: PT009
+                transcripts_utils.get_endonym_or_label(self.LANG_CODE),
+                self.LANG_ENTONYM
+            )
+
+    def test_language_in_django_lang_info(self):
+        """
+        If language is not found in LANGUAGE_DICT, check get_language_info and return that
+        local name if found
+        """
+        with override_settings(LANGUAGE_DICT={}):
+            with self.mock_django_get_language_info() as mock_get_language_info:
+                self.assertEqual(  # noqa: PT009
+                    transcripts_utils.get_endonym_or_label(self.LANG_CODE),
+                    mock_get_language_info.return_value['name_local']
+                )
+
+    def test_language_exact_in_all_languages(self):
+        """
+        If not found in LANGUAGE_DICT or get_language_info, check in
+        ALL_LANGUAGES for the English language name
+        """
+        with override_settings(LANGUAGE_DICT={}):
+            with self.mock_django_get_language_info(side_effect=KeyError):
+                with override_settings(ALL_LANGUAGES=self.TEST_ALL_LANGUAGES):
+                    label = transcripts_utils.get_endonym_or_label(self.LANG_CODE)
+        self.assertEqual(label, self.LANG_LABEL)  # noqa: PT009
+
+    def test_language_generic_in_all_languages(self):
+        """
+        If not found in LANGUAGE_DICT or get_language_info, and the exact code
+        wasn't found in ALL_LANGUAGES, use the generic code if it is found in ALL_LANGUAGES.
+        """
+        all_languages = (
+            self.TEST_ALL_LANGUAGES[0],
+            self.TEST_ALL_LANGUAGES[1],
+            self.TEST_ALL_LANGUAGES[3]
+        )
+
+        with override_settings(LANGUAGE_DICT={}):
+            with self.mock_django_get_language_info(side_effect=KeyError):
+                with override_settings(ALL_LANGUAGES=all_languages):
+                    label = transcripts_utils.get_endonym_or_label(self.LANG_CODE)
+        self.assertEqual(label, self.GENERIC_LABEL)  # noqa: PT009
+
+    def test_language_not_found_anywhere(self):
+        """
+        Raise a NotFoundError if the language isn't found anywhere
+        """
+        all_languages = (self.TEST_ALL_LANGUAGES[0], self.TEST_ALL_LANGUAGES[3])
+        with override_settings(LANGUAGE_DICT={}):
+            with self.mock_django_get_language_info(side_effect=KeyError):
+                with override_settings(ALL_LANGUAGES=all_languages):
+                    with self.assertRaises(NotFoundError):  # noqa: PT027
+                        transcripts_utils.get_endonym_or_label(self.LANG_CODE)

@@ -10,14 +10,14 @@ from copy import deepcopy
 import ddt
 import pytz
 
+import openedx.core.djangoapps.content.block_structure.api as bs_api
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.course_blocks.api import get_course_blocks
 from lms.djangoapps.course_blocks.transformers.tests.helpers import CourseStructureTestCase
 from openedx.core.djangoapps.content.block_structure.api import clear_course_from_cache
 from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import check_mongo_calls
+from xmodule.modulestore.tests.factories import check_mongo_calls_range
 
 from ..transformer import GradesTransformer
 
@@ -49,7 +49,7 @@ class GradesTransformerTestCase(CourseStructureTestCase):
         Helper to update a course's grading policy in the modulestore.
         """
         course.set_grading_policy(grading_policy)
-        modulestore().update_item(course, self.user.id)
+        self.update_course(course, self.user.id)
 
     def _validate_grading_policy_hash(self, course_location, grading_policy_hash):
         """
@@ -115,10 +115,10 @@ class GradesTransformerTestCase(CourseStructureTestCase):
                 '#ref': 'course',
                 '#children': [
                     {
-                        'metadata': metadata,
                         '#type': 'problem',
                         '#ref': 'problem',
                         'data': data,
+                        **metadata,
                     }
                 ]
             }
@@ -208,7 +208,7 @@ class GradesTransformerTestCase(CourseStructureTestCase):
         }
         blocks = self.build_complicated_hypothetical_course()
         block_structure = get_course_blocks(self.student, blocks['course'].location, self.transformers)
-        for block_ref, expected_subsections in expected_subsections.items():
+        for block_ref, expected_subsections in expected_subsections.items():  # noqa: B020
             actual_subsections = block_structure.get_transformer_block_field(
                 blocks[block_ref].location,
                 self.TRANSFORMER_CLASS_TO_TEST,
@@ -368,14 +368,8 @@ class GradesTransformerTestCase(CourseStructureTestCase):
             max_score=0,
         )
 
-    def test_course_version_not_collected_in_old_mongo(self):
-        blocks = self.build_course_with_problems()
-        block_structure = get_course_blocks(self.student, blocks['course'].location, self.transformers)
-        assert block_structure.get_xblock_field(blocks['course'].location, 'course_version') is None
-
     def test_course_version_collected_in_split(self):
-        with self.store.default_store(ModuleStoreEnum.Type.split):
-            blocks = self.build_course_with_problems()
+        blocks = self.build_course_with_problems()
         block_structure = get_course_blocks(self.student, blocks['course'].location, self.transformers)
         assert block_structure.get_xblock_field(blocks['course'].location, 'course_version') is not None
         assert block_structure.get_xblock_field(
@@ -430,11 +424,10 @@ class MultiProblemModulestoreAccessTestCase(CourseStructureTestCase, SharedModul
         self.client.login(username=self.student.username, password=password)
 
     @ddt.data(
-        (ModuleStoreEnum.Type.split, 3),
-        (ModuleStoreEnum.Type.mongo, 2),
+        (ModuleStoreEnum.Type.split, 2, 2),
     )
     @ddt.unpack
-    def test_modulestore_performance(self, store_type, expected_mongo_queries):
+    def test_modulestore_performance(self, store_type, max_mongo_calls, min_mongo_calls):
         """
         Test that a constant number of mongo calls are made regardless of how
         many grade-related blocks are in the course.
@@ -465,11 +458,12 @@ class MultiProblemModulestoreAccessTestCase(CourseStructureTestCase, SharedModul
                             <numericalresponse answer="{number}">
                                 <textline label="1*{number}" />
                             </numericalresponse>
-                        </problem>'''.format(number=problem_number),
+                        </problem>'''.format(number=problem_number),  # noqa: UP032
                 }
             )
         with self.store.default_store(store_type):
             blocks = self.build_course(course)
+        bs_api.update_course_in_cache(blocks['course'].id)
         clear_course_from_cache(blocks['course'].id)
-        with check_mongo_calls(expected_mongo_queries):
+        with check_mongo_calls_range(max_mongo_calls, min_mongo_calls):
             get_course_blocks(self.student, blocks['course'].location, self.transformers)

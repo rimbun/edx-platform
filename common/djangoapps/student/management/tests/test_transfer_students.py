@@ -2,12 +2,9 @@
 Tests the transfer student management command
 """
 
-
-import unittest
 from unittest.mock import call, patch
 
 import ddt
-from django.conf import settings
 from django.core.management import call_command
 from opaque_keys.edx import locator
 
@@ -16,15 +13,18 @@ from common.djangoapps.student.models import (
     EVENT_NAME_ENROLLMENT_ACTIVATED,
     EVENT_NAME_ENROLLMENT_DEACTIVATED,
     EVENT_NAME_ENROLLMENT_MODE_CHANGED,
-    CourseEnrollment
+    CourseEnrollment,
 )
 from common.djangoapps.student.signals import UNENROLL_DONE
 from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from openedx.core.djangolib.testing.utils import skip_unless_lms
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 @ddt.ddt
 class TestTransferStudents(ModuleStoreTestCase):
     """
@@ -34,14 +34,14 @@ class TestTransferStudents(ModuleStoreTestCase):
     PASSWORD = 'test'
     signal_fired = False
 
-    def setUp(self, **kwargs):  # lint-amnesty, pylint: disable=unused-argument
+    def setUp(self, **kwargs):  # pylint: disable=unused-argument
         """
         Connect a stub receiver, and analytics event tracking.
         """
         super().setUp()
 
         UNENROLL_DONE.connect(self.assert_unenroll_signal)
-        patcher = patch('common.djangoapps.student.models.tracker')
+        patcher = patch('common.djangoapps.student.models.course_enrollment.tracker')
         self.mock_tracker = patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(UNENROLL_DONE.disconnect, self.assert_unenroll_signal)
@@ -140,7 +140,7 @@ class TestTransferStudents(ModuleStoreTestCase):
             run=course_location.run
         )
 
-    def _create_and_purchase_verified(self, student, course_id):  # lint-amnesty, pylint: disable=unused-argument
+    def _create_and_purchase_verified(self, student, course_id):  # pylint: disable=unused-argument
         """
         Creates a verified mode for the course and purchases it for the student.
         """

@@ -19,7 +19,7 @@ from common.djangoapps.student.tests.factories import GlobalStaffFactory
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from openedx.core.lib.url_utils import quote_slashes
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 class TestRecommender(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
@@ -27,8 +27,8 @@ class TestRecommender(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
     Check that Recommender state is saved properly
     """
     STUDENTS = [
-        {'email': 'view@test.com', 'password': 'foo'},
-        {'email': 'view2@test.com', 'password': 'foo'}
+        {'email': 'view@test.com', 'password': 'Password1234'},
+        {'email': 'view2@test.com', 'password': 'Password1234'}
     ]
     XBLOCK_NAMES = ['recommender', 'recommender_second']
 
@@ -45,34 +45,27 @@ class TestRecommender(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
             display_name='Recommender_Test_Course'
         )
         with cls.store.bulk_operations(cls.course.id, emit_signals=False):
-            cls.chapter = ItemFactory.create(
+            cls.chapter = BlockFactory.create(
                 parent=cls.course, display_name='Overview'
             )
-            cls.section = ItemFactory.create(
+            cls.section = BlockFactory.create(
                 parent=cls.chapter, display_name='Welcome'
             )
-            cls.unit = ItemFactory.create(
+            cls.unit = BlockFactory.create(
                 parent=cls.section, display_name='New Unit'
             )
-            cls.xblock = ItemFactory.create(
+            cls.xblock = BlockFactory.create(
                 parent=cls.unit,
                 category='recommender',
                 display_name='recommender'
             )
-            cls.xblock2 = ItemFactory.create(
+            cls.xblock2 = BlockFactory.create(
                 parent=cls.unit,
                 category='recommender',
                 display_name='recommender_second'
             )
 
-        cls.course_url = reverse(
-            'courseware_section',
-            kwargs={
-                'course_id': str(cls.course.id),
-                'chapter': 'Overview',
-                'section': 'Welcome',
-            }
-        )
+        cls.course_url = reverse('render_xblock', args=[str(cls.section.location)])
 
         cls.resource_urls = [
             (
@@ -148,7 +141,7 @@ class TestRecommender(SharedModuleStoreTestCase, LoginEnrollmentTestCase):
         Staff login and enroll for the course
         """
         email = staff.email
-        password = 'test'
+        password = self.TEST_PASSWORD
         self.login(email, password)
         self.enroll(self.course, verify=True)
 
@@ -218,7 +211,7 @@ class TestRecommenderCreateFromEmpty(TestRecommender):
                 for field in resource:
                     expected_result[field] = resource[field]
 
-                self.assertDictEqual(json.loads(result.content), expected_result)
+                self.assertDictEqual(json.loads(result.content), expected_result)  # noqa: PT009
                 self.assert_request_status_code(200, self.course_url)
 
 

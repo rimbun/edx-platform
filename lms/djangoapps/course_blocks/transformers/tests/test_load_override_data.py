@@ -13,7 +13,7 @@ from lms.djangoapps.course_blocks.transformers.load_override_data import REQUEST
 from lms.djangoapps.courseware.student_field_overrides import get_override_for_user, override_field_for_user
 from openedx.core.djangoapps.content.block_structure.factory import BlockStructureFactory
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
 from xmodule.modulestore.tests.factories import ToyCourseFactory
 
 expected_overrides = {
@@ -32,6 +32,7 @@ class TestOverrideDataTransformer(ModuleStoreTestCase):
     """
     Test proper behavior for OverrideDataTransformer
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     @classmethod
     def setUpClass(cls):
@@ -51,10 +52,10 @@ class TestOverrideDataTransformer(ModuleStoreTestCase):
             self.learner.id, subsection.location, 'html', 'new_component'
         )
         CourseEnrollmentFactory.create(user=self.learner, course_id=self.course_key, is_active=True)
-        self.block = self.store.create_child(
-            self.learner2.id, subsection.location, 'html', 'new_component'
-        )
         CourseEnrollmentFactory.create(user=self.learner2, course_id=self.course_key, is_active=True)
+        self.block = self.store.create_child(
+            self.learner2.id, subsection.location, 'html', 'new_component_2'
+        )
 
     @ddt.data(*REQUESTED_FIELDS)
     def test_transform(self, field):

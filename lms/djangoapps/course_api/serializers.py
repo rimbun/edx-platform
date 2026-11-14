@@ -5,12 +5,16 @@ Course API Serializers.  Representing course catalog data
 
 import urllib
 
+from django.contrib.auth import get_user_model
 from django.urls import reverse
 from edx_django_utils import monitoring as monitoring_utils
 from rest_framework import serializers
 
-from openedx.core.djangoapps.content.course_overviews.models import \
-    CourseOverview  # lint-amnesty, pylint: disable=unused-import
+from common.djangoapps.student.models import CourseEnrollment
+from lms.djangoapps.certificates.api import can_show_certificate_available_date_field
+from openedx.core.djangoapps.content.course_overviews.models import (  # pylint: disable=unused-import
+    CourseOverview,  # noqa: F401
+)
 from openedx.core.djangoapps.models.course_details import CourseDetails
 from openedx.core.lib.api.fields import AbsoluteURLField
 
@@ -41,7 +45,7 @@ class _AbsolutMediaSerializer(_MediaSerializer):  # pylint: disable=abstract-met
 
     def __call__(self, serializer_field):
         self.context = serializer_field.context
-        return super(self).__call__(serializer_field)  # lint-amnesty, pylint: disable=bad-super-call
+        return super(self).__call__(serializer_field)  # pylint: disable=bad-super-call
 
     uri_absolute = serializers.SerializerMethodField(source="*")
 
@@ -62,7 +66,7 @@ class _AbsolutMediaSerializer(_MediaSerializer):  # pylint: disable=abstract-met
         # In order to use the AbsoluteURLField to have the same
         # behaviour what ImageSerializer provides, we need to set
         # the request for the field
-        field._context = {"request": self.context.get("request")}  # lint-amnesty, pylint: disable=protected-access
+        field._context = {"request": self.context.get("request")}  # pylint: disable=protected-access
 
         return field.to_representation(cdn_applied_uri)
 
@@ -123,7 +127,7 @@ class CourseSerializer(serializers.Serializer):  # pylint: disable=abstract-meth
         Represents whether course is hidden in LMS
         """
         catalog_visibility = course_overview.catalog_visibility
-        return catalog_visibility in ['about', 'none']
+        return catalog_visibility in ['about', 'none'] or course_overview.id.deprecated  # Old Mongo should be hidden
 
     def get_blocks_url(self, course_overview):
         """
@@ -134,6 +138,12 @@ class CourseSerializer(serializers.Serializer):  # pylint: disable=abstract-meth
             urllib.parse.urlencode({'course_id': course_overview.id}),
         ])
         return self.context['request'].build_absolute_uri(base_url)
+
+    def to_representation(self, instance):
+        response = super().to_representation(instance)
+        if can_show_certificate_available_date_field(instance):
+            response['certificate_available_date'] = instance.certificate_available_date
+        return response
 
 
 class CourseDetailSerializer(CourseSerializer):  # pylint: disable=abstract-method
@@ -158,6 +168,29 @@ class CourseDetailSerializer(CourseSerializer):  # pylint: disable=abstract-meth
         # fields from CourseSerializer, which get their data
         # from the CourseOverview object in SQL.
         return CourseDetails.fetch_about_attribute(course_overview.id, 'overview')
+
+    def to_representation(self, instance):
+        """
+        Get the `certificate_available_date` in response
+        if the `certificates.auto_certificate_generation` waffle switch is enabled
+
+        Get the 'is_enrolled' in response if 'username' is in query params,
+        user is staff, superuser, or user is authenticated and
+        the has the same 'username' as the 'username' in the query params.
+        """
+        response = super().to_representation(instance)
+        if can_show_certificate_available_date_field(instance):
+            response['certificate_available_date'] = instance.certificate_available_date
+
+        requested_username = self.context['request'].query_params.get('username', None)
+        if requested_username:
+            user = self.context['request'].user
+            if ((user.is_authenticated and user.username == requested_username)
+                    or user.is_staff or user.is_superuser):
+                User = get_user_model()
+                requested_user = User.objects.get(username=requested_username)
+                response['is_enrolled'] = CourseEnrollment.is_enrolled(requested_user, instance.id)
+        return response
 
 
 class CourseKeySerializer(serializers.BaseSerializer):  # pylint:disable=abstract-method

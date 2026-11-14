@@ -1,10 +1,12 @@
-define(["jquery", "edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers", "squire"],
-function($, AjaxHelpers, Squire) {
+define(["jquery", "sinon", "edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers", "squire"],
+function($, sinon, AjaxHelpers, Squire) {
 
     const assetLibraryTpl = readFixtures('asset-library.underscore');
     const assetTpl = readFixtures('asset.underscore');
 
     describe("Asset view", function() {
+        var requests, xhrFactory;
+
         beforeEach(function(done) {
             setFixtures($("<script>", {id: "asset-tpl", type: "text/template"}).text(assetTpl));
             appendSetFixtures(sandbox({id: "page-prompt"}));
@@ -38,38 +40,45 @@ function($, AjaxHelpers, Squire) {
                         portable_url: 'portable_url',
                         date_added: 'date',
                         thumbnail: null,
-                        id: 'id'
+                        id: 'id',
+                        static_full_url: 'static_full_url',
                     });
                     spyOn(this.model, "destroy").and.callThrough();
                     spyOn(this.model, "save").and.callThrough();
 
                     this.collection = new AssetCollection([this.model]);
                     this.collection.url = "assets-url";
-                    this.createAssetView = test => {
+                    this.createAssetView = () => {
                         const view = new AssetView({model: this.model});
-                        const requests = test ? AjaxHelpers["requests"](test) : null;
-                        return {view, requests};
+                        return {view};
                     };
                     return done();
             });
         });
 
+        beforeEach(function() {
+            xhrFactory = sinon.useFakeXMLHttpRequest();
+            requests = [];
+            requests.currentIndex = 0;
+            requests.restore = function() { xhrFactory.restore(); };
+            xhrFactory.onCreate = function(req) { requests.push(req); };
+        });
+
         afterEach(function() {
+            requests.restore();
             this.injector.clean();
             this.injector.remove();
         });
 
         describe("Basic", function() {
             it("should render properly", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetView());
+                this.view = this.createAssetView().view;
                 this.view.render();
                 expect(this.view.$el).toContainText("test asset");
             });
 
             it("should pop a delete confirmation when the delete button is clicked", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetView());
+                this.view = this.createAssetView().view;
                 this.view.render().$(".remove-asset-button").click();
                 expect(this.promptSpies.constructor).toHaveBeenCalled();
                 const ctorOptions = this.promptSpies.constructor.calls.mostRecent().args[0];
@@ -82,8 +91,7 @@ function($, AjaxHelpers, Squire) {
 
         describe("AJAX", function() {
             it("should destroy itself on confirmation", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetView(this));
+                this.view = this.createAssetView().view;
 
                 this.view.render().$(".remove-asset-button").click();
                 const ctorOptions = this.promptSpies.constructor.calls.mostRecent().args[0];
@@ -104,8 +112,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should not destroy itself if server errors", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetView(this));
+                this.view = this.createAssetView().view;
 
                 this.view.render().$(".remove-asset-button").click();
                 const ctorOptions = this.promptSpies.constructor.calls.mostRecent().args[0];
@@ -120,8 +127,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should lock the asset on confirmation", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetView(this));
+                this.view = this.createAssetView().view;
 
                 this.view.render().$(".lock-checkbox").click();
                 // AJAX request has been sent, but not yet returned
@@ -139,8 +145,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should not lock the asset if server errors", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetView(this));
+                this.view = this.createAssetView().view;
 
                 this.view.render().$(".lock-checkbox").click();
                 // return an error response
@@ -153,6 +158,8 @@ function($, AjaxHelpers, Squire) {
     });
 
     describe("Assets view", function() {
+        var requests, xhrFactory;
+
         beforeEach(function(done) {
             setFixtures($("<script>", {id: "asset-library-tpl", type: "text/template"}).text(assetLibraryTpl));
             appendSetFixtures($("<script>", {id: "asset-tpl", type: "text/template"}).text(assetTpl));
@@ -175,7 +182,8 @@ function($, AjaxHelpers, Squire) {
                 portable_url: 'portable_url_1',
                 date_added: 'date_1',
                 thumbnail: null,
-                id: 'id_1'
+                id: 'id_1',
+                static_full_url: 'static_full_url_1',
             };
             this.mockAsset2 = {
                 display_name: "test asset 2",
@@ -183,7 +191,8 @@ function($, AjaxHelpers, Squire) {
                 portable_url: 'portable_url_2',
                 date_added: 'date_2',
                 thumbnail: null,
-                id: 'id_2'
+                id: 'id_2',
+                static_full_url: 'static_full_url_2',
             };
             this.mockAssetsResponse = {
                 assets: [ this.mockAsset1, this.mockAsset2 ],
@@ -199,14 +208,13 @@ function($, AjaxHelpers, Squire) {
                     this.AssetModel = AssetModel;
                     this.collection = new AssetCollection();
                     this.collection.url = "assets-url";
-                    this.createAssetsView = test => {
-                        const requests = AjaxHelpers.requests(test);
+                    this.createAssetsView = () => {
                         const view = new AssetsView({
                             collection: this.collection,
                             el: $('#asset_table_body')
                         });
                         view.render();
-                        return {view, requests};
+                        return {view};
                     };
                     return done();
             });
@@ -214,7 +222,16 @@ function($, AjaxHelpers, Squire) {
             return $.ajax();
         });
 
+        beforeEach(function() {
+            xhrFactory = sinon.useFakeXMLHttpRequest();
+            requests = [];
+            requests.currentIndex = 0;
+            requests.restore = function() { xhrFactory.restore(); };
+            xhrFactory.onCreate = function(req) { requests.push(req); };
+        });
+
         afterEach(function() {
+            requests.restore();
             delete window.analytics;
             delete window.course_location_analytics;
 
@@ -229,7 +246,8 @@ function($, AjaxHelpers, Squire) {
                 portable_url: 'portable_url',
                 date_added: 'date',
                 thumbnail: null,
-                id: 'idx'
+                id: 'idx',
+                static_full_url: 'static_full_url',
             });
             this.view.addAsset(model);
             return AjaxHelpers.respondWithJson(requests,
@@ -242,7 +260,8 @@ function($, AjaxHelpers, Squire) {
                             portable_url: 'portable_url',
                             date_added: 'date',
                             thumbnail: null,
-                            id: 'idx'
+                            id: 'idx',
+                            static_full_url: 'static_full_url',
                         }
                     ],
                     start: 0,
@@ -266,8 +285,7 @@ function($, AjaxHelpers, Squire) {
             const clickEvent = html_selector => $(html_selector).click();
 
             it("should show upload modal on clicking upload asset button", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 spyOn(this.view, "showUploadModal");
                 setup.call(this, requests);
                 expect(this.view.showUploadModal).not.toHaveBeenCalled();
@@ -276,8 +294,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should show file selection menu on choose file button", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 spyOn(this.view, "showFileSelectionMenu");
                 setup.call(this, requests);
                 expect(this.view.showFileSelectionMenu).not.toHaveBeenCalled();
@@ -286,8 +303,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should hide upload modal on clicking close button", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 spyOn(this.view, "hideModal");
                 setup.call(this, requests);
                 expect(this.view.hideModal).not.toHaveBeenCalled();
@@ -296,8 +312,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should show a status indicator while loading", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 appendSetFixtures('<div class="ui-loading"/>');
                 expect($('.ui-loading').is(':visible')).toBe(true);
                 setup.call(this, requests);
@@ -305,8 +320,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should hide the status indicator if an error occurs while loading", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 appendSetFixtures('<div class="ui-loading"/>');
                 expect($('.ui-loading').is(':visible')).toBe(true);
                 this.view.pagingView.setPage(1);
@@ -315,16 +329,14 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should render both assets", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 expect(this.view.$el).toContainText("test asset 1");
                 expect(this.view.$el).toContainText("test asset 2");
             });
 
             it("should remove the deleted asset from the view", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 AjaxHelpers.respondWithJson(requests, this.mockAssetsResponse);
                 setup.call(this, requests);
                 // Delete the 2nd asset with success from server.
@@ -336,8 +348,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("does not remove asset if deletion failed", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 // Delete the 2nd asset, but mimic a failure from the server.
                 this.view.$(".remove-asset-button")[1].click();
@@ -348,8 +359,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("adds an asset if asset does not already exist", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 addMockAsset.call(this, requests);
                 expect(this.view.$el).toContainText("new asset");
@@ -357,8 +367,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("does not add an asset if asset already exists", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 spyOn(this.collection, "add").and.callThrough();
                 const model = this.collection.models[1];
@@ -375,16 +384,14 @@ function($, AjaxHelpers, Squire) {
             };
 
             it("should have the correct default sort order", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 expect(this.view.pagingView.sortDisplayName()).toBe("Date Added");
                 expect(this.view.collection.sortDirection).toBe("desc");
             });
 
             it("should toggle the sort order when clicking on the currently sorted column", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 expect(this.view.pagingView.sortDisplayName()).toBe("Date Added");
                 expect(this.view.collection.sortDirection).toBe("desc");
@@ -399,8 +406,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should switch the sort order when clicking on a different column", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 this.view.$("#js-asset-name-col").click();
                 AjaxHelpers.respondWithJson(requests, this.mockAssetsResponse);
@@ -413,8 +419,7 @@ function($, AjaxHelpers, Squire) {
             });
 
             it("should switch sort to most recent date added when a new asset is added", function() {
-                let requests;
-                ({view: this.view, requests} = this.createAssetsView(this));
+                this.view = this.createAssetsView().view;
                 setup.call(this, requests);
                 this.view.$("#js-asset-name-col").click();
                 AjaxHelpers.respondWithJson(requests, this.mockAssetsResponse);

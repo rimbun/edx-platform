@@ -1,23 +1,21 @@
 """Course app config for courseware apps."""
-from typing import Dict, Optional
+from typing import Dict, Optional  # noqa: UP035
 
 from django import urls
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.utils.translation import ugettext_noop as _
+from django.utils.translation import gettext_noop as _
 from opaque_keys.edx.keys import CourseKey
 
-from xmodule.modulestore.django import modulestore
-
-from cms.djangoapps.contentstore.utils import get_proctored_exam_settings_url
-from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
+from openedx.core.djangoapps.content.course_overviews.models import CourseOverview, CourseTab
 from openedx.core.djangoapps.course_apps.plugins import CourseApp
-from openedx.core.djangoapps.course_apps.toggles import proctoring_settings_modal_view_enabled
 from openedx.core.lib.courses import get_course_by_id
+from xmodule.modulestore.django import modulestore
+from xmodule.tabs import CourseTabList
 
 User = get_user_model()
 
-TEXTBOOK_ENABLED = settings.FEATURES.get("ENABLE_TEXTBOOK", False)
+TEXTBOOK_ENABLED = settings.ENABLE_TEXTBOOK
 
 
 class ProgressCourseApp(CourseApp):
@@ -42,14 +40,14 @@ class ProgressCourseApp(CourseApp):
     @classmethod
     def is_enabled(cls, course_key: CourseKey) -> bool:
         """
-        The progress course status is stored in the course module.
+        The progress course status is stored in the course block.
         """
         return not CourseOverview.get_from_id(course_key).hide_progress_tab
 
     @classmethod
     def set_enabled(cls, course_key: CourseKey, enabled: bool, user: 'User') -> bool:
         """
-        The progress course enabled/disabled status is stored in the course module.
+        The progress course enabled/disabled status is stored in the course block.
         """
         course = get_course_by_id(course_key)
         course.hide_progress_tab = not enabled
@@ -57,7 +55,59 @@ class ProgressCourseApp(CourseApp):
         return enabled
 
     @classmethod
-    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # noqa: UP006, UP045  # pylint: disable=line-too-long
+        """
+        Returns the allowed operations for the app.
+        """
+        return {
+            "enable": True,
+            "configure": True,
+        }
+
+
+class DatesCourseApp(CourseApp):
+    """Course app stub for course dates."""
+
+    app_id = "dates"
+    name = _("Dates")
+    description = _("Provide learners a summary of important course dates.")
+    documentation_links = {
+        "learn_more_configuration": getattr(settings, "DATES_HELP_URL", ""),
+    }
+
+    @classmethod
+    def is_available(cls, course_key: CourseKey) -> bool:  # pylint: disable=unused-argument
+        """
+        Dates app is available when explicitly enabled via settings.
+        """
+        return settings.ENABLE_DATES_COURSE_APP
+
+    @classmethod
+    def is_enabled(cls, course_key: CourseKey) -> bool:
+        """
+        The dates course status is stored in the course block.
+        """
+        course = get_course_by_id(course_key)
+        dates_tab = CourseTabList.get_tab_by_id(course.tabs, 'dates')
+        return bool(dates_tab and not dates_tab.is_hidden)
+
+    @classmethod
+    def set_enabled(cls, course_key: CourseKey, enabled: bool, user: 'User') -> bool:
+        """
+        The dates course enabled/disabled status is stored in the course block.
+        """
+        course = get_course_by_id(course_key)
+        dates_tab = CourseTabList.get_tab_by_id(course.tabs, 'dates')
+        if enabled and dates_tab is None:
+            dates_tab = CourseTab.load("dates")
+            course.tabs.append(dates_tab)
+        if dates_tab is not None:
+            dates_tab.is_hidden = not enabled
+        modulestore().update_item(course, user.id)
+        return enabled
+
+    @classmethod
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # pylint: disable=unused-argument,line-too-long  # noqa: UP006, UP045
         """
         Returns the allowed operations for the app.
         """
@@ -103,7 +153,7 @@ class TextbooksCourseApp(CourseApp):
         raise ValueError("The textbook app can not be enabled/disabled for a single course.")
 
     @classmethod
-    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # noqa: UP006, UP045  # pylint: disable=line-too-long
         """
         Returns the allowed operations for the app.
         """
@@ -155,7 +205,7 @@ class CalculatorCourseApp(CourseApp):
         return enabled
 
     @classmethod
-    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # noqa: UP006, UP045  # pylint: disable=line-too-long
         """
         Get allowed operations for calculator app.
         """
@@ -183,9 +233,9 @@ class ProctoringCourseApp(CourseApp):
     @classmethod
     def is_available(cls, course_key: CourseKey) -> bool:
         """
-        Proctoring is available for all courses.
+        Returns true if the proctoring app is available for all courses.
         """
-        return settings.FEATURES.get("ENABLE_SPECIAL_EXAMS", False)
+        return settings.ENABLE_PROCTORED_EXAMS
 
     @classmethod
     def is_enabled(cls, course_key: CourseKey) -> bool:
@@ -202,7 +252,7 @@ class ProctoringCourseApp(CourseApp):
         raise ValueError("Proctoring cannot be enabled/disabled via this API.")
 
     @classmethod
-    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # noqa: UP006, UP045  # pylint: disable=line-too-long
         """
         Get allowed operations for proctoring app.
         """
@@ -210,11 +260,6 @@ class ProctoringCourseApp(CourseApp):
             "enable": False,
             "configure": True,
         }
-
-    @staticmethod
-    def legacy_link(course_key: CourseKey):
-        if not proctoring_settings_modal_view_enabled(course_key):
-            return get_proctored_exam_settings_url(course_key)
 
 
 class CustomPagesCourseApp(CourseApp):
@@ -254,7 +299,7 @@ class CustomPagesCourseApp(CourseApp):
         raise ValueError("The custom pages app can not be enabled/disabled for a single course.")
 
     @classmethod
-    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # noqa: UP006, UP045  # pylint: disable=line-too-long
         """
         Returns the allowed operations for the app.
         """
@@ -267,3 +312,49 @@ class CustomPagesCourseApp(CourseApp):
     @staticmethod
     def legacy_link(course_key: CourseKey):
         return urls.reverse('tabs_handler', kwargs={'course_key_string': course_key})
+
+
+class ORASettingsApp(CourseApp):
+    """
+    Course App config for Flexible Peer Grading ORA app.
+    """
+
+    app_id = "ora_settings"
+    name = _("Flexible Peer Grading for ORAs")
+    description = _("Course level settings for Flexible Peer Grading Open Response Assessments.")
+    documentation_links = {
+        "learn_more_configuration": settings.ORA_SETTINGS_HELP_URL,
+    }
+
+    @classmethod
+    def is_available(cls, course_key: CourseKey) -> bool:
+        """
+        Open response is available for course with at least one ORA.
+        """
+        oras = modulestore().get_items(course_key, qualifiers={'category': 'openassessment'})
+        return len(oras) > 0
+
+    @classmethod
+    def is_enabled(cls, course_key: CourseKey) -> bool:
+        """
+        Get open response enabled status from course overview model.
+        """
+        course = get_course_by_id(course_key)
+        return course.force_on_flexible_peer_openassessments
+
+    @classmethod
+    def set_enabled(cls, course_key: CourseKey, enabled: bool, user: 'User') -> bool:
+        """
+        Update open response enabled status in modulestore. Always enable to avoid confusion that user can disable ora.
+        """
+        raise ValueError("Flexible Peer Grading cannot be enabled/disabled via this API.")
+
+    @classmethod
+    def get_allowed_operations(cls, course_key: CourseKey, user: Optional[User] = None) -> Dict[str, bool]:  # noqa: UP006, UP045  # pylint: disable=line-too-long
+        """
+        Get allowed operations for open response app.
+        """
+        return {
+            "enable": False,
+            "configure": True,
+        }

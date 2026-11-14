@@ -7,10 +7,10 @@ disabled accounts from accessing the site.
 from django.conf import settings
 from django.http import HttpResponseForbidden
 from django.utils.deprecation import MiddlewareMixin
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
-from openedx.core.djangolib.markup import HTML, Text
 from common.djangoapps.student.models import UserStanding
+from openedx.core.djangolib.markup import HTML, Text
 
 
 class UserStandingMiddleware(MiddlewareMixin):
@@ -18,7 +18,7 @@ class UserStandingMiddleware(MiddlewareMixin):
     Checks a user's standing on request. Returns a 403 if the user's
     status is 'disabled'.
     """
-    def process_request(self, request):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def process_request(self, request):  # pylint: disable=missing-function-docstring
         user = request.user
         try:
             user_account = UserStanding.objects.get(user=user.id)

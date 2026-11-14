@@ -11,11 +11,13 @@ from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.third_party_auth.admin import OAuth2ProviderConfigAdmin
 from common.djangoapps.third_party_auth.models import OAuth2ProviderConfig
 from common.djangoapps.third_party_auth.tests import testutil
-from common.djangoapps.third_party_auth.tests.utils import skip_unless_thirdpartyauth
+from openedx.core.djangolib.testing.utils import skip_unless_lms
+
+TEST_PASSWORD = 'Password1234'
 
 
 # This is necessary because cms does not implement third party auth
-@skip_unless_thirdpartyauth()
+@skip_unless_lms
 class Oauth2ProviderConfigAdminTest(testutil.TestCase):
     """
     Tests for oauth2 provider config admin
@@ -36,9 +38,9 @@ class Oauth2ProviderConfigAdminTest(testutil.TestCase):
         prepopulated correctly, and that we can clear and update the image.
         """
         # Login as a super user
-        user = UserFactory.create(is_staff=True, is_superuser=True)
+        user = UserFactory.create(is_staff=True, is_superuser=True, password=TEST_PASSWORD)
         user.save()
-        self.client.login(username=user.username, password='test')
+        self.client.login(username=user.username, password=TEST_PASSWORD)
 
         # Get baseline provider count
         providers = OAuth2ProviderConfig.objects.all()
@@ -64,10 +66,11 @@ class Oauth2ProviderConfigAdminTest(testutil.TestCase):
         # Remove the icon_image from the POST data, to simulate unchanged icon_image
         post_data = models.model_to_dict(provider1)
         del post_data['icon_image']
-        # Remove max_session_length and organization. A default null value must be POSTed
+        # Remove max_session_length, was_valid_at and organization. A default null value must be POSTed
         # back as an absent value, rather than as a "null-like" included value.
         del post_data['max_session_length']
         del post_data['organization']
+        del post_data['was_valid_at']
 
         # Change the name, to verify POST
         post_data['name'] = 'Another name'

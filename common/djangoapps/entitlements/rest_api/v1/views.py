@@ -4,6 +4,7 @@ Views for the Entitlements v1 API.
 
 import logging
 
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import HttpResponseBadRequest
@@ -13,14 +14,13 @@ from edx_rest_framework_extensions.paginators import DefaultPagination
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
 from rest_framework import permissions, status, viewsets
-from rest_framework.authentication import SessionAuthentication
 from rest_framework.response import Response
 
 from common.djangoapps.course_modes.models import CourseMode
-from common.djangoapps.entitlements.models import (  # lint-amnesty, pylint: disable=line-too-long
+from common.djangoapps.entitlements.models import (  # pylint: disable=line-too-long
     CourseEntitlement,
     CourseEntitlementPolicy,
-    CourseEntitlementSupportDetail
+    CourseEntitlementSupportDetail,
 )
 from common.djangoapps.entitlements.rest_api.v1.filters import CourseEntitlementFilter
 from common.djangoapps.entitlements.rest_api.v1.permissions import IsAdminOrSupportOrAuthenticatedReadOnly
@@ -31,7 +31,9 @@ from openedx.core.djangoapps.catalog.utils import get_course_runs_for_course, ge
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.cors_csrf.authentication import SessionAuthenticationCrossDomainCsrf
 from openedx.core.djangoapps.user_api.preferences.api import update_email_opt_in
+from openedx.core.lib.log_utils import get_username_or_pii_safe_user_id_for_log
 
+User = get_user_model()
 log = logging.getLogger(__name__)
 
 
@@ -77,7 +79,7 @@ def _process_revoke_and_unenroll_entitlement(course_entitlement, is_refund=False
         _unenroll_entitlement(course_entitlement, course_id)
         log.info(
             'Unenrolled user [%s] from course run [%s] as part of revocation of course entitlement [%s]',
-            course_entitlement.user.username,
+            get_username_or_pii_safe_user_id_for_log(course_entitlement.user),
             course_id,
             course_entitlement.uuid
         )
@@ -204,7 +206,7 @@ class EntitlementViewSet(viewsets.ModelViewSet):
                     enrollment,
                     enrollment.mode,
                     serializer.data.get('mode'),
-                    user.username,
+                    get_username_or_pii_safe_user_id_for_log(user),
                     serializer.data.get('course_uuid')
                 )
                 enrollment.update_enrollment(mode=entitlement.mode)
@@ -212,7 +214,7 @@ class EntitlementViewSet(viewsets.ModelViewSet):
             else:
                 log.info(
                     'No enrollment upgraded while adding entitlement for user [%s] for course [%s] ',
-                    user.username,
+                    get_username_or_pii_safe_user_id_for_log(user),
                     serializer.data.get('course_uuid')
                 )
 
@@ -224,7 +226,7 @@ class EntitlementViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED, headers=headers
         )
 
-    def retrieve(self, request, *args, **kwargs):  # lint-amnesty, pylint: disable=unused-argument
+    def retrieve(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         """
         Override the retrieve method to expire a record that is past the
         policy and is requested via the API before returning that record.
@@ -234,7 +236,7 @@ class EntitlementViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(entitlement)
         return Response(serializer.data)
 
-    def list(self, request, *args, **kwargs):  # lint-amnesty, pylint: disable=unused-argument
+    def list(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         """
         Override the list method to expire records that are past the
         policy and requested via the API before returning those records.
@@ -277,7 +279,7 @@ class EntitlementViewSet(viewsets.ModelViewSet):
             entitlement = CourseEntitlement.objects.get(uuid=entitlement_uuid)
         except CourseEntitlement.DoesNotExist:
             return HttpResponseBadRequest(
-                'Could not find entitlement {entitlement_uuid} to update'.format(
+                'Could not find entitlement {entitlement_uuid} to update'.format(  # noqa: UP032
                     entitlement_uuid=entitlement_uuid
                 )
             )
@@ -299,12 +301,12 @@ class EntitlementViewSet(viewsets.ModelViewSet):
                     support_detail['unenrolled_run'] = CourseOverview.objects.get(id=unenrolled_run_course_key)
                 except (InvalidKeyError, CourseOverview.DoesNotExist) as error:
                     return HttpResponseBadRequest(
-                        'Error raised while trying to unenroll user {user} from course run {course_id}: {error}'
+                        'Error raised while trying to unenroll user {user} from course run {course_id}: {error}'  # noqa: UP032  # pylint: disable=line-too-long
                         .format(user=entitlement.user.username, course_id=unenrolled_run_id, error=error)
                     )
             CourseEntitlementSupportDetail.objects.create(**support_detail)
 
-        return super().partial_update(request, *args, **kwargs)  # lint-amnesty, pylint: disable=no-member, super-with-arguments
+        return super().partial_update(request, *args, **kwargs)  # pylint: disable=no-member, super-with-arguments
 
 
 class EntitlementEnrollmentViewSet(viewsets.GenericViewSet):
@@ -315,7 +317,6 @@ class EntitlementEnrollmentViewSet(viewsets.GenericViewSet):
         - Unenroll
         - Switch Enrollment
     """
-    authentication_classes = (JwtAuthentication, SessionAuthentication,)
     # TODO: ARCH-91
     # This view is excluded from Swagger doc generation because it
     # does not specify a serializer class.
@@ -360,7 +361,7 @@ class EntitlementEnrollmentViewSet(viewsets.GenericViewSet):
             # Else the User is already enrolled in another paid Mode and we should
             # not do anything else related to Entitlements.
         except CourseEnrollmentException:
-            message = (
+            message = (  # noqa: UP032
                 'Course Entitlement Enroll for {username} failed for course: {course_id}, '
                 'mode: {mode}, and entitlement: {entitlement}'
             ).format(
@@ -430,7 +431,7 @@ class EntitlementEnrollmentViewSet(viewsets.GenericViewSet):
             return Response(
                 status=status.HTTP_400_BAD_REQUEST,
                 data={
-                    'message': 'The User is unable to enroll in Course Run {course_id}, it is not available.'.format(
+                    'message': 'The User is unable to enroll in Course Run {course_id}, it is not available.'.format(  # noqa: UP032  # pylint: disable=line-too-long
                         course_id=course_run_id
                     )
                 }

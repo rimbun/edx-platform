@@ -11,8 +11,10 @@ from django.urls import reverse
 
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.survey.models import SurveyAnswer, SurveyForm
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 class SurveyViewsTests(ModuleStoreTestCase):
@@ -29,7 +31,7 @@ class SurveyViewsTests(ModuleStoreTestCase):
         self.client = Client()
 
         # Create two accounts
-        self.password = 'abc'
+        self.password = self.TEST_PASSWORD
         self.student = UserFactory.create(username='student', email='student@test.com', password=self.password)
 
         self.test_survey_name = 'TestSurvey'

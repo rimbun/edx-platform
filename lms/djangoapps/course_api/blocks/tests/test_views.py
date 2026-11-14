@@ -1,23 +1,29 @@
 """
 Tests for Blocks Views
 """
-
-
 from datetime import datetime
 from unittest import mock
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from urllib.parse import urlencode, urlunparse
 
+import ddt
 from completion.test_utils import CompletionWaffleTestMixin, submit_completions_for_testing
 from django.conf import settings
 from django.urls import reverse
-from opaque_keys.edx.locator import CourseLocator
+from opaque_keys.edx.locator import BlockUsageLocator, CourseLocator
+from rest_framework.utils.serializer_helpers import ReturnList
 
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.roles import CourseDataResearcherRole
 from common.djangoapps.student.tests.factories import AdminFactory, CourseEnrollmentFactory, UserFactory
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import ToyCourseFactory
+from openedx.core.djangoapps.discussions.models import DiscussionsConfiguration, Provider
+from xmodule.modulestore.tests.django_utils import (  # pylint: disable=wrong-import-order
+    SharedModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    ToyCourseFactory,
+)
 
 from .helpers import deserialize_usage_key
 
@@ -56,7 +62,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         self.admin_user = AdminFactory.create()
         self.data_researcher = UserFactory.create()
         CourseDataResearcherRole(self.course_key).add_users(self.data_researcher)
-        self.client.login(username=self.user.username, password='test')
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
         CourseEnrollmentFactory.create(user=self.user, course_id=self.course_key)
 
         # default values for url and query_params
@@ -86,7 +92,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         response = self.client.get(url or self.url, self.query_params)
         assert response.status_code == expected_status_code, str(response.content)
         if cacheable:
-            assert response.get('Cache-Control', None) == 'max-age={}'.format(
+            assert response.get('Cache-Control', None) == 'max-age={}'.format(  # noqa: UP032
                 settings.CACHE_MIDDLEWARE_SECONDS
             )
         else:
@@ -97,7 +103,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         """
         Verify that the response contains only the expected block ids.
         """
-        self.assertSetEqual(
+        self.assertSetEqual(  # noqa: PT009
             {block['id'] for block in response.data},
             self.non_orphaned_block_usage_keys,
         )
@@ -106,7 +112,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         """
         Verify that the response contains the expected blocks
         """
-        self.assertSetEqual(
+        self.assertSetEqual(  # noqa: PT009
             set(response.data['blocks'].keys()),
             self.non_orphaned_block_usage_keys,
         )
@@ -128,7 +134,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
             assert 'not_a_field' not in block_data
 
             if xblock.has_children:
-                self.assertSetEqual(
+                self.assertSetEqual(  # noqa: PT009
                     {str(child.location) for child in xblock.get_children()},
                     set(block_data['children']),
                 )
@@ -203,8 +209,9 @@ class TestBlocksView(SharedModuleStoreTestCase):
         self.query_params['all_blocks'] = True
         self.verify_response(403)
 
+    @mock.patch('lms.djangoapps.courseware.courses.get_course_assignments', return_value=[])
     @mock.patch("lms.djangoapps.course_api.blocks.forms.permissions.is_course_public", Mock(return_value=True))
-    def test_not_authenticated_public_course_with_blank_username(self):
+    def test_not_authenticated_public_course_with_blank_username(self, get_course_assignment_mock: MagicMock) -> None:
         """
         Verify behaviour when accessing course blocks of a public course for anonymous user anonymously.
         """
@@ -244,7 +251,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         self.client.logout()
         self.verify_response(403, cacheable=False)
         # Verify response for a staff user.
-        self.client.login(username=self.admin_user.username, password='test')
+        self.client.login(username=self.admin_user.username, password=self.TEST_PASSWORD)
         self.verify_response(cacheable=False)
 
     def test_non_existent_course(self):
@@ -265,7 +272,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         self.verify_response(400)
 
     def test_no_user_staff_all_blocks(self):
-        self.client.login(username=self.admin_user.username, password='test')
+        self.client.login(username=self.admin_user.username, password=self.TEST_PASSWORD)
         self.query_params.pop('username')
         self.query_params['all_blocks'] = True
         self.verify_response()
@@ -315,7 +322,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
             - other_course_settings
             - course_visibility
         """
-        self.client.login(username=self.admin_user.username, password='test')
+        self.client.login(username=self.admin_user.username, password=self.TEST_PASSWORD)
         response = self.verify_response(params={
             'all_blocks': True,
             'requested_fields': ['other_course_settings', 'course_visibility'],
@@ -347,7 +354,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
             - other_course_settings
             - course_visibility
         """
-        self.client.login(username=self.admin_user.username, password='test')
+        self.client.login(username=self.admin_user.username, password=self.TEST_PASSWORD)
         response = self.verify_response(params={
             'all_blocks': True,
             'requested_fields': ['course_visibility'],
@@ -362,11 +369,12 @@ class TestBlocksView(SharedModuleStoreTestCase):
                 block_data['type'] == 'course'
             )
 
-    def test_data_researcher_access(self):
+    @mock.patch('lms.djangoapps.courseware.courses.get_course_assignments', return_value=[])
+    def test_data_researcher_access(self, get_course_assignment_mock: MagicMock) -> None:
         """
         Test if data researcher has access to the api endpoint
         """
-        self.client.login(username=self.data_researcher.username, password='test')
+        self.client.login(username=self.data_researcher.username, password=self.TEST_PASSWORD)
 
         self.verify_response(params={
             'all_blocks': True,
@@ -398,6 +406,7 @@ class TestBlocksView(SharedModuleStoreTestCase):
         self.verify_response_with_requested_fields(response)
 
 
+@ddt.ddt
 class TestBlocksInCourseView(TestBlocksView, CompletionWaffleTestMixin):  # pylint: disable=test-inherits-tests
     """
     Test class for BlocksInCourseView
@@ -491,3 +500,136 @@ class TestBlocksInCourseView(TestBlocksView, CompletionWaffleTestMixin):  # pyli
         })
         for block_id in self.non_orphaned_block_usage_keys:
             assert response.data['blocks'][block_id].get('completion')
+
+    @ddt.data(
+        (False, 'list'),
+        (True, 'list'),
+        (False, 'dict'),
+        (True, 'dict'),
+    )
+    @ddt.unpack
+    def test_filter_discussion_xblocks(self, is_openedx_provider, return_type):
+        """
+        Tests if discussion xblocks are hidden for openedx provider
+        """
+
+        def blocks_has_discussion_xblock(blocks):
+            if isinstance(blocks, ReturnList):
+                for value in blocks:
+                    if value.get('type') == 'discussion':
+                        return True
+            else:
+                for key, value in blocks.items():  # noqa: B007
+                    if value.get('type') == 'discussion':
+                        return True
+            return False
+
+        BlockFactory.create(
+            parent_location=self.course.location,
+            category="discussion",
+            discussion_id='topic_id',
+            discussion_category='category',
+            discussion_target='subcategory',
+        )
+        if is_openedx_provider:
+            DiscussionsConfiguration.objects.create(context_key=self.course_key, provider_type=Provider.OPEN_EDX)
+        params = self.query_params.copy()
+        if return_type == 'list':
+            params['return_type'] = 'list'
+        response = self.client.get(self.url, params)
+
+        has_discussion_xblock = blocks_has_discussion_xblock(
+            response.data if isinstance(response.data, ReturnList) else response.data.get('blocks', {})
+        )
+        if is_openedx_provider:
+            assert not has_discussion_xblock
+        else:
+            assert has_discussion_xblock
+
+
+class TestBlockMetadataView(SharedModuleStoreTestCase):  # pylint: disable=test-inherits-tests
+    """
+    Test class for BlockMetadataView.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        # create a toy course
+        cls.course = ToyCourseFactory.create(
+            modulestore=cls.store,
+            due=datetime(3013, 9, 18, 11, 30, 00),
+        )
+        cls.course_key = cls.course.id
+        cls.course_usage_key = cls.store.make_course_usage_key(cls.course_key)
+
+        cls.non_orphaned_block_usage_keys = {
+            str(item.location)
+            for item in cls.store.get_items(cls.course_key)
+            # remove all orphaned items in the course, except for the root 'course' block
+            if cls.store.get_parent_location(item.location) or item.category == 'course'
+        }
+
+    def setUp(self):
+        super().setUp()
+        self.admin_user = AdminFactory.create()
+        self.client.login(username=self.admin_user.username, password=self.TEST_PASSWORD)
+        self.usage_key = list(self.non_orphaned_block_usage_keys)[0]
+        self.url = reverse(
+            'blocks_metadata',
+            kwargs={'usage_key_string': str(self.usage_key)}
+        )
+        self.query_params = {'include': "index_dictionary"}
+
+    def verify_response(self, expected_status_code=200, params=None, url=None):
+        """
+        Ensure that sending a GET request to the specified URL returns the
+        expected status code.
+
+        Arguments:
+            expected_status_code: The status_code that is expected in the
+                response.
+            params: Parameters to add to self.query_params to include in the
+                request.
+            url: The URL to send the GET request.  Default is self.url.
+
+        Returns:
+            response: The HttpResponse returned by the request
+        """
+        if params:
+            self.query_params.update(params)
+        response = self.client.get(url or self.url, self.query_params)
+        assert response.status_code == expected_status_code, str(response.content)
+        return response
+
+    def test_invalid_usage_key(self):
+        url = reverse(
+            'blocks_metadata',
+            kwargs={'usage_key_string': 'invalid-usage-key'}
+        )
+        self.verify_response(400, url=url)
+
+    def test_non_existent_block(self):
+        url = reverse(
+            'blocks_metadata',
+            kwargs={'usage_key_string': str(BlockUsageLocator(self.course_key, 'non-existent', 'block'))}
+        )
+        self.verify_response(404, url=url)
+
+    def test_non_existent_block_anonymous(self):
+        self.client.logout()
+        url = reverse(
+            'blocks_metadata',
+            kwargs={'usage_key_string': str(BlockUsageLocator(self.course_key, 'non-existent', 'block'))}
+        )
+        self.verify_response(403, url=url)
+
+    def test_block_metadata_response(self):
+        response = self.verify_response()
+        block_data = response.data
+        assert block_data['id'] == str(self.usage_key)
+        block_key = deserialize_usage_key(block_data['id'], self.course_key)
+        assert block_data['type'] == block_key.block_type
+        assert 'index_dictionary' in block_data
+        assert 'content' in block_data['index_dictionary']

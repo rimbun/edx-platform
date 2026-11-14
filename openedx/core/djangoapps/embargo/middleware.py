@@ -16,7 +16,7 @@ Embargo can restrict by states and whitelist/blacklist (IP Addresses
 
 Usage:
 
-1) Enable embargo by setting `settings.FEATURES['EMBARGO']` to True.
+1) Enable embargo by setting `settings.EMBARGO` to True.
 
 2) In Django admin, create a new `IPFilter` model to block or whitelist
     an IP address from accessing the site.
@@ -28,13 +28,16 @@ Usage:
 
 import logging
 import re
+from typing import Optional
 
 from django.conf import settings
 from django.core.exceptions import MiddlewareNotUsed
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.deprecation import MiddlewareMixin
-from django.shortcuts import redirect
-from ipware.ip import get_client_ip
+from edx_django_utils import ip
+from rest_framework.request import Request
+from rest_framework.response import Response
 
 from openedx.core.lib.request_utils import course_id_from_url
 
@@ -60,11 +63,11 @@ class EmbargoMiddleware(MiddlewareMixin):
 
     def __init__(self, *args, **kwargs):
         # If embargoing is turned off, make this middleware do nothing
-        if not settings.FEATURES.get('EMBARGO'):
+        if not settings.EMBARGO:
             raise MiddlewareNotUsed()
         super().__init__(*args, **kwargs)
 
-    def process_request(self, request):
+    def process_request(self, request: Request) -> Optional[Response]:  # noqa: UP045
         """Block requests based on embargo rules.
 
         This will perform the following checks:
@@ -83,15 +86,20 @@ class EmbargoMiddleware(MiddlewareMixin):
             if pattern.match(request.path) is not None:
                 return None
 
-        ip_address = get_client_ip(request)[0]
+        safest_ip_address = ip.get_safest_client_ip(request)
+        all_ip_addresses = ip.get_all_client_ips(request)
+
         ip_filter = IPFilter.current()
 
-        if ip_filter.enabled and ip_address in ip_filter.blacklist_ips:
+        # When checking if a request is block-listed, we need to check EVERY client IP address in the chain, in case
+        # a blocked ip tried to hop through other proxies.
+        blocked_ips = [x for x in all_ip_addresses if x in ip_filter.blacklist_ips]
+        if ip_filter.enabled and blocked_ips:
             log.info(
                 (
                     "User %s was blocked from accessing %s "
                     "because IP address %s is blacklisted."
-                ), request.user.id, request.path, ip_address
+                ), request.user.id, request.path, blocked_ips[0]
             )
 
             # If the IP is blacklisted, reject.
@@ -105,13 +113,15 @@ class EmbargoMiddleware(MiddlewareMixin):
             )
             return redirect(ip_blacklist_url)
 
-        elif ip_filter.enabled and ip_address in ip_filter.whitelist_ips:
+        # When checking if a request is allow-listed, we should only look at the safest client IP address, as the
+        # others in the chain might be spoofed.
+        elif ip_filter.enabled and safest_ip_address in ip_filter.whitelist_ips:
             log.info(
                 (
                     "User %s was allowed access to %s because "
                     "IP address %s is whitelisted."
                 ),
-                request.user.id, request.path, ip_address
+                request.user.id, request.path, safest_ip_address
             )
 
             # If the IP is whitelisted, then allow access,
@@ -121,32 +131,24 @@ class EmbargoMiddleware(MiddlewareMixin):
         else:
             # Otherwise, perform the country access checks.
             # This applies only to courseware URLs.
-            return self.country_access_rules(request.user, ip_address, request.path)
+            return self.country_access_rules(request)
 
-    def country_access_rules(self, user, ip_address, url_path):
+    def country_access_rules(self, request: Request) -> Optional[Response]:  # noqa: UP045
         """
         Check the country access rules for a given course.
         Applies only to courseware URLs.
 
         Args:
-            user (User): The user making the current request.
-            ip_address (str): The IP address from which the request originated.
-            url_path (str): The request path.
+            request: The request to validate against the embargo rules
 
         Returns:
             HttpResponse or None
 
         """
-        course_id = course_id_from_url(url_path)
+        course_id = course_id_from_url(request.path)
 
         if course_id:
-            redirect_url = embargo_api.redirect_if_blocked(
-                course_id,
-                user=user,
-                ip_address=ip_address,
-                url=url_path,
-                access_point='courseware'
-            )
+            redirect_url = embargo_api.redirect_if_blocked(request, course_id, access_point='courseware')
 
             if redirect_url:
                 return redirect(redirect_url)

@@ -5,39 +5,51 @@ Progress Tab Views
 from django.contrib.auth import get_user_model
 from django.http.response import Http404
 from edx_django_utils import monitoring as monitoring_utils
+from edx_django_utils.plugins import pluggable_override
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from edx_rest_framework_extensions.auth.session.authentication import SessionAuthenticationAllowInactiveUser
 from opaque_keys.edx.keys import CourseKey
 from rest_framework.generics import RetrieveAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from xblock.scorable import ShowCorrectness
 
-from xmodule.modulestore.django import modulestore
 from common.djangoapps.student.models import CourseEnrollment
-from lms.djangoapps.course_home_api.progress.serializers import ProgressTabSerializer
-from lms.djangoapps.course_home_api.toggles import course_home_mfe_progress_tab_is_active
-from lms.djangoapps.courseware.access import has_access, has_ccx_coach_role
+from lms.djangoapps.ccx.custom_exception import CCXLocatorValidationException
 from lms.djangoapps.course_blocks.api import get_course_blocks
 from lms.djangoapps.course_blocks.transformers import start_date
-
-from lms.djangoapps.ccx.custom_exception import CCXLocatorValidationException
-from lms.djangoapps.courseware.courses import (
-    get_course_blocks_completion_summary, get_course_with_access, get_studio_url,
-)
+from lms.djangoapps.course_home_api.progress.api import aggregate_assignment_type_grade_summary
+from lms.djangoapps.course_home_api.progress.serializers import ProgressTabSerializer
+from lms.djangoapps.course_home_api.toggles import course_home_mfe_progress_tab_is_active
+from lms.djangoapps.course_home_api.utils import get_course_or_403
+from lms.djangoapps.courseware.access import has_access, has_ccx_coach_role
+from lms.djangoapps.courseware.courses import get_course_blocks_completion_summary, get_studio_url
 from lms.djangoapps.courseware.masquerade import setup_masquerade
-from lms.djangoapps.courseware.views.views import get_cert_data
-
+from lms.djangoapps.courseware.views.views import credit_course_requirements, get_cert_data
 from lms.djangoapps.grades.api import CourseGradeFactory
 from lms.djangoapps.verify_student.services import IDVerificationService
-from openedx.core.djangoapps.content.block_structure.transformers import BlockStructureTransformers
 from openedx.core.djangoapps.content.block_structure.api import get_block_structure_manager
+from openedx.core.djangoapps.content.block_structure.transformers import BlockStructureTransformers
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.lib.api.authentication import BearerAuthenticationAllowInactiveUser
 from openedx.features.content_type_gating.block_transformers import ContentTypeGateTransformer
 from openedx.features.course_duration_limits.access import get_access_expiration_data
-from openedx.features.enterprise_support.utils import get_enterprise_learner_generic_name
+from xmodule.modulestore.django import modulestore
 
 User = get_user_model()
+
+
+@pluggable_override('OVERRIDE_COURSE_HOME_PROGRESS_USERNAME')
+def obfuscated_username(request, student):
+    """
+    Return an obfuscated username for the student, or None (indicating student's
+    real name should be used).
+
+    This function can be overridden by an installed plugin via the
+    OVERRIDE_COURSE_HOME_PROGRESS_USERNAME setting to return a generic name
+    for learners who should not have their real username exposed.
+    """
+    return None
 
 
 class ProgressTabView(RetrieveAPIView):
@@ -74,6 +86,11 @@ class ProgressTabView(RetrieveAPIView):
             letter_grade: (str) the user's letter grade based on the set grade range.
                                 If user is passing, value may be 'A', 'B', 'C', 'D', 'Pass', otherwise none
             percent: (float) the user's total graded percent in the course
+        credit_course_requirements: Object containing credit course requirements with the following fields:
+            eligibility_status: (str) Indicates if the user is eligible to receive credit. Value may be
+                "eligible", "not_eligible", or "partial_eligible"
+            requirements: List of requirements that must be fulfilled to be eligible to receive credit. See
+                `get_credit_requirement_status` for details on the fields
         end: (date) end date of the course
         enrollment_mode: (str) a str representing the enrollment the user has ('audit', 'verified', ...)
         grading_policy:
@@ -93,10 +110,14 @@ class ProgressTabView(RetrieveAPIView):
                 assignment_type: (str) the format, if any, of the Subsection (Homework, Exam, etc)
                 block_key: (str) the key of the given subsection block
                 display_name: (str) a str of what the name of the Subsection is for displaying on the site
+                due: (str or None) the due date of the subsection in ISO 8601 format, or None if no due date is set
                 has_graded_assignment: (bool) whether or not the Subsection is a graded assignment
                 learner_has_access: (bool) whether the learner has access to the subsection (could be FBE gated)
                 num_points_earned: (int) the amount of points the user has earned for the given subsection
                 num_points_possible: (int) the total amount of points possible for the given subsection
+                override: Optional object if grade has been overridden by proctor or grading change
+                    system: (str) either GRADING or PROCTORING
+                    reason: (str) a comment on the grading override
                 percent_graded: (float) the percentage of total points the user has received a grade for in a given
                                 subsection
                 problem_scores: List of objects that represent individual problem scores with the following fields:
@@ -104,7 +125,7 @@ class ProgressTabView(RetrieveAPIView):
                     possible: (float) number of possible points
                 show_correctness: (str) a str representing whether to show the problem/practice scores based on due date
                                   ('always', 'never', 'past_due', values defined in
-                                   common/lib/xmodule/xmodule/modulestore/inheritance.py)
+                                   xmodule/modulestore/inheritance.py)
                 show_grades: (bool) a bool for whether to show grades based on the access the user has
                 url: (str or None) the absolute path url to the Subsection or None if the Subsection is no longer
                      accessible to the learner due to a hide_after_due course team setting
@@ -120,6 +141,7 @@ class ProgressTabView(RetrieveAPIView):
 
         * 200 on success with above fields.
         * 401 if the user is not authenticated or not enrolled.
+        * 403 if the user does not have access to the course.
         * 404 if the course is not available or cannot be seen.
     """
 
@@ -165,7 +187,19 @@ class ProgressTabView(RetrieveAPIView):
         except User.DoesNotExist as exc:
             raise Http404 from exc
 
-    def get(self, request, *args, **kwargs):
+    def _visible_section_scores(self, course_grade):
+        """Return only those chapter/section scores that are visible to the learner."""
+        visible_chapters = []
+        for chapter in course_grade.chapter_grades.values():
+            filtered_sections = [
+                subsection
+                for subsection in chapter["sections"]
+                if getattr(subsection, "show_correctness", None) != ShowCorrectness.NEVER_BUT_INCLUDE_GRADE
+            ]
+            visible_chapters.append({**chapter, "sections": filtered_sections})
+        return visible_chapters
+
+    def get(self, request, *args, **kwargs):    # pylint: disable=too-many-statements
         course_key_string = kwargs.get('course_key_string')
         course_key = CourseKey.from_string(course_key_string)
         student_id = kwargs.get('student_id')
@@ -177,24 +211,28 @@ class ProgressTabView(RetrieveAPIView):
         monitoring_utils.set_custom_attribute('course_id', course_key_string)
         monitoring_utils.set_custom_attribute('user_id', request.user.id)
         monitoring_utils.set_custom_attribute('is_staff', request.user.is_staff)
-        is_staff = bool(has_access(request.user, 'staff', course_key))
+        requester_has_staff_access = bool(has_access(request.user, 'staff', course_key))
 
-        student = self._get_student_user(request, course_key, student_id, is_staff)
-        username = get_enterprise_learner_generic_name(request) or student.username
+        student = self._get_student_user(request, course_key, student_id, requester_has_staff_access)
+        learner_has_staff_access = bool(has_access(student, 'staff', course_key))
+        username = obfuscated_username(request, student) or student.username
 
-        course = get_course_with_access(student, 'load', course_key, check_if_enrolled=False)
+        course = get_course_or_403(student, 'load', course_key, check_if_enrolled=False)
 
         course_overview = CourseOverview.get_from_id(course_key)
         enrollment = CourseEnrollment.get_enrollment(student, course_key)
         enrollment_mode = getattr(enrollment, 'mode', None)
 
-        if not (enrollment and enrollment.is_active) and not is_staff:
+        if not (enrollment and enrollment.is_active) and not requester_has_staff_access:
             return Response('User not enrolled.', status=401)
 
         # The block structure is used for both the course_grade and has_scheduled content fields
         # So it is called upfront and reused for optimization purposes
         collected_block_structure = get_block_structure_manager(course_key).get_collected()
         course_grade = CourseGradeFactory().read(student, collected_block_structure=collected_block_structure)
+
+        # recalculate course grade from visible grades (stored grade was calculated over all grades, visible or not)
+        course_grade.update(visible_grades_only=True, has_staff_access=learner_has_staff_access)
 
         # Get has_scheduled_content data
         transformers = BlockStructureTransformers()
@@ -215,8 +253,9 @@ class ProgressTabView(RetrieveAPIView):
             user_grade = course_grade.percent
             user_has_passing_grade = user_grade >= course.lowest_passing_grade
 
-        descriptor = modulestore().get_course(course_key)
-        grading_policy = descriptor.grading_policy
+        block = modulestore().get_course(course_key)
+        grading_policy = block.grading_policy
+        disable_progress_graph = block.disable_progress_graph
         verification_status = IDVerificationService.user_status(student)
         verification_link = None
         if verification_status['status'] is None or verification_status['status'] == 'expired':
@@ -231,23 +270,37 @@ class ProgressTabView(RetrieveAPIView):
 
         access_expiration = get_access_expiration_data(request.user, course_overview)
 
+        # Aggregations delegated to helper functions for reuse and testability
+        assignment_type_grade_summary = aggregate_assignment_type_grade_summary(
+            course_grade,
+            grading_policy,
+            has_staff_access=learner_has_staff_access,
+        )
+
+        # Filter out section scores to only have those that are visible to the user
+        section_scores = self._visible_section_scores(course_grade)
+
         data = {
             'access_expiration': access_expiration,
             'certificate_data': get_cert_data(student, course, enrollment_mode, course_grade),
             'completion_summary': get_course_blocks_completion_summary(course_key, student),
             'course_grade': course_grade,
+            'credit_course_requirements': credit_course_requirements(course_key, student),
             'end': course.end,
             'enrollment_mode': enrollment_mode,
             'grading_policy': grading_policy,
             'has_scheduled_content': has_scheduled_content,
-            'section_scores': list(course_grade.chapter_grades.values()),
+            'section_scores': section_scores,
             'studio_url': get_studio_url(course, 'settings/grading'),
             'username': username,
             'user_has_passing_grade': user_has_passing_grade,
             'verification_data': verification_data,
+            'disable_progress_graph': disable_progress_graph,
+            'assignment_type_grade_summary': assignment_type_grade_summary["results"],
+            'final_grades': assignment_type_grade_summary["final_grades"],
         }
         context = self.get_serializer_context()
-        context['staff_access'] = is_staff
+        context['staff_access'] = learner_has_staff_access
         context['course_blocks'] = course_blocks
         context['course_key'] = course_key
         # course_overview and enrollment will be used by VerifiedModeSerializer

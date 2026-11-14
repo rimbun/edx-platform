@@ -3,27 +3,27 @@
 
 import datetime
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import ddt
 import pytest
-import pytz
 from django import test
-from django.contrib.auth import models
+from django.contrib.auth import REDIRECT_FIELD_NAME, models
 from django.core import mail
 from social_django import models as social_models
 
 from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.third_party_auth import pipeline, provider
 from common.djangoapps.third_party_auth.tests import testutil
-from common.djangoapps.third_party_auth.tests.utils import skip_unless_thirdpartyauth
 from lms.djangoapps.verify_student.models import SSOVerification
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 # Get Django User model by reference from python-social-auth. Not a type
 # constant, pylint.
 User = social_models.DjangoStorage.user.user_model()  # pylint: disable=invalid-name
 
 
-@skip_unless_thirdpartyauth()
+@skip_unless_lms
 class TestCase(testutil.TestCase, test.TestCase):
     """Base test case."""
 
@@ -82,7 +82,7 @@ class GetProviderUserStatesTestCase(TestCase):
 
     def test_returns_empty_list_if_no_enabled_providers(self):
         assert not provider.Registry.enabled()
-        assert [] == pipeline.get_provider_user_states(self.user)
+        assert not pipeline.get_provider_user_states(self.user)
 
     def test_state_not_returned_for_disabled_provider(self):
         disabled_provider = self.configure_google_provider(enabled=False)
@@ -130,7 +130,7 @@ class GetProviderUserStatesTestCase(TestCase):
 
         states = pipeline.get_provider_user_states(self.user)
 
-        assert [] == list(social_models.DjangoStorage.user.objects.all())
+        assert not list(social_models.DjangoStorage.user.objects.all())
         assert 2 == len(states)
 
         google_state = [state for state in states if state.provider.provider_id == google_provider.provider_id][0]
@@ -156,7 +156,7 @@ class UrlFormationTestCase(TestCase):
 
         assert provider.Registry.get(provider_name) is None
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             pipeline.get_complete_url(provider_name)
 
     def test_complete_url_returns_expected_format(self):
@@ -170,21 +170,21 @@ class UrlFormationTestCase(TestCase):
 
         assert provider.Registry.get(provider_name) is None
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             pipeline.get_disconnect_url(provider_name, 1000)
 
     def test_disconnect_url_returns_expected_format(self):
         disconnect_url = pipeline.get_disconnect_url(self.enabled_provider.provider_id, 1000)
         disconnect_url = disconnect_url.rstrip('?')
-        assert disconnect_url == '/auth/disconnect/{backend}/{association_id}/'\
-            .format(backend=self.enabled_provider.backend_name, association_id=1000)
+        assert disconnect_url == '/auth/disconnect_json/{backend}/{association_id}/'\
+            .format(backend=self.enabled_provider.backend_name, association_id=1000)  # noqa: UP032
 
     def test_login_url_raises_value_error_if_provider_not_enabled(self):
         provider_id = 'oa2-not-enabled'
 
         assert provider.Registry.get(provider_id) is None
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             pipeline.get_login_url(provider_id, pipeline.AUTH_ENTRY_LOGIN)
 
     def test_login_url_returns_expected_format(self):
@@ -197,16 +197,16 @@ class UrlFormationTestCase(TestCase):
     def test_for_value_error_if_provider_id_invalid(self):
         provider_id = 'invalid'  # Format is normally "{prefix}-{identifier}"
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             provider.Registry.get(provider_id)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             pipeline.get_login_url(provider_id, pipeline.AUTH_ENTRY_LOGIN)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             pipeline.get_disconnect_url(provider_id, 1000)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             pipeline.get_complete_url(provider_id)
 
 
@@ -321,12 +321,12 @@ class EnsureUserInformationTestCase(TestCase):
         based on the provider's setting for send_to_registration_first.
         """
 
-        provider = mock.MagicMock(  # lint-amnesty, pylint: disable=redefined-outer-name
+        provider = mock.MagicMock(  # pylint: disable=redefined-outer-name
             send_to_registration_first=send_to_registration_first,
             skip_email_verification=False
         )
 
-        with mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline') as get_from_pipeline:  # lint-amnesty, pylint: disable=line-too-long
+        with mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline') as get_from_pipeline:  # pylint: disable=line-too-long
             get_from_pipeline.return_value = provider
             with mock.patch('social_core.pipeline.partial.partial_prepare') as partial_prepare:
                 partial_prepare.return_value = mock.MagicMock(token='')
@@ -359,7 +359,7 @@ class EnsureUserInformationTestCase(TestCase):
             send_to_registration_first=True,
             skip_email_verification=False
         )
-        with mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline') as get_from_pipeline:  # lint-amnesty, pylint: disable=line-too-long
+        with mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline') as get_from_pipeline:  # pylint: disable=line-too-long
             get_from_pipeline.return_value = saml_provider
             with mock.patch(
                 'common.djangoapps.third_party_auth.pipeline.provider.Registry.get_enabled_by_backend_name'
@@ -400,7 +400,7 @@ class UserDetailsForceSyncTestCase(TestCase):
         self.strategy = mock.MagicMock()
         self.strategy.storage.user.changed.side_effect = lambda user: user.save()
 
-        get_from_pipeline = mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline')  # lint-amnesty, pylint: disable=line-too-long
+        get_from_pipeline = mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline')  # pylint: disable=line-too-long
         self.get_from_pipeline = get_from_pipeline.start()
         self.get_from_pipeline.return_value = mock.MagicMock(sync_learner_profile_data=True)
         self.addCleanup(get_from_pipeline.stop)
@@ -497,7 +497,7 @@ class SetIDVerificationStatusTestCase(TestCase):
         self.strategy = mock.MagicMock()
         self.strategy.storage.user.changed.side_effect = lambda user: user.save()
 
-        get_from_pipeline = mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline')  # lint-amnesty, pylint: disable=line-too-long
+        get_from_pipeline = mock.patch('common.djangoapps.third_party_auth.pipeline.provider.Registry.get_from_pipeline')  # pylint: disable=line-too-long
         self.get_from_pipeline = get_from_pipeline.start()
         self.get_from_pipeline.return_value = mock.MagicMock(
             enable_sso_id_verification=True,
@@ -561,8 +561,8 @@ class SetIDVerificationStatusTestCase(TestCase):
             identity_provider_slug=self.provider_slug,
         )
 
-        with mock.patch('common.djangoapps.third_party_auth.pipeline.earliest_allowed_verification_date') as earliest_date:  # lint-amnesty, pylint: disable=line-too-long
-            earliest_date.return_value = datetime.datetime.now(pytz.UTC) + datetime.timedelta(days=1)
+        with mock.patch('common.djangoapps.third_party_auth.pipeline.earliest_allowed_verification_date') as earliest_date:  # pylint: disable=line-too-long
+            earliest_date.return_value = datetime.datetime.now(ZoneInfo("UTC")) + datetime.timedelta(days=1)
             # Begin the pipeline.
             pipeline.set_id_verification_status(
                 auth_entry=pipeline.AUTH_ENTRY_LOGIN,
@@ -583,7 +583,7 @@ class SetIDVerificationStatusTestCase(TestCase):
         """
         Verification signal is sent upon approval.
         """
-        with mock.patch('openedx.core.djangoapps.signals.signals.LEARNER_NOW_VERIFIED.send_robust') as mock_signal:
+        with mock.patch('openedx.core.djangoapps.signals.signals.LEARNER_SSO_VERIFIED.send_robust') as mock_signal:
             # Begin the pipeline.
             pipeline.set_id_verification_status(
                 auth_entry=pipeline.AUTH_ENTRY_LOGIN,
@@ -594,3 +594,113 @@ class SetIDVerificationStatusTestCase(TestCase):
 
         # Ensure a verification signal was sent
         assert mock_signal.call_count == 1
+
+
+class ParseQueryParamsPipelineTestCase(TestCase):
+    """Tests to ensure reading queryparams from the auth/login URL works as expected."""
+
+    def setUp(self):
+        super().setUp()
+        self.strategy = mock.MagicMock()
+        self.response = mock.MagicMock()
+
+    def test_login_url_with_auth_entry(self):
+        """
+        Parsing query params with auth entry results in dictionary with the auth entry.
+        """
+        expected_query_params = {
+            "auth_entry": "login",
+        }
+        self.strategy.request.session = expected_query_params
+
+        query_params = pipeline.parse_query_params(self.strategy, self.response)
+
+        self.assertDictEqual(expected_query_params, query_params)  # noqa: PT009
+
+    def test_login_url_with_auth_entry_none(self):
+        """
+        Parsing query params with auth entry equals to None results in dictionary with default auth entry.
+        """
+        expected_query_params = {
+            "auth_entry": "login",
+        }
+        self.strategy.request.session = {
+            "auth_entry": None,
+        }
+
+        query_params = pipeline.parse_query_params(self.strategy, self.response)
+
+        self.assertDictEqual(expected_query_params, query_params)  # noqa: PT009
+
+    def test_login_url_without_auth_entry(self):
+        """
+        Parsing query params without auth entry results in dictionary with default auth entry.
+        """
+        expected_query_params = {
+            "auth_entry": "login",
+        }
+        self.strategy.request.session = {}
+
+        query_params = pipeline.parse_query_params(self.strategy, self.response)
+
+        self.assertDictEqual(expected_query_params, query_params)  # noqa: PT009
+
+    def test_login_url_invalid_auth_entry(self):
+        """
+        Parsing query params with invalid auth entry results in AuthEntryError.
+        """
+        self.strategy.request.session = {
+            "auth_entry": "not-valid",
+        }
+
+        with self.assertRaises(pipeline.AuthEntryError):  # noqa: PT027
+            pipeline.parse_query_params(self.strategy, self.response)
+
+
+class EnsureRedirectUrlIsSafeTestCase(TestCase):
+    """Tests to ensure that the redirect url is safe and user can redirect to it."""
+
+    def setUp(self):
+        super().setUp()
+
+        self.strategy = mock.MagicMock()
+        self.request = self.strategy.request
+
+        self.request.get_host.return_value = 'localhost:18000'
+        self.request.is_secure.return_value = True
+
+        self.strategy.session_get = self._session_get
+        self.strategy.session_set = self._session_set
+
+    def _session_get(self, key, default=None):
+        if key in self.strategy.session:
+            return self.strategy.session[key]
+
+        return default
+
+    def _session_set(self, key, value):
+        self.strategy.session[key] = value
+
+    @test.override_settings(SOCIAL_AUTH_LOGIN_REDIRECT_URL='dashboard_url')
+    def test_unsafe_redirect_url(self):
+        """
+        Test that if unsafe url is set as the redirect url then
+        redirect url is updated to SOCIAL_AUTH_LOGIN_REDIRECT_URL
+        """
+        self.strategy.session = {
+            REDIRECT_FIELD_NAME: 'https://evil.com',
+        }
+
+        pipeline.ensure_redirect_url_is_safe(self.strategy)
+        assert self.strategy.session[REDIRECT_FIELD_NAME] == 'dashboard_url'
+
+    @test.override_settings(LOGIN_REDIRECT_WHITELIST=['localhost:1991'])
+    def test_whitelisted_redirect_urls(self):
+        """
+        Test that redirect url remains same if its whitelisted
+        """
+        safe_redirect_url = 'https://localhost:1991/course'
+        self.strategy.session = {REDIRECT_FIELD_NAME: safe_redirect_url}
+
+        pipeline.ensure_redirect_url_is_safe(self.strategy)
+        assert self.strategy.session[REDIRECT_FIELD_NAME] == safe_redirect_url

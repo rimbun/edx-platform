@@ -6,10 +6,11 @@ Registration related views.
 import datetime
 import json
 import logging
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib.auth import login as django_login
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.exceptions import NON_FIELD_ERRORS, PermissionDenied
 from django.core.validators import ValidationError
 from django.db import transaction
@@ -18,15 +19,16 @@ from django.http import HttpResponse, HttpResponseForbidden
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.utils.translation import get_language
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.debug import sensitive_post_parameters
+from django_countries import countries
+from django_ratelimit.decorators import ratelimit
 from edx_django_utils.monitoring import set_custom_attribute
-from edx_toggles.toggles import LegacyWaffleFlag, LegacyWaffleFlagNamespace
+from edx_django_utils.user import generate_password  # pylint: disable=wrong-import-order
 from openedx_events.learning.data import UserData, UserPersonalData
 from openedx_events.learning.signals import STUDENT_REGISTRATION_COMPLETED
-from pytz import UTC
-from ratelimit.decorators import ratelimit
+from openedx_filters.learning.filters import StudentRegistrationRequested
 from requests import HTTPError
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -34,11 +36,33 @@ from social_core.exceptions import AuthAlreadyAssociated, AuthException
 from social_django import utils as social_utils
 
 from common.djangoapps import third_party_auth
+
 # Note that this lives in LMS, so this dependency should be refactored.
 # TODO Have the discussions code subscribe to the REGISTER_USER signal instead.
-from common.djangoapps.student.helpers import get_next_url_for_login_page, get_redirect_url_with_host
+from common.djangoapps.student.helpers import (
+    AccountValidationError,
+    authenticate_new_user,
+    create_or_set_user_attribute_created_on_site,
+    do_create_account,
+    get_next_url_for_login_page,
+    get_redirect_url_with_host,
+)
+from common.djangoapps.student.models import (
+    RegistrationCookieConfiguration,
+    UserAttribute,
+    create_comments_service_user,
+    email_exists_or_retired,
+    username_exists_or_retired,
+)
+from common.djangoapps.student.views import compose_and_send_activation_email
+from common.djangoapps.third_party_auth import pipeline, provider
+from common.djangoapps.third_party_auth.saml import SAP_SUCCESSFACTORS_SAML_KEY
+from common.djangoapps.track import segment
+from common.djangoapps.util.db import outer_atomic
+from common.djangoapps.util.json_request import JsonResponse
 from lms.djangoapps.discussion.notification_prefs.views import enable_notifications
 from openedx.core.djangoapps.lang_pref import LANGUAGE_KEY
+from openedx.core.djangoapps.safe_sessions.middleware import mark_user_change_as_expected
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
 from openedx.core.djangoapps.user_api import accounts as accounts_settings
 from openedx.core.djangoapps.user_api.accounts.api import (
@@ -49,41 +73,22 @@ from openedx.core.djangoapps.user_api.accounts.api import (
     get_name_validation_error,
     get_password_validation_error,
     get_username_existence_validation_error,
-    get_username_validation_error
+    get_username_validation_error,
 )
 from openedx.core.djangoapps.user_api.preferences import api as preferences_api
 from openedx.core.djangoapps.user_authn.cookies import set_logged_in_cookies
-from openedx.core.djangoapps.user_authn.utils import (
-    generate_username_suggestions, is_registration_api_v1
+from openedx.core.djangoapps.user_authn.tasks import check_pwned_password_and_send_track_event
+from openedx.core.djangoapps.user_authn.toggles import (
+    is_auto_generated_username_enabled,
+    is_require_third_party_auth_enabled,
 )
+from openedx.core.djangoapps.user_authn.utils import generate_username_suggestions, is_registration_api_v1
 from openedx.core.djangoapps.user_authn.views.registration_form import (
     AccountCreationForm,
     RegistrationFormFactory,
-    get_registration_extension_form
+    get_profile_extension_form,
 )
-from openedx.core.djangoapps.user_authn.tasks import check_pwned_password_and_send_track_event
-from openedx.core.djangoapps.user_authn.toggles import is_require_third_party_auth_enabled
-from common.djangoapps.student.helpers import (
-    AccountValidationError,
-    authenticate_new_user,
-    create_or_set_user_attribute_created_on_site,
-    do_create_account
-)
-from common.djangoapps.student.models import (
-    RegistrationCookieConfiguration,
-    UserAttribute,
-    create_comments_service_user,
-    email_exists_or_retired,
-    username_exists_or_retired
-)
-from common.djangoapps.student.views import compose_and_send_activation_email
-from common.djangoapps.third_party_auth import pipeline, provider
-from common.djangoapps.third_party_auth.saml import SAP_SUCCESSFACTORS_SAML_KEY
-from common.djangoapps.track import segment
-from common.djangoapps.util.db import outer_atomic
-from common.djangoapps.util.json_request import JsonResponse
-
-from edx_django_utils.user import generate_password
+from openedx.core.djangoapps.user_authn.views.utils import get_auto_generated_username
 
 log = logging.getLogger("edx.student")
 AUDIT_LOG = logging.getLogger("audit")
@@ -99,28 +104,17 @@ REGISTRATION_UTM_PARAMETERS = {
     'utm_content': 'registration_utm_content',
 }
 REGISTRATION_UTM_CREATED_AT = 'registration_utm_created_at'
+IS_MARKETABLE = 'is_marketable'
 # used to announce a registration
-REGISTER_USER = Signal(providing_args=["user", "registration"])
+# providing_args=["user", "registration"]
+REGISTER_USER = Signal()
 
 
-# .. toggle_name: registration.enable_failure_logging
-# .. toggle_implementation: WaffleFlag
-# .. toggle_default: False
-# .. toggle_description: Enable verbose logging of registration failure messages
-# .. toggle_use_cases: temporary
-# .. toggle_creation_date: 2020-04-30
-# .. toggle_target_removal_date: 2020-06-01
-# .. toggle_warnings: This temporary feature toggle does not have a target removal date.
-REGISTRATION_FAILURE_LOGGING_FLAG = LegacyWaffleFlag(
-    waffle_namespace=LegacyWaffleFlagNamespace(name='registration'),
-    flag_name='enable_failure_logging',
-    module_name=__name__,
-)
 REAL_IP_KEY = 'openedx.core.djangoapps.util.ratelimit.real_ip'
 
 
 @transaction.non_atomic_requests
-def create_account_with_params(request, params):
+def create_account_with_params(request, params):  # pylint: disable=too-many-statements
     """
     Given a request and a dict of parameters (which may or may not have come
     from the request), create an account for the requesting user, including
@@ -167,6 +161,9 @@ def create_account_with_params(request, params):
         if 'confirm_email' in extra_fields:
             del extra_fields['confirm_email']
 
+    if settings.ENABLE_COPPA_COMPLIANCE and 'year_of_birth' in params:
+        params['year_of_birth'] = ''
+
     # registration via third party (Google, Facebook) using mobile application
     # doesn't use social auth pipeline (no redirect uri(s) etc involved).
     # In this case all related info (required for account linking)
@@ -196,10 +193,9 @@ def create_account_with_params(request, params):
         set_custom_attribute('register_user_tpa', pipeline.running(request))
     extended_profile_fields = configuration_helpers.get_value('extended_profile_fields', [])
     # Can't have terms of service for certain SHIB users, like at Stanford
-    registration_fields = getattr(settings, 'REGISTRATION_EXTRA_FIELDS', {})
     tos_required = (
-        registration_fields.get('terms_of_service') != 'hidden' or
-        registration_fields.get('honor_code') != 'hidden'
+        extra_fields.get('terms_of_service') != 'hidden' or
+        extra_fields.get('honor_code') != 'hidden'
     )
 
     form = AccountCreationForm(
@@ -209,7 +205,8 @@ def create_account_with_params(request, params):
         do_third_party_auth=False,
         tos_required=tos_required,
     )
-    custom_form = get_registration_extension_form(data=params)
+    custom_form = get_profile_extension_form(data=params)
+    is_marketable = params.get('marketing_emails_opt_in') in ['true', '1']
 
     # Perform operations within a transaction that are critical to account creation
     with outer_atomic():
@@ -223,6 +220,17 @@ def create_account_with_params(request, params):
         new_user = authenticate_new_user(request, user.username, form.cleaned_data['password'])
         django_login(request, new_user)
         request.session.set_expiry(0)
+
+    try:
+        _record_is_marketable_attribute(is_marketable, new_user)
+    # Don't prevent a user from registering if is_marketable is not being set.
+    # Also update the is_marketable value to None so that it is consistent with
+    # our database when we send it to segment.
+    except Exception:   # pylint: disable=broad-except
+        log.exception('Error while setting is_marketable attribute.')
+        is_marketable = None
+
+    _track_user_registration(user, profile, params, third_party_provider, registration, is_marketable, request=request)
 
     # Sites using multiple languages need to record the language used during registration.
     # If not, compose_and_send_activation_email will be sent in site's default language only.
@@ -242,19 +250,19 @@ def create_account_with_params(request, params):
     else:
         redirect_to, root_url = get_next_url_for_login_page(request, include_host=True)
         redirect_url = get_redirect_url_with_host(root_url, redirect_to)
-        compose_and_send_activation_email(user, profile, registration, redirect_url)
+        compose_and_send_activation_email(user, profile, registration, redirect_url, True)
 
-    if settings.FEATURES.get('ENABLE_DISCUSSION_EMAIL_DIGEST'):
+    if getattr(settings, 'ENABLE_DISCUSSION_EMAIL_DIGEST', False):
         try:
             enable_notifications(user)
         except Exception:  # pylint: disable=broad-except
             log.exception(f"Enable discussion notifications failed for user {user.id}.")
 
-    _track_user_registration(user, profile, params, third_party_provider, registration)
-
     # Announce registration
     REGISTER_USER.send(sender=None, user=user, registration=registration)
 
+    # .. event_implemented_name: STUDENT_REGISTRATION_COMPLETED
+    # .. event_type: org.openedx.learning.student.registration.completed.v1
     STUDENT_REGISTRATION_COMPLETED.send_event(
         user=UserData(
             pii=UserPersonalData(
@@ -277,15 +285,20 @@ def create_account_with_params(request, params):
 
     # TODO: there is no error checking here to see that the user actually logged in successfully,
     # and is not yet an active user.
-    is_new_user(request, new_user)
+    is_new_user(form.cleaned_data['password'], new_user)
     return new_user
 
 
-def is_new_user(request, user):
+def is_new_user(password, user):
     if user is not None:
         AUDIT_LOG.info(f"Login success on new account creation - {user.username}")
-        is_internal_user = user.email.split('@')[1] == 'edx.org'
-        check_pwned_password_and_send_track_event.delay(user.id, request.POST.get('password'), is_internal_user)
+        check_pwned_password_and_send_track_event.delay(
+            user_id=user.id,
+            password=password,
+            internal_user=user.is_staff,
+            is_new_user=True,
+            request_page='registration'
+        )
 
 
 def _link_user_to_third_party_provider(
@@ -343,28 +356,36 @@ def _link_user_to_third_party_provider(
     return third_party_provider, running_pipeline
 
 
-def _track_user_registration(user, profile, params, third_party_provider, registration):
+def _track_user_registration(user, profile, params, third_party_provider, registration, is_marketable, request=None):
     """ Track the user's registration. """
     if hasattr(settings, 'LMS_SEGMENT_KEY') and settings.LMS_SEGMENT_KEY:
-        identity_args = [
-            user.id,
-            {
-                'email': user.email,
-                'username': user.username,
-                'name': profile.name,
-                # Mailchimp requires the age & yearOfBirth to be integers, we send a sane integer default if falsey.
-                'age': profile.age or -1,
-                'yearOfBirth': profile.year_of_birth or datetime.datetime.now(UTC).year,
-                'education': profile.level_of_education_display,
-                'address': profile.mailing_address,
-                'gender': profile.gender_display,
-                'country': str(profile.country),
-            }
-        ]
+        anonymous_id = ""
+        try:
+            anonymous_id = request.COOKIES.get('ajs_anonymous_id', "")
+        except:       # pylint: disable=bare-except
+            pass
+        traits = {
+            'email': user.email,
+            'username': user.username,
+            'name': profile.name,
+            # Mailchimp requires the age & yearOfBirth to be integers, we send a sane integer default if falsey.
+            'age': profile.age or -1,
+            'yearOfBirth': profile.year_of_birth or datetime.datetime.now(ZoneInfo("UTC")).year,
+            'education': profile.level_of_education_display,
+            'address': profile.mailing_address,
+            'gender': profile.gender_display,
+            'country': str(profile.country) if profile.country else '',
+            'is_marketable': is_marketable,
+            'anonymous_id': anonymous_id
+        }
+        if settings.MARKETING_EMAILS_OPT_IN and params.get('marketing_emails_opt_in'):
+            email_subscribe = 'subscribed' if is_marketable else 'unsubscribed'
+            traits['email_subscribe'] = email_subscribe
+
         # .. pii: Many pieces of PII are sent to Segment here. Retired directly through Segment API call in Tubular.
         # .. pii_types: email_address, username, name, birth_date, location, gender
         # .. pii_retirement: third_party
-        segment.identify(*identity_args)
+        segment.identify(user.id, traits)
         properties = {
             'category': 'conversion',
             # ..pii: Learner email is sent to Segment in following line and will be associated with analytics data.
@@ -375,9 +396,19 @@ def _track_user_registration(user, profile, params, third_party_provider, regist
             'is_year_of_birth_selected': bool(profile.year_of_birth),
             'is_education_selected': bool(profile.level_of_education_display),
             'is_goal_set': bool(profile.goals),
-            'total_registration_time': round(float(params.get('totalRegistrationTime', '0'))),
+            'total_registration_time': round(
+                float(params.get('total_registration_time') or params.get('totalRegistrationTime') or 0)
+            ),
             'activation_key': registration.activation_key if registration else None,
+            'host': params.get('host', ''),
+            'app_name': params.get('app_name', ''),
+            'utm_campaign': params.get('utm_campaign', ''),
+            'anonymous_id': anonymous_id
         }
+        # VAN-738 - added below properties to experiment marketing emails opt in/out events on Braze.
+        if params.get('marketing_emails_opt_in') and settings.MARKETING_EMAILS_OPT_IN:
+            properties['marketing_emails_opt_in'] = is_marketable
+
         # DENG-803: For segment events forwarded along to Hubspot, duplicate the `properties` section of
         # the event payload into the `traits` section so that they can be received. This is a temporary
         # fix until we implement this behavior outside of the LMS.
@@ -444,10 +475,18 @@ def _skip_activation_email(user, running_pipeline, third_party_provider):
         )
 
     return (
-        settings.FEATURES.get('SKIP_EMAIL_VALIDATION', None) or
-        settings.FEATURES.get('AUTOMATIC_AUTH_FOR_TESTING') or
+        getattr(settings, 'SKIP_EMAIL_VALIDATION', False) or
+        settings.AUTOMATIC_AUTH_FOR_TESTING or
         (third_party_provider and third_party_provider.skip_email_verification and valid_email)
     )
+
+
+def _record_is_marketable_attribute(is_marketable, user):
+    """
+    Attribute this user's registration based on form data
+    """
+    if settings.MARKETING_EMAILS_OPT_IN and user:
+        UserAttribute.set_user_attribute(user, IS_MARKETABLE, str(is_marketable).lower())
 
 
 def _record_registration_attributions(request, user):
@@ -490,7 +529,9 @@ def _record_utm_registration_attribution(request, user):
             # We divide by 1000 here because the javascript timestamp generated is in milliseconds not seconds.
             # PYTHON: time.time()      => 1475590280.823698
             # JS: new Date().getTime() => 1475590280823
-            created_at_datetime = datetime.datetime.fromtimestamp(int(created_at_unixtime) / float(1000), tz=UTC)
+            created_at_datetime = datetime.datetime.fromtimestamp(
+                int(created_at_unixtime) / float(1000), tz=ZoneInfo("UTC")
+            )
             UserAttribute.set_user_attribute(
                 user,
                 REGISTRATION_UTM_CREATED_AT,
@@ -513,11 +554,11 @@ class RegistrationView(APIView):
 
     @method_decorator(ensure_csrf_cookie)
     def get(self, request):
-        return HttpResponse(RegistrationFormFactory().get_registration_form(request).to_json(),  # lint-amnesty, pylint: disable=http-response-with-content-type-json
+        return HttpResponse(RegistrationFormFactory().get_registration_form(request).to_json(),  # pylint: disable=http-response-with-content-type-json
                             content_type="application/json")
 
     @method_decorator(csrf_exempt)
-    @method_decorator(ratelimit(key=REAL_IP_KEY, rate=settings.REGISTRATION_RATELIMIT, method='POST'))
+    @method_decorator(ratelimit(key=REAL_IP_KEY, rate=settings.REGISTRATION_RATELIMIT, method='POST', block=False))
     def post(self, request):
         """Create the user's account.
 
@@ -549,7 +590,25 @@ class RegistrationView(APIView):
         data = request.POST.copy()
         self._handle_terms_of_service(data)
 
+        if is_auto_generated_username_enabled() and 'username' not in data:
+            data['username'] = get_auto_generated_username(data)
+
+        try:
+            # .. filter_implemented_name: StudentRegistrationRequested
+            # .. filter_type: org.openedx.learning.student.registration.requested.v1
+            data = StudentRegistrationRequested.run_filter(form_data=data)
+        except StudentRegistrationRequested.PreventRegistration as exc:
+            errors = {
+                "error_message": [{"user_message": str(exc)}],
+            }
+            error_code = getattr(exc, "error_code", None)
+            return self._create_response(request, errors, status_code=exc.status_code, error_code=error_code)
+
         response = self._handle_duplicate_email_username(request, data)
+        if response:
+            return response
+
+        response = self._handle_country_code_validation(request, data)
         if response:
             return response
 
@@ -559,9 +618,12 @@ class RegistrationView(APIView):
 
         redirect_to, root_url = get_next_url_for_login_page(request, include_host=True)
         redirect_url = get_redirect_url_with_host(root_url, redirect_to)
-        response = self._create_response(request, {}, status_code=200, redirect_url=redirect_url)
+        authenticated_user = {'username': user.username, 'full_name': user.profile.name, 'user_id': user.id}
+        response = self._create_response(
+            request, {'authenticated_user': authenticated_user}, status_code=200, redirect_url=redirect_url
+        )
         set_logged_in_cookies(request, response, user)
-        if not user.is_active and settings.SHOW_ACCOUNT_ACTIVATION_CTA:
+        if not user.is_active and settings.SHOW_ACCOUNT_ACTIVATION_CTA and not settings.MARKETING_EMAILS_OPT_IN:
             response.set_cookie(
                 settings.SHOW_ACTIVATE_CTA_POPUP_COOKIE_NAME,
                 True,
@@ -569,7 +631,29 @@ class RegistrationView(APIView):
                 path='/',
                 secure=request.is_secure()
             )  # setting the cookie to show account activation dialogue in platform and learning MFE
+        mark_user_change_as_expected(user.id)
         return response
+
+    def _handle_country_code_validation(self, request, data):
+        # pylint: disable=no-member
+        country = data.get('country')
+        is_valid_country_code = country in dict(countries).keys()
+
+        errors = {}
+        error_code = 'invalid-country'
+        error_message = accounts_settings.REQUIRED_FIELD_COUNTRY_MSG
+        extra_fields = configuration_helpers.get_value(
+            'REGISTRATION_EXTRA_FIELDS',
+            getattr(settings, 'REGISTRATION_EXTRA_FIELDS', {})
+        )
+
+        if extra_fields.get('country', 'hidden') == 'required' and not is_valid_country_code:
+            errors['country'] = [{'user_message': error_message}]
+        elif country and not is_valid_country_code:
+            errors['country'] = [{'user_message': error_message}]
+
+        if errors:
+            return self._create_response(request, errors, status_code=400, error_code=error_code)
 
     def _handle_duplicate_email_username(self, request, data):
         # pylint: disable=no-member
@@ -578,22 +662,15 @@ class RegistrationView(APIView):
         username = data.get('username')
         errors = {}
 
-        # TODO: remove the is_authn_mfe check and use the new error message as default after redesign
-        is_authn_mfe = data.get('is_authn_mfe', False)
-
         error_code = 'duplicate'
         if email is not None and email_exists_or_retired(email):
             error_code += '-email'
-            error_message = accounts_settings.AUTHN_EMAIL_CONFLICT_MSG if is_authn_mfe else (
-                accounts_settings.EMAIL_CONFLICT_MSG.format(email_address=email)
-            )
+            error_message = accounts_settings.AUTHN_EMAIL_CONFLICT_MSG
             errors['email'] = [{'user_message': error_message}]
 
         if username is not None and username_exists_or_retired(username):
             error_code += '-username'
-            error_message = accounts_settings.AUTHN_USERNAME_CONFLICT_MSG if is_authn_mfe else (
-                accounts_settings.USERNAME_CONFLICT_MSG.format(username=username)
-            )
+            error_message = accounts_settings.AUTHN_USERNAME_CONFLICT_MSG
             errors['username'] = [{'user_message': error_message}]
             errors['username_suggestions'] = generate_username_suggestions(username)
 
@@ -622,7 +699,7 @@ class RegistrationView(APIView):
             response = self._create_response(request, errors, status_code=409, error_code=err.error_code)
         except ValidationError as err:
             # Should only get field errors from this exception
-            assert NON_FIELD_ERRORS not in err.message_dict
+            assert NON_FIELD_ERRORS not in err.message_dict  # noqa: PT017
 
             # Error messages are returned as arrays from ValidationError
             error_code = err.message_dict.get('error_code', ['validation-error'])[0]
@@ -642,32 +719,12 @@ class RegistrationView(APIView):
         if status_code == 200:
             # keeping this `success` field in for now, as we have outstanding clients expecting this
             response_dict['success'] = True
-        else:
-            self._log_validation_errors(request, response_dict, status_code)
         if redirect_url:
             response_dict['redirect_url'] = redirect_url
         if error_code:
             response_dict['error_code'] = error_code
             set_custom_attribute('register_error_code', error_code)
         return JsonResponse(response_dict, status=status_code)
-
-    def _log_validation_errors(self, request, errors, status_code):
-        if not REGISTRATION_FAILURE_LOGGING_FLAG.is_enabled():
-            return
-
-        try:
-            for field_key, errors in errors.items():  # lint-amnesty, pylint: disable=redefined-argument-from-local
-                for error in errors:
-                    log.info(
-                        'message=registration_failed, status_code=%d, agent="%s", field="%s", error="%s"',
-                        status_code,
-                        request.META.get('HTTP_USER_AGENT', ''),
-                        field_key,
-                        error['user_message']
-                    )
-        except:  # pylint: disable=bare-except
-            log.exception("Failed to log registration validation error")
-            pass  # lint-amnesty, pylint: disable=unnecessary-pass
 
 
 # pylint: disable=line-too-long
@@ -760,18 +817,21 @@ class RegistrationValidationView(APIView):
     # This end-point is available to anonymous users, so no authentication is needed.
     authentication_classes = []
     username_suggestions = []
-    api_version = 'v1'
 
     def name_handler(self, request):
         """ Validates whether fullname is valid """
         name = request.data.get('name')
-        return get_name_validation_error(name)
+        validation_error = get_name_validation_error(name)
+        if validation_error:
+            return validation_error
+        self.username_suggestions = generate_username_suggestions(name)
+        return validation_error
 
     def username_handler(self, request):
         """ Validates whether the username is valid. """
         username = request.data.get('username')
         invalid_username_error = get_username_validation_error(username)
-        username_exists_error = get_username_existence_validation_error(username, self.api_version)
+        username_exists_error = get_username_existence_validation_error(username)
         if username_exists_error:
             self.username_suggestions = generate_username_suggestions(username)
         # We prefer seeing for invalidity first.
@@ -781,8 +841,8 @@ class RegistrationValidationView(APIView):
     def email_handler(self, request):
         """ Validates whether the email address is valid. """
         email = request.data.get('email')
-        invalid_email_error = get_email_validation_error(email, self.api_version)
-        email_exists_error = get_email_existence_validation_error(email, self.api_version)
+        invalid_email_error = get_email_validation_error(email)
+        email_exists_error = get_email_existence_validation_error(email)
         # We prefer seeing for invalidity first.
         # Some invalid emails (like a blank one for superusers) may exist.
         return invalid_email_error or email_exists_error
@@ -798,7 +858,8 @@ class RegistrationValidationView(APIView):
         username = request.data.get('username')
         email = request.data.get('email')
         password = request.data.get('password')
-        return get_password_validation_error(password, username, email)
+        reset_password_page = request.data.get('reset_password_page', 'false') == 'true'
+        return get_password_validation_error(password, username, email, reset_password_page)
 
     def country_handler(self, request):
         """ Country validator """
@@ -837,9 +898,6 @@ class RegistrationValidationView(APIView):
         can get extra verification checks if entered along with others,
         like when the password may not equal the username.
         """
-        # TODO: remove is_authn_mfe after redesign-master is merged in frontend-app-authn
-        #  and use the new messages as default
-        is_auth_mfe = request.data.get('is_authn_mfe')
         field_key = request.data.get('form_field_key')
         validation_decisions = {}
 
@@ -849,9 +907,6 @@ class RegistrationValidationView(APIView):
             """
             validation = self.validation_handlers[field_name](self, request)
             validation_decisions[field_name] = validation
-
-        if is_auth_mfe:
-            self.api_version = 'v2'
 
         if field_key and field_key in self.validation_handlers:
             update_validations(field_key)

@@ -9,10 +9,12 @@ import lms.djangoapps.ccx.tasks
 import openedx.core.djangoapps.content.course_overviews.signals
 from openedx.core.djangoapps.content.course_overviews.management.commands.simulate_publish import Command, name_from_fn
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview, SimulateCoursePublishConfig
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import SwitchedSignal
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import SwitchedSignal  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 LOGGER_NAME = 'simulate_publish'
 
@@ -30,12 +32,10 @@ class TestSimulatePublish(SharedModuleStoreTestCase):
         """
         super().setUpClass()
         cls.command = Command()
-        # org.0/course_0/Run_0
-        cls.course_key_1 = CourseFactory.create(default_store=ModuleStoreEnum.Type.mongo).id
         # course-v1:org.1+course_1+Run_1
-        cls.course_key_2 = CourseFactory.create(default_store=ModuleStoreEnum.Type.split).id
+        cls.course_key_1 = CourseFactory.create(default_store=ModuleStoreEnum.Type.split).id
         # course-v1:org.2+course_2+Run_2
-        cls.course_key_3 = CourseFactory.create(default_store=ModuleStoreEnum.Type.split).id
+        cls.course_key_2 = CourseFactory.create(default_store=ModuleStoreEnum.Type.split).id
 
     def setUp(self):
         """
@@ -97,7 +97,7 @@ class TestSimulatePublish(SharedModuleStoreTestCase):
             receivers=default_receivers,
             courses=None,
             delay=0,
-            force_lms=False,
+            force_lms=True,
             skip_ccx=False,
             args_from_database=False
         )
@@ -108,12 +108,11 @@ class TestSimulatePublish(SharedModuleStoreTestCase):
         """Test sending only to specific courses."""
         self.command.handle(
             **self.options(
-                courses=[str(self.course_key_1), str(self.course_key_2)]
+                courses=[str(self.course_key_1)]
             )
         )
         assert self.course_key_1 in self.received_1
-        assert self.course_key_2 in self.received_1
-        assert self.course_key_3 not in self.received_1
+        assert self.course_key_2 not in self.received_1
         assert self.received_1 == self.received_2
 
     def test_specific_receivers(self):
@@ -125,8 +124,7 @@ class TestSimulatePublish(SharedModuleStoreTestCase):
         )
         assert self.course_key_1 in self.received_1
         assert self.course_key_2 in self.received_1
-        assert self.course_key_3 in self.received_1
-        assert self.received_2 == []
+        assert not self.received_2
 
     def test_course_overviews(self):
         """Integration test with CourseOverviews."""
@@ -139,9 +137,9 @@ class TestSimulatePublish(SharedModuleStoreTestCase):
                 ]
             )
         )
-        assert CourseOverview.objects.all().count() == 3
-        assert self.received_1 == []
-        assert self.received_2 == []
+        assert CourseOverview.objects.all().count() == 2
+        assert not self.received_1
+        assert not self.received_2
 
     def sample_receiver_1(self, sender, course_key, **kwargs):  # pylint: disable=unused-argument
         """Custom receiver for testing."""
@@ -154,17 +152,17 @@ class TestSimulatePublish(SharedModuleStoreTestCase):
     def test_args_from_database(self):
         """Test management command arguments injected from config model."""
         # Nothing in the database, should default to disabled
-        with self.assertRaisesRegex(CommandError, 'SimulateCourseConfigPublish is disabled.*'):
+        with self.assertRaisesRegex(CommandError, 'SimulateCourseConfigPublish is disabled.*'):  # noqa: PT027
             call_command('simulate_publish', '--args-from-database')
 
         # Add a config
         config = SimulateCoursePublishConfig.current()
-        config.arguments = '--delay 20 --dry-run'
+        config.arguments = '--delay 20 --dry-run --force-lms '
         config.enabled = True
         config.save()
 
         with LogCapture(LOGGER_NAME) as log:
-            call_command('simulate_publish')
+            call_command('simulate_publish', '--force-lms')
 
             log.check_present(
                 (

@@ -1,5 +1,6 @@
 import $ from 'jquery';
 import _ from 'underscore';
+import sinon from 'sinon';
 import AjaxHelpers from 'edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers';
 import EditHelpers from 'js/spec_helpers/edit_helpers';
 import TemplateHelpers from 'common/js/spec_helpers/template_helpers';
@@ -12,9 +13,11 @@ import XBlockInfo from 'js/models/xblock_info';
 import Course from 'js/models/course';
 import 'mock-ajax';
 
+// eslint-disable-next-line padded-blocks
 describe('MoveXBlock', function() {
 
     'use strict';
+
     var modal, showModal, renderViews, createXBlockInfo, createCourseOutline, courseOutlineOptions,
         parentChildMap, categoryMap, createChildXBlockInfo, xblockAncestorInfo, courseOutline,
         verifyBreadcrumbViewInfo, verifyListViewInfo, getDisplayedInfo, clickForwardButton,
@@ -22,7 +25,7 @@ describe('MoveXBlock', function() {
         verifyNotificationStatus, sendMoveXBlockRequest, moveXBlockWithSuccess, getMovedAlertNotification,
         verifyConfirmationFeedbackTitleText, verifyConfirmationFeedbackRedirectLinkText,
         verifyUndoConfirmationFeedbackTitleText, verifyConfirmationFeedbackUndoMoveActionText,
-        sourceParentXBlockInfo, mockContainerPage, createContainerPage, containerPage,
+        sourceParentXBlockInfo, mockContainerPage, createContainerPage, containerPage, requests, xhrFactory,
         sourceDisplayName = 'component_display_name_0',
         sourceLocator = 'component_ID_0',
         sourceParentLocator = 'unit_ID_0';
@@ -89,6 +92,11 @@ describe('MoveXBlock', function() {
     };
 
     beforeEach(function() {
+        xhrFactory = sinon.useFakeXMLHttpRequest();
+        requests = [];
+        requests.currentIndex = 0;
+        requests.restore = function() { xhrFactory.restore(); };
+        xhrFactory.onCreate = function(req) { requests.push(req); };
         setFixtures("<div id='page-alert'></div>");
         mockContainerPage = readFixtures('templates/mock/mock-container-page.underscore');
         TemplateHelpers.installTemplates([
@@ -99,12 +107,12 @@ describe('MoveXBlock', function() {
         appendSetFixtures(mockContainerPage);
 
         window.course = new Course({
-            id: "5",
-            name: "Course Name",
-            url_name: "course_name",
-            org: "course_org",
-            num: "course_num",
-            revision: "course_rev"
+            id: '5',
+            name: 'Course Name',
+            url_name: 'course_name',
+            org: 'course_org',
+            num: 'course_num',
+            revision: 'course_rev'
         });
 
         createContainerPage();
@@ -113,6 +121,7 @@ describe('MoveXBlock', function() {
     });
 
     afterEach(function() {
+        requests.restore();
         modal.hide();
         courseOutline = null;
         containerPage.remove();
@@ -201,7 +210,7 @@ describe('MoveXBlock', function() {
      * @param {any} ancestorInfo           ancestors info
      */
     renderViews = function(courseOutlineInfo, ancestorInfo) {
-        var ancestorInfo = ancestorInfo || {ancestors: []};  // eslint-disable-line no-redeclare
+        var ancestorInfo = ancestorInfo || {ancestors: []}; // eslint-disable-line no-redeclare
         modal.renderViews(courseOutlineInfo, ancestorInfo);
     };
 
@@ -267,15 +276,15 @@ describe('MoveXBlock', function() {
      */
     verifyBreadcrumbViewInfo = function(category, xblockIndex) {
         var displayedBreadcrumbs = modal.moveXBlockBreadcrumbView.$el.find('.breadcrumbs .bc-container').map(
-            function() { return $(this).text().trim(); }
-        ).get(),
+                function() { return $(this).text().trim(); }
+            ).get(),
             categories = _.keys(parentChildMap).concat(['component']),
             visitedCategories = categories.slice(0, _.indexOf(categories, category));
 
         expect(displayedBreadcrumbs).toEqual(
             _.map(visitedCategories, function(visitedCategory) {
-                return visitedCategory === 'course' ?
-                    'Course Outline' : visitedCategory + '_display_name_' + xblockIndex;
+                return visitedCategory === 'course'
+                    ? 'Course Outline' : visitedCategory + '_display_name_' + xblockIndex;
             })
         );
     };
@@ -286,7 +295,7 @@ describe('MoveXBlock', function() {
      * @param {any} buttonIndex     forward button index
      */
     clickForwardButton = function(buttonIndex) {
-        buttonIndex = buttonIndex || 0;  // eslint-disable-line no-param-reassign
+        buttonIndex = buttonIndex || 0; // eslint-disable-line no-param-reassign
         modal.moveXBlockListView.$el.find('[data-item-index="' + buttonIndex + '"] button').click();
     };
 
@@ -336,7 +345,7 @@ describe('MoveXBlock', function() {
             }
             clickBreadcrumbButton();
         }
-        category = nextCategory(direction, category);  // eslint-disable-line no-param-reassign
+        category = nextCategory(direction, category); // eslint-disable-line no-param-reassign
 
         verifyXBlockInfo(outlineOptions, category, buttonIndex, direction, hasCurrentLocation);
     };
@@ -365,7 +374,7 @@ describe('MoveXBlock', function() {
      * @param {Integer} sourceIndex         source index of the xblock
      */
     verifyNotificationStatus = function(requests, notificationSpy, notificationText, sourceIndex) {
-        var sourceIndex = sourceIndex || 0;  // eslint-disable-line no-redeclare
+        var sourceIndex = sourceIndex || 0; // eslint-disable-line no-redeclare
         ViewHelpers.verifyNotificationShowing(notificationSpy, notificationText);
         AjaxHelpers.respondWithJson(requests, {
             move_source_locator: sourceLocator,
@@ -395,6 +404,7 @@ describe('MoveXBlock', function() {
             expectedData,
             sourceIndex = sourceIndex || 0; // eslint-disable-line no-redeclare
 
+        // eslint-disable-next-line no-multi-assign
         responseData = expectedData = {
             move_source_locator: xblockLocator,
             parent_locator: modal.targetParentXBlockInfo.id
@@ -494,7 +504,9 @@ describe('MoveXBlock', function() {
     };
 
     it('renders views with correct information', function() {
-        var outlineOptions = {section: 1, subsection: 1, unit: 1, component: 1},
+        var outlineOptions = {
+                section: 1, subsection: 1, unit: 1, component: 1
+            },
             outline = createCourseOutline(outlineOptions);
 
         renderViews(outline, xblockAncestorInfo);
@@ -503,7 +515,9 @@ describe('MoveXBlock', function() {
     });
 
     it('shows correct behavior on breadcrumb navigation', function() {
-        var outline = createCourseOutline({section: 1, subsection: 1, unit: 1, component: 1});
+        var outline = createCourseOutline({
+            section: 1, subsection: 1, unit: 1, component: 1
+        });
 
         renderViews(outline);
         _.each(_.range(3), function() {
@@ -519,7 +533,9 @@ describe('MoveXBlock', function() {
     });
 
     it('shows the correct current location', function() {
-        var outlineOptions = {section: 2, subsection: 2, unit: 2, component: 2},
+        var outlineOptions = {
+                section: 2, subsection: 2, unit: 2, component: 2
+            },
             outline = createCourseOutline(outlineOptions);
         renderViews(outline, xblockAncestorInfo);
         verifyXBlockInfo(outlineOptions, 'section', 0, 'forward', true);
@@ -714,7 +730,6 @@ describe('MoveXBlock', function() {
         });
 
         it('move an xblock when move button is clicked', function() {
-            var requests = AjaxHelpers.requests(this);
             moveXBlockWithSuccess(requests);
         });
 
@@ -725,8 +740,7 @@ describe('MoveXBlock', function() {
         });
 
         it('undo move an xblock when undo move link is clicked', function() {
-            var sourceIndex = 0,
-                requests = AjaxHelpers.requests(this);
+            var sourceIndex = 0;
             moveXBlockWithSuccess(requests);
             getMovedAlertNotification().find('.action-save').click();
             AjaxHelpers.respondWithJson(requests, {
@@ -740,8 +754,7 @@ describe('MoveXBlock', function() {
 
     describe('shows a notification', function() {
         it('mini operation message when moving an xblock', function() {
-            var requests = AjaxHelpers.requests(this),
-                notificationSpy = ViewHelpers.createNotificationSpy();
+            var notificationSpy = ViewHelpers.createNotificationSpy();
             // navigate to a target parent and click
             renderViews(courseOutline);
             _.each(_.range(3), function() {
@@ -752,8 +765,7 @@ describe('MoveXBlock', function() {
         });
 
         it('mini operation message when undo moving an xblock', function() {
-            var notificationSpy,
-                requests = AjaxHelpers.requests(this);
+            var notificationSpy;
             moveXBlockWithSuccess(requests);
             notificationSpy = ViewHelpers.createNotificationSpy();
             getMovedAlertNotification().find('.action-save').click();
@@ -761,8 +773,7 @@ describe('MoveXBlock', function() {
         });
 
         it('error message when move request fails', function() {
-            var requests = AjaxHelpers.requests(this),
-                notificationSpy = ViewHelpers.createNotificationSpy('Error');
+            var notificationSpy = ViewHelpers.createNotificationSpy('Error');
             // select a target item and click
             renderViews(courseOutline);
             _.each(_.range(3), function() {
@@ -774,8 +785,7 @@ describe('MoveXBlock', function() {
         });
 
         it('error message when undo move request fails', function() {
-            var requests = AjaxHelpers.requests(this),
-                notificationSpy = ViewHelpers.createNotificationSpy('Error');
+            var notificationSpy = ViewHelpers.createNotificationSpy('Error');
             moveXBlockWithSuccess(requests);
             getMovedAlertNotification().find('.action-save').click();
             AjaxHelpers.respondWithError(requests);

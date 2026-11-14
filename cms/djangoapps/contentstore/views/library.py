@@ -10,8 +10,8 @@ import logging
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from django.http import Http404, HttpResponseForbidden, HttpResponseNotAllowed
-from django.utils.translation import ugettext as _
+from django.http import Http404, HttpResponseNotAllowed
+from django.utils.translation import gettext as _
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods
 from opaque_keys import InvalidKeyError
@@ -19,78 +19,97 @@ from opaque_keys.edx.keys import CourseKey
 from opaque_keys.edx.locator import LibraryLocator, LibraryUsageLocator
 from organizations.api import ensure_organization
 from organizations.exceptions import InvalidOrganizationException
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import DuplicateCourseError
 
+from cms.djangoapps.contentstore.xblock_storage_handlers.view_handlers import create_xblock_info
 from cms.djangoapps.course_creators.views import get_course_creator_status
 from common.djangoapps.edxmako.shortcuts import render_to_response
 from common.djangoapps.student.auth import (
-    STUDIO_EDIT_ROLES,
-    STUDIO_VIEW_USERS,
-    get_user_permissions,
     has_studio_read_access,
-    has_studio_write_access
+    has_studio_write_access,
 )
 from common.djangoapps.student.roles import (
     CourseInstructorRole,
     CourseStaffRole,
-    LibraryUserRole
+    OrgStaffRole,
+    UserBasedRole,
 )
 from common.djangoapps.util.json_request import JsonResponse, JsonResponseBadRequest, expect_json
+from openedx.core.lib.log_utils import get_username_or_pii_safe_user_id_for_log
+from xmodule.modulestore import ModuleStoreEnum
+from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.exceptions import DuplicateCourseError
 
-from ..config.waffle import REDIRECT_TO_LIBRARY_AUTHORING_MICROFRONTEND
+from ..toggles import libraries_v1_enabled
 from ..utils import add_instructor, reverse_library_url
 from .component import CONTAINER_TEMPLATES, get_component_templates
-from .helpers import is_content_creator
-from .item import create_xblock_info
-from .user import user_with_role
 
-__all__ = ['library_handler', 'manage_library_users']
+__all__ = ['library_handler']
 
 log = logging.getLogger(__name__)
 
-LIBRARIES_ENABLED = settings.FEATURES.get('ENABLE_CONTENT_LIBRARIES', False)
-ENABLE_LIBRARY_AUTHORING_MICROFRONTEND = settings.FEATURES.get('ENABLE_LIBRARY_AUTHORING_MICROFRONTEND', False)
-LIBRARY_AUTHORING_MICROFRONTEND_URL = settings.LIBRARY_AUTHORING_MICROFRONTEND_URL
 
-
-def should_redirect_to_library_authoring_mfe():
-    """
-    Boolean helper method, returns whether or not to redirect to the Library
-    Authoring MFE based on settings and flags.
-    """
-
-    return (
-        ENABLE_LIBRARY_AUTHORING_MICROFRONTEND and
-        LIBRARY_AUTHORING_MICROFRONTEND_URL and
-        REDIRECT_TO_LIBRARY_AUTHORING_MICROFRONTEND.is_enabled()
-    )
-
-
-def user_can_create_library(user, org=None):
+def _user_can_create_library_for_org(user, org=None):
     """
     Helper method for returning the library creation status for a particular user,
-    taking into account the value LIBRARIES_ENABLED.
-    """
+    taking into account the libraries_v1_enabled toggle.
 
-    if not LIBRARIES_ENABLED:
+    if the ENABLE_CREATOR_GROUP value is False, then any user can create a library (in any org),
+    if library creation is enabled.
+
+    if the ENABLE_CREATOR_GROUP value is true, then what a user can do varies by thier role.
+
+    Global Staff: can make libraries in any org.
+    Course Creator Group Members: can make libraries in any org.
+    Organization Staff: Can make libraries in the organization for which they are staff.
+    Course Staff: Can make libraries in the organization which has courses of which they are staff.
+    Course Admin: Can make libraries in the organization which has courses of which they are Admin.
+    """
+    if not libraries_v1_enabled():
         return False
     elif user.is_staff:
         return True
-    elif settings.FEATURES.get('ENABLE_CREATOR_GROUP', False):
-        has_course_creator_role = True
-        if org:
-            has_course_creator_role = is_content_creator(user, org)
-        return get_course_creator_status(user) == 'granted' and has_course_creator_role
+    elif getattr(settings, 'ENABLE_CREATOR_GROUP', False):
+        is_course_creator = get_course_creator_status(user) == 'granted'
+        if is_course_creator:
+            return True
+
+        has_org_staff_role = OrgStaffRole().has_org_for_user(user, org)
+        if has_org_staff_role:
+            return True
+
+        has_course_staff_role = UserBasedRole(user=user, role=CourseStaffRole.ROLE).has_courses_with_role(org)
+        if has_course_staff_role:
+            return True
+
+        has_course_admin_role = UserBasedRole(user=user, role=CourseInstructorRole.ROLE).has_courses_with_role(org)
+        if has_course_admin_role:
+            return True
+
+        return False
     else:
         # EDUCATOR-1924: DISABLE_LIBRARY_CREATION overrides DISABLE_COURSE_CREATION, if present.
-        disable_library_creation = settings.FEATURES.get('DISABLE_LIBRARY_CREATION', None)
-        disable_course_creation = settings.FEATURES.get('DISABLE_COURSE_CREATION', False)
+        disable_library_creation = settings.DISABLE_LIBRARY_CREATION
+        disable_course_creation = getattr(settings, 'DISABLE_COURSE_CREATION', False)
         if disable_library_creation is not None:
             return not disable_library_creation
         else:
             return not disable_course_creation
+
+
+def user_can_view_create_library_button(user):
+    """
+    Helper method for displaying the visibilty of the create_library_button.
+    """
+    return _user_can_create_library_for_org(user)
+
+
+def user_can_create_library(user, org):
+    """
+    Helper method for to check if user can create library for given org.
+    """
+    if org is None:
+        return False
+    return _user_can_create_library_for_org(user, org)
 
 
 @login_required
@@ -100,17 +119,13 @@ def library_handler(request, library_key_string=None):
     """
     RESTful interface to most content library related functionality.
     """
-    if not LIBRARIES_ENABLED:
+    if not libraries_v1_enabled():
         log.exception("Attempted to use the content library API when the libraries feature is disabled.")
         raise Http404  # Should never happen because we test the feature in urls.py also
 
     if request.method == 'POST':
-        if not user_can_create_library(request.user):
-            return HttpResponseForbidden()
-
         if library_key_string is not None:
             return HttpResponseNotAllowed(("POST",))
-
         return _create_library(request)
 
     else:
@@ -131,7 +146,7 @@ def _display_library(library_key_string, request):
     if not has_studio_read_access(request.user, library_key):
         log.exception(
             "User %s tried to access library %s without permission",
-            request.user.username, str(library_key)
+            get_username_or_pii_safe_user_id_for_log(request.user), str(library_key)
         )
         raise PermissionDenied()
 
@@ -208,7 +223,7 @@ def _create_library(request):
             )
         # Give the user admin ("Instructor") role for this library:
         add_instructor(new_lib.location.library_key, request.user, request.user)
-    except PermissionDenied as error:
+    except PermissionDenied as error:  # pylint: disable=unused-variable  # noqa: F841
         log.info(
             "User does not have the permission to create LIBRARY in this organization."
             "User: '%s' Org: '%s' LIBRARY #: '%s'.",
@@ -291,43 +306,4 @@ def library_blocks_view(library, user, response_format):
         'component_templates': component_templates,
         'xblock_info': xblock_info,
         'templates': CONTAINER_TEMPLATES,
-    })
-
-
-def manage_library_users(request, library_key_string):
-    """
-    Studio UI for editing the users within a library.
-
-    Uses the /course_team/:library_key/:user_email/ REST API to make changes.
-    """
-    library_key = CourseKey.from_string(library_key_string)
-    if not isinstance(library_key, LibraryLocator):
-        raise Http404  # This is not a library
-    user_perms = get_user_permissions(request.user, library_key)
-    if not user_perms & STUDIO_VIEW_USERS:
-        raise PermissionDenied()
-    library = modulestore().get_library(library_key)
-    if library is None:
-        raise Http404
-
-    # Segment all the users explicitly associated with this library, ensuring each user only has one role listed:
-    instructors = set(CourseInstructorRole(library_key).users_with_role())
-    staff = set(CourseStaffRole(library_key).users_with_role()) - instructors
-    users = set(LibraryUserRole(library_key).users_with_role()) - instructors - staff
-
-    formatted_users = []
-    for user in instructors:
-        formatted_users.append(user_with_role(user, 'instructor'))
-    for user in staff:
-        formatted_users.append(user_with_role(user, 'staff'))
-    for user in users:
-        formatted_users.append(user_with_role(user, 'library_user'))
-
-    return render_to_response('manage_users_lib.html', {
-        'context_library': library,
-        'users': formatted_users,
-        'allow_actions': bool(user_perms & STUDIO_EDIT_ROLES),
-        'library_key': str(library_key),
-        'lib_users_url': reverse_library_url('manage_library_users', library_key_string),
-        'show_children_previews': library.show_children_previews
     })

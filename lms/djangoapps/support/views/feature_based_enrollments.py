@@ -2,12 +2,10 @@
 Support tool for viewing course duration information
 """
 
-from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
 from django.utils.decorators import method_decorator
 from django.views.generic import View
-from rest_framework.authentication import SessionAuthentication
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import IsAuthenticated
 
 from common.djangoapps.edxmako.shortcuts import render_to_response
 from common.djangoapps.util.json_request import JsonResponse
@@ -43,9 +41,6 @@ class FeatureBasedEnrollmentSupportAPIView(GenericAPIView):
     Support-only API View for getting feature based enrollment configuration details
     for a course.
     """
-    authentication_classes = (
-        JwtAuthentication, SessionAuthentication
-    )
     permission_classes = (IsAuthenticated,)
 
     @method_decorator(require_support_permission)

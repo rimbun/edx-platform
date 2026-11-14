@@ -11,7 +11,7 @@ from pytz import utc
 
 from common.djangoapps.student.roles import CourseCcxCoachRole
 from common.djangoapps.student.tests.factories import AdminFactory
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
 from xmodule.modulestore.tests.factories import CourseFactory, check_mongo_calls
 
 from ..overrides import override_field_for_ccx
@@ -22,9 +22,6 @@ from .factories import CcxFactory
 class TestCCX(ModuleStoreTestCase):
     """Unit tests for the CustomCourseForEdX model
     """
-
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     def setUp(self):
         """common setup for all tests"""
         super().setUp()
@@ -46,13 +43,13 @@ class TestCCX(ModuleStoreTestCase):
 
     def test_ccx_course_caching(self):
         """verify that caching the propery works to limit queries"""
-        with check_mongo_calls(3):
+        with check_mongo_calls(2):
             # these statements are used entirely to demonstrate the
             # instance-level caching of these values on CCX objects. The
             # check_mongo_calls context is the point here.
-            self.ccx.course  # pylint: disable=pointless-statement
+            self.ccx.course  # pylint: disable=pointless-statement  # noqa: B018
         with check_mongo_calls(0):
-            self.ccx.course  # pylint: disable=pointless-statement
+            self.ccx.course  # pylint: disable=pointless-statement  # noqa: B018
 
     def test_ccx_start_is_correct(self):
         """verify that the start datetime for a ccx is correctly retrieved
@@ -72,13 +69,13 @@ class TestCCX(ModuleStoreTestCase):
         """verify that caching the start property works to limit queries"""
         now = datetime.now(utc)
         self.set_ccx_override('start', now)
-        with check_mongo_calls(3):
+        with check_mongo_calls(2):
             # these statements are used entirely to demonstrate the
             # instance-level caching of these values on CCX objects. The
             # check_mongo_calls context is the point here.
-            self.ccx.start  # pylint: disable=pointless-statement
+            self.ccx.start  # pylint: disable=pointless-statement  # noqa: B018
         with check_mongo_calls(0):
-            self.ccx.start  # pylint: disable=pointless-statement
+            self.ccx.start  # pylint: disable=pointless-statement  # noqa: B018
 
     def test_ccx_due_without_override(self):
         """verify that due returns None when the field has not been set"""
@@ -97,13 +94,13 @@ class TestCCX(ModuleStoreTestCase):
         """verify that caching the due property works to limit queries"""
         expected = datetime.now(utc)
         self.set_ccx_override('due', expected)
-        with check_mongo_calls(3):
+        with check_mongo_calls(2):
             # these statements are used entirely to demonstrate the
             # instance-level caching of these values on CCX objects. The
             # check_mongo_calls context is the point here.
-            self.ccx.due  # pylint: disable=pointless-statement
+            self.ccx.due  # pylint: disable=pointless-statement  # noqa: B018
         with check_mongo_calls(0):
-            self.ccx.due  # pylint: disable=pointless-statement
+            self.ccx.due  # pylint: disable=pointless-statement  # noqa: B018
 
     def test_ccx_has_started(self):
         """verify that a ccx marked as starting yesterday has started"""

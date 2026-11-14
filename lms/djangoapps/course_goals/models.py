@@ -2,31 +2,28 @@
 Course Goals Models
 """
 
-import uuid
 import logging
-import pytz
+import uuid
 from datetime import datetime, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import models
-from django.utils.translation import ugettext_lazy as _
 from edx_django_utils.cache import TieredCache
 from model_utils import Choices
 from model_utils.models import TimeStampedModel
 from opaque_keys.edx.django.models import CourseKeyField
 from simple_history.models import HistoricalRecords
 
+from lms.djangoapps.courseware.context_processor import get_user_timezone_or_last_seen_timezone_or_utc
 from lms.djangoapps.courseware.masquerade import is_masquerading
-from lms.djangoapps.course_goals.toggles import COURSE_GOALS_NUMBER_OF_DAYS_GOALS
-from openedx.core.djangoapps.user_api.preferences.api import get_user_preferences
 from openedx.core.lib.mobile_utils import is_request_from_mobile_app
+from openedx.features.course_experience import ENABLE_COURSE_GOALS
 
-# Each goal is represented by a goal key and a string description.
-GOAL_KEY_CHOICES = Choices(
-    ('certify', _('Earn a certificate')),
-    ('complete', _('Complete the course')),
-    ('explore', _('Explore the course')),
-    ('unsure', _('Not sure yet')),
+_GOAL_KEY_CHOICES = Choices(
+    ('certify', 'Earn a certificate'),
+    ('complete', 'Complete the course'),
+    ('explore', 'Explore the course'),
+    ('unsure', 'Not sure yet'),
 )
 
 User = get_user_model()
@@ -43,7 +40,7 @@ class CourseGoal(models.Model):
         app_label = 'course_goals'
         unique_together = ('user', 'course_key')
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)  # noqa: DJ012
     course_key = CourseKeyField(max_length=255, db_index=True)
     # The goal a user has set for the number of days they want to learn per week
     days_per_week = models.PositiveIntegerField(default=0)
@@ -58,11 +55,13 @@ class CourseGoal(models.Model):
     unsubscribe_token = models.UUIDField(null=True, blank=True, unique=True, editable=False, default=uuid.uuid4,
                                          help_text='Used to validate unsubscribe requests without requiring a login')
 
-    goal_key = models.CharField(max_length=100, choices=GOAL_KEY_CHOICES, default=GOAL_KEY_CHOICES.unsure)
+    # Deprecated and unused - replaced by days_per_week and its subscription-based approach to goals
+    goal_key = models.CharField(max_length=100, choices=_GOAL_KEY_CHOICES, default=_GOAL_KEY_CHOICES.unsure)
+
     history = HistoricalRecords()
 
     def __str__(self):
-        return 'CourseGoal: {user} set goal to {goal} days per week for course {course}'.format(
+        return 'CourseGoal: {user} set goal to {goal} days per week for course {course}'.format(  # noqa: UP032
             user=self.user.username,
             goal=self.days_per_week,
             course=self.course_key,
@@ -80,17 +79,20 @@ class CourseGoalReminderStatus(TimeStampedModel):
     Tracks whether we've sent a reminder about a particular goal this week.
 
     See the management command goal_reminder_email for more detail about how this is used.
+
+    .. no_pii:
     """
     class Meta:
         verbose_name_plural = "Course goal reminder statuses"
 
     goal = models.OneToOneField(CourseGoal, on_delete=models.CASCADE, related_name='reminder_status')
+    # pylint: disable-next=pii-invalid-no-pii-annotation  # field does not store user PII data, safe under OEP-30
     email_reminder_sent = models.BooleanField(
         default=False, help_text='Tracks if the email reminder to complete the Course Goal has been sent this week.'
     )
 
 
-class UserActivity(models.Model):
+class UserActivity(models.Model):  # noqa: DJ008
     """
     Tracks the date a user performs an activity in a course for goal purposes.
     To be used in conjunction with the CourseGoal model to establish if a learner is hitting
@@ -106,7 +108,7 @@ class UserActivity(models.Model):
         indexes = [models.Index(fields=['user', 'course_key'], name='user_course_index')]
         verbose_name_plural = 'User activities'
 
-    id = models.BigAutoField(primary_key=True)
+    id = models.BigAutoField(primary_key=True)  # noqa: DJ012
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     course_key = CourseKeyField(max_length=255)
     date = models.DateField()
@@ -127,7 +129,7 @@ class UserActivity(models.Model):
         The return value is the id of the object that was created, or retrieved.
         A return value of None signifies that a user activity record was not stored or retrieved
         '''
-        if not COURSE_GOALS_NUMBER_OF_DAYS_GOALS.is_enabled(course_key):
+        if not ENABLE_COURSE_GOALS.is_enabled(course_key):
             return None
 
         if not (user and user.id) or not course_key:
@@ -139,22 +141,14 @@ class UserActivity(models.Model):
         if is_masquerading(user, course_key):
             return None
 
-        user_preferences = get_user_preferences(user)
-        timezone = pytz.timezone(user_preferences.get('time_zone', 'UTC'))
+        timezone = get_user_timezone_or_last_seen_timezone_or_utc(user)
         now = datetime.now(timezone)
         date = now.date()
 
-        cache_key = 'goals_user_activity_{}_{}_{}'.format(str(user.id), str(course_key), str(date))
+        cache_key = 'goals_user_activity_{}_{}_{}'.format(str(user.id), str(course_key), str(date))  # noqa: UP032
 
         cached_value = TieredCache.get_cached_response(cache_key)
         if cached_value.is_found:
-            # Temporary debugging log for testing mobile app connection
-            if request:
-                log.info(
-                    'Retrieved cached value with request {} for user and course combination {} {}'.format(
-                        str(request.build_absolute_uri()), str(user.id), str(course_key)
-                    )
-                )
             return cached_value.value, False
 
         activity_object, __ = cls.objects.get_or_create(user=user, course_key=course_key, date=date)
@@ -169,7 +163,7 @@ class UserActivity(models.Model):
         # Temporary debugging log for testing mobile app connection
         if request:
             log.info(
-                'Set cached value with request {} for user and course combination {} {}'.format(
+                'Set cached value with request {} for user and course combination {} {}'.format(  # noqa: UP032
                     str(request.build_absolute_uri()), str(user.id), str(course_key)
                 )
             )

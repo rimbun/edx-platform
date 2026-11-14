@@ -2,26 +2,25 @@
 Tests for Django management commands
 """
 
-
+import datetime
 import json
 from io import StringIO
 
 import factory
+import pytz
 from django.conf import settings
 from django.core.management import call_command
 
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import (
-    TEST_DATA_MONGO_MODULESTORE,
-    TEST_DATA_SPLIT_MODULESTORE,
-    SharedModuleStoreTestCase
-)
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.modulestore.xml_importer import import_course_from_xml
 
 DATA_DIR = settings.COMMON_TEST_DATA_ROOT
 XML_COURSE_DIRS = ['simple']
+TEST_COURSE_START = datetime.datetime(2012, 7, 1, tzinfo=pytz.UTC)
+TEST_COURSE_END = datetime.datetime(2012, 12, 31, tzinfo=pytz.UTC)
 
 
 class CommandsTestBase(SharedModuleStoreTestCase):
@@ -49,17 +48,19 @@ class CommandsTestBase(SharedModuleStoreTestCase):
         """
         store = modulestore()
 
-        unique_org = factory.Sequence(lambda n: 'edX.%d' % n)
+        unique_org = factory.Sequence(lambda n: 'edX.%d' % n)  # noqa: UP031
         cls.course = CourseFactory.create(
             emit_signals=True,
             org=unique_org,
             course='simple',
             run="run",
             display_name='2012_Fáĺĺ',
-            modulestore=store
+            modulestore=store,
+            start=TEST_COURSE_START,
+            end=TEST_COURSE_END,
         )
 
-        cls.discussion = ItemFactory.create(
+        cls.discussion = BlockFactory.create(
             category='discussion', parent_location=cls.course.location
         )
 
@@ -81,9 +82,28 @@ class CommandsTestBase(SharedModuleStoreTestCase):
         out.seek(0)
         return out.read()
 
+    def test_dump_course_ids_with_filter(self):
+        """
+        Test that `dump_course_ids_with_filter` works correctly by
+        only returning courses that have not ended before the provided `end` data.
+
+        `load_courses` method creates two courses first by calling CourseFactory.create
+        which creates a course with end=2012-12-31. Then it creates a second course
+        by calling import_course_from_xml which creates a course with end=None.
+
+        This test makes sure that only the second course is returned when
+        `end`=2013-01-01 is passed to `dump_course_ids_with_filter`.
+        """
+        args = []
+        kwargs = {'end': '2013-01-01'}  # exclude any courses which have ended before 2013-01-01
+        output = self.call_command('dump_course_ids_with_filter', *args, **kwargs)
+        dumped_courses = output.strip().split('\n')
+        dumped_ids = set(dumped_courses)
+        assert {str(self.test_course_key)} == dumped_ids
+
     def test_dump_course_ids(self):
         output = self.call_command('dump_course_ids')
-        dumped_courses = output.strip().split('\n')
+        dumped_courses = (output.strip() or []) and output.strip().split('\n')
         course_ids = {str(course_id) for course_id in self.loaded_courses}
         dumped_ids = set(dumped_courses)
         assert course_ids == dumped_ids
@@ -123,14 +143,14 @@ class CommandsTestBase(SharedModuleStoreTestCase):
         assert len(dump[parent_id]['children']) == 3
 
         child_id = dump[parent_id]['children'][1]
-        assert dump[child_id]['category'] == 'videosequence'
+        assert dump[child_id]['category'] == 'sequential'
         assert len(dump[child_id]['children']) == 2
 
         video_id = str(test_course_key.make_usage_key('video', 'Welcome'))
         assert dump[video_id]['category'] == 'video'
         video_metadata = dump[video_id]['metadata']
         video_metadata.pop('edx_video_id', None)
-        self.assertCountEqual(
+        self.assertCountEqual(  # noqa: PT009
             list(video_metadata.keys()),
             ['youtube_id_0_75', 'youtube_id_1_0', 'youtube_id_1_25', 'youtube_id_1_5']
         )
@@ -195,17 +215,8 @@ class CommandsTestBase(SharedModuleStoreTestCase):
         assert_in('edX-simple-2012_Fall', names)
         assert_in(f'edX-simple-2012_Fall/policies/{self.url_name}/policy.json', names)
         assert_in('edX-simple-2012_Fall/html/toylab.html', names)
-        assert_in('edX-simple-2012_Fall/videosequence/A_simple_sequence.xml', names)
+        assert_in('edX-simple-2012_Fall/sequential/A_simple_sequence.xml', names)
         assert_in('edX-simple-2012_Fall/sequential/Lecture_2.xml', names)
-
-
-class CommandsMongoTestCase(CommandsTestBase):
-    """
-    Test case for management commands using the mixed mongo modulestore with old mongo as the default.
-
-    """
-    MODULESTORE = TEST_DATA_MONGO_MODULESTORE
-    __test__ = True
 
 
 class CommandSplitMongoTestCase(CommandsTestBase):

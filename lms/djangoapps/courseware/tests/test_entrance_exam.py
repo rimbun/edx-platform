@@ -3,44 +3,43 @@ Tests use cases related to LMS Entrance Exam behavior, such as gated content acc
 """
 
 
-from unittest.mock import Mock, patch
 from crum import set_current_request
+from django.test import override_settings
 from django.urls import reverse
 from milestones.tests.utils import MilestonesTestCaseMixin
+from xblock_problem.capa.testing.response_xml_factory import MultipleChoiceResponseXMLFactory
 
-from capa.tests.response_xml_factory import MultipleChoiceResponseXMLFactory
-from edx_toggles.toggles.testutils import override_waffle_flag  # lint-amnesty, pylint: disable=wrong-import-order
-from lms.djangoapps.courseware.entrance_exams import (
-    course_has_entrance_exam,
-    get_entrance_exam_content,
-    user_can_skip_entrance_exam,
-    user_has_passed_entrance_exam
-)
-from lms.djangoapps.courseware.model_data import FieldDataCache
-from lms.djangoapps.courseware.module_render import get_module, handle_xblock_callback, toc_for_course
-from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
-from openedx.core.djangolib.testing.utils import get_mock_request
-from openedx.features.course_experience import DISABLE_COURSE_OUTLINE_PAGE_FLAG, DISABLE_UNIFIED_COURSE_TAB_FLAG
 from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import AnonymousUserFactory, CourseEnrollmentFactory
-from common.djangoapps.student.tests.factories import InstructorFactory
-from common.djangoapps.student.tests.factories import RequestFactoryNoCsrf
-from common.djangoapps.student.tests.factories import StaffFactory
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import (
+    AnonymousUserFactory,
+    InstructorFactory,
+    RequestFactoryNoCsrf,
+    StaffFactory,
+    UserFactory,
+)
 from common.djangoapps.util.milestones_helpers import (
     add_course_content_milestone,
     add_course_milestone,
     add_milestone,
     generate_milestone_namespace,
     get_milestone_relationship_types,
-    get_namespace_choices
+    get_namespace_choices,
 )
-from xmodule.modulestore.django import modulestore
+from lms.djangoapps.courseware.block_render import get_block, handle_xblock_callback, toc_for_course
+from lms.djangoapps.courseware.entrance_exams import (
+    course_has_entrance_exam,
+    get_entrance_exam_content,
+    user_can_skip_entrance_exam,
+    user_has_passed_entrance_exam,
+)
+from lms.djangoapps.courseware.model_data import FieldDataCache
+from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
+from openedx.core.djangolib.testing.utils import get_mock_request
 from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
-@patch.dict('django.conf.settings.FEATURES', {'ENTRANCE_EXAMS': True})
+@override_settings(ENTRANCE_EXAMS=True)
 class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, MilestonesTestCaseMixin):
     """
     Check that content is properly gated.
@@ -48,8 +47,7 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
     Creates a test course from scratch. The tests below are designed to execute
     workflows regardless of the feature flag settings.
     """
-
-    @patch.dict('django.conf.settings.FEATURES', {'ENTRANCE_EXAMS': True})
+    @override_settings(ENTRANCE_EXAMS=True)
     def setUp(self):
         """
         Test case scaffolding
@@ -60,82 +58,75 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
                 'entrance_exam_enabled': True,
             }
         )
-        with self.store.bulk_operations(self.course.id):
-            self.chapter = ItemFactory.create(
-                parent=self.course,
-                display_name='Overview'
-            )
-            self.welcome = ItemFactory.create(
-                parent=self.chapter,
-                display_name='Welcome'
-            )
-            ItemFactory.create(
-                parent=self.course,
-                category='chapter',
-                display_name="Week 1"
-            )
-            self.chapter_subsection = ItemFactory.create(
-                parent=self.chapter,
-                category='sequential',
-                display_name="Lesson 1"
-            )
-            chapter_vertical = ItemFactory.create(
-                parent=self.chapter_subsection,
-                category='vertical',
-                display_name='Lesson 1 Vertical - Unit 1'
-            )
-            ItemFactory.create(
-                parent=chapter_vertical,
-                category="problem",
-                display_name="Problem - Unit 1 Problem 1"
-            )
-            ItemFactory.create(
-                parent=chapter_vertical,
-                category="problem",
-                display_name="Problem - Unit 1 Problem 2"
-            )
+        self.chapter = BlockFactory.create(
+            parent=self.course,
+            display_name='Overview'
+        )
+        self.welcome = BlockFactory.create(
+            parent=self.chapter,
+            display_name='Welcome'
+        )
+        BlockFactory.create(
+            parent=self.course,
+            category='chapter',
+            display_name="Week 1"
+        )
+        self.chapter_subsection = BlockFactory.create(
+            parent=self.chapter,
+            category='sequential',
+            display_name="Lesson 1"
+        )
+        chapter_vertical = BlockFactory.create(
+            parent=self.chapter_subsection,
+            category='vertical',
+            display_name='Lesson 1 Vertical - Unit 1'
+        )
+        BlockFactory.create(
+            parent=chapter_vertical,
+            category="problem",
+            display_name="Problem - Unit 1 Problem 1"
+        )
+        BlockFactory.create(
+            parent=chapter_vertical,
+            category="problem",
+            display_name="Problem - Unit 1 Problem 2"
+        )
 
-            ItemFactory.create(
-                category="instructor",
-                parent=self.course,
-                data="Instructor Tab",
-                display_name="Instructor"
-            )
-            self.entrance_exam = ItemFactory.create(
-                parent=self.course,
-                category="chapter",
-                display_name="Entrance Exam Section - Chapter 1",
-                is_entrance_exam=True,
-                in_entrance_exam=True
-            )
-            self.exam_1 = ItemFactory.create(
-                parent=self.entrance_exam,
-                category='sequential',
-                display_name="Exam Sequential - Subsection 1",
-                graded=True,
-                in_entrance_exam=True
-            )
-            subsection = ItemFactory.create(
-                parent=self.exam_1,
-                category='vertical',
-                display_name='Exam Vertical - Unit 1'
-            )
-            problem_xml = MultipleChoiceResponseXMLFactory().build_xml(
-                question_text='The correct answer is Choice 3',
-                choices=[False, False, True, False],
-                choice_names=['choice_0', 'choice_1', 'choice_2', 'choice_3']
-            )
-            self.problem_1 = ItemFactory.create(
-                parent=subsection,
-                category="problem",
-                display_name="Exam Problem - Problem 1",
-                data=problem_xml
-            )
-            self.problem_2 = ItemFactory.create(
-                parent=subsection,
-                category="problem",
-                display_name="Exam Problem - Problem 2"
-            )
+        self.entrance_exam = BlockFactory.create(
+            parent=self.course,
+            category="chapter",
+            display_name="Entrance Exam Section - Chapter 1",
+            is_entrance_exam=True,
+            in_entrance_exam=True
+        )
+        self.exam_1 = BlockFactory.create(
+            parent=self.entrance_exam,
+            category='sequential',
+            display_name="Exam Sequential - Subsection 1",
+            graded=True,
+            in_entrance_exam=True
+        )
+        subsection = BlockFactory.create(
+            parent=self.exam_1,
+            category='vertical',
+            display_name='Exam Vertical - Unit 1'
+        )
+        problem_xml = MultipleChoiceResponseXMLFactory().build_xml(
+            question_text='The correct answer is Choice 3',
+            choices=[False, False, True, False],
+            choice_names=['choice_0', 'choice_1', 'choice_2', 'choice_3']
+        )
+        self.problem_1 = BlockFactory.create(
+            parent=subsection,
+            category="problem",
+            display_name="Exam Problem - Problem 1",
+            data=problem_xml
+        )
+        self.problem_2 = BlockFactory.create(
+            parent=subsection,
+            category="problem",
+            display_name="Exam Problem - Problem 2"
+        )
 
         add_entrance_exam_milestone(self.course, self.entrance_exam)
 
@@ -146,9 +137,9 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
         self.anonymous_user = AnonymousUserFactory()
         self.addCleanup(set_current_request, None)
         self.request = get_mock_request(UserFactory())
-        modulestore().update_item(self.course, self.request.user.id)
+        self.course = self.update_course(self.course, self.request.user.id)
 
-        self.client.login(username=self.request.user.username, password="test")
+        self.client.login(username=self.request.user.username, password=self.TEST_PASSWORD)
         CourseEnrollment.enroll(self.request.user, self.course.id)
 
         self.expected_locked_toc = (
@@ -205,13 +196,6 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
                     'display_id': 'week-1'
                 },
                 {
-                    'active': False,
-                    'sections': [],
-                    'url_name': 'Instructor',
-                    'display_name': 'Instructor',
-                    'display_id': 'instructor'
-                },
-                {
                     'active': True,
                     'sections': [
                         {
@@ -230,54 +214,6 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
             ]
         )
 
-    def test_view_redirect_if_entrance_exam_required(self):
-        """
-        Unit Test: if entrance exam is required. Should return a redirect.
-        """
-        url = reverse('courseware', kwargs={'course_id': str(self.course.id)})
-        expected_url = reverse('courseware_section',
-                               kwargs={
-                                   'course_id': str(self.course.id),
-                                   'chapter': self.entrance_exam.location.block_id,
-                                   'section': self.exam_1.location.block_id
-                               })
-        resp = self.client.get(url)
-        self.assertRedirects(resp, expected_url, status_code=302, target_status_code=200)
-
-    @patch.dict('django.conf.settings.FEATURES', {'ENTRANCE_EXAMS': False})
-    def test_entrance_exam_content_absence(self):
-        """
-        Unit Test: If entrance exam is not enabled then page should be redirected with chapter contents.
-        """
-        url = reverse('courseware', kwargs={'course_id': str(self.course.id)})
-        expected_url = reverse('courseware_section',
-                               kwargs={
-                                   'course_id': str(self.course.id),
-                                   'chapter': self.chapter.location.block_id,
-                                   'section': self.welcome.location.block_id
-                               })
-        resp = self.client.get(url)
-        self.assertRedirects(resp, expected_url, status_code=302, target_status_code=200)
-        resp = self.client.get(expected_url)
-        self.assertNotContains(resp, 'Exam Vertical - Unit 1')
-
-    def test_entrance_exam_content_presence(self):
-        """
-        Unit Test: If entrance exam is enabled then its content e.g. problems should be loaded and redirection will
-        occur with entrance exam contents.
-        """
-        url = reverse('courseware', kwargs={'course_id': str(self.course.id)})
-        expected_url = reverse('courseware_section',
-                               kwargs={
-                                   'course_id': str(self.course.id),
-                                   'chapter': self.entrance_exam.location.block_id,
-                                   'section': self.exam_1.location.block_id
-                               })
-        resp = self.client.get(url)
-        self.assertRedirects(resp, expected_url, status_code=302, target_status_code=200)
-        resp = self.client.get(expected_url)
-        self.assertContains(resp, 'Exam Vertical - Unit 1')
-
     def test_get_entrance_exam_content(self):
         """
         test get entrance exam content method
@@ -292,95 +228,6 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
         exam_chapter = get_entrance_exam_content(self.request.user, self.course)
         assert exam_chapter is None
         assert user_has_passed_entrance_exam(self.request.user, self.course)
-
-    def test_entrance_exam_requirement_message(self):
-        """
-        Unit Test: entrance exam requirement message should be present in response
-        """
-        url = reverse(
-            'courseware_section',
-            kwargs={
-                'course_id': str(self.course.id),
-                'chapter': self.entrance_exam.location.block_id,
-                'section': self.exam_1.location.block_id,
-            }
-        )
-        resp = self.client.get(url)
-        self.assertContains(resp, 'To access course materials, you must score')
-
-    def test_entrance_exam_requirement_message_with_correct_percentage(self):
-        """
-        Unit Test: entrance exam requirement message should be present in response
-        and percentage of required score should be rounded as expected
-        """
-        minimum_score_pct = 29
-        self.course.entrance_exam_minimum_score_pct = float(minimum_score_pct) / 100
-        modulestore().update_item(self.course, self.request.user.id)
-
-        # answer the problem so it results in only 20% correct.
-        answer_entrance_exam_problem(self.course, self.request, self.problem_1, value=1, max_value=5)
-
-        url = reverse(
-            'courseware_section',
-            kwargs={
-                'course_id': str(self.course.id),
-                'chapter': self.entrance_exam.location.block_id,
-                'section': self.exam_1.location.block_id
-            }
-        )
-        resp = self.client.get(url)
-        self.assertContains(
-            resp,
-            f'To access course materials, you must score {minimum_score_pct}% or higher',
-        )
-        assert 'Your current score is 20%.' in resp.content.decode(resp.charset)
-
-    def test_entrance_exam_requirement_message_hidden(self):
-        """
-        Unit Test: entrance exam message should not be present outside the context of entrance exam subsection.
-        """
-        # Login as staff to avoid redirect to entrance exam
-        self.client.logout()
-        staff_user = StaffFactory(course_key=self.course.id)
-        self.client.login(username=staff_user.username, password='test')
-        CourseEnrollment.enroll(staff_user, self.course.id)
-
-        url = reverse(
-            'courseware_section',
-            kwargs={
-                'course_id': str(self.course.id),
-                'chapter': self.chapter.location.block_id,
-                'section': self.chapter_subsection.location.block_id
-            }
-        )
-        resp = self.client.get(url)
-        assert resp.status_code == 200
-        self.assertNotContains(resp, 'To access course materials, you must score')
-        self.assertNotContains(resp, 'You have passed the entrance exam.')
-
-    # TODO: LEARNER-71: Do we need to adjust or remove this test?
-    @override_waffle_flag(DISABLE_COURSE_OUTLINE_PAGE_FLAG, active=True)
-    def test_entrance_exam_passed_message_and_course_content(self):
-        """
-        Unit Test: exam passing message and rest of the course section should be present
-        when user achieves the entrance exam milestone/pass the exam.
-        """
-        url = reverse(
-            'courseware_section',
-            kwargs={
-                'course_id': str(self.course.id),
-                'chapter': self.entrance_exam.location.block_id,
-                'section': self.exam_1.location.block_id
-            }
-        )
-
-        answer_entrance_exam_problem(self.course, self.request, self.problem_1)
-        answer_entrance_exam_problem(self.course, self.request, self.problem_2)
-
-        resp = self.client.get(url)
-        self.assertNotContains(resp, 'To access course materials, you must score')
-        self.assertContains(resp, 'Your score is 100%. You have passed the entrance exam.')
-        self.assertContains(resp, 'Lesson 1')
 
     def test_entrance_exam_gating(self):
         """
@@ -413,7 +260,7 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
 
         # hit skip entrance exam api in instructor app
         instructor = InstructorFactory(course_key=self.course.id)
-        self.client.login(username=instructor.username, password='test')
+        self.client.login(username=instructor.username, password=self.TEST_PASSWORD)
         url = reverse('mark_student_can_skip_entrance_exam', kwargs={'course_id': str(self.course.id)})
         response = self.client.post(url, {
             'unique_student_identifier': self.request.user.email,
@@ -433,78 +280,13 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
         self.client.logout()
         staff_user = StaffFactory(course_key=self.course.id)
         staff_user.is_staff = True
-        self.client.login(username=staff_user.username, password='test')
+        self.client.login(username=staff_user.username, password=self.TEST_PASSWORD)
 
         # assert staff has access to all toc
         self.request.user = staff_user
         unlocked_toc = self._return_table_of_contents()
         for toc_section in self.expected_unlocked_toc:
             assert toc_section in unlocked_toc
-
-    def test_courseware_page_access_without_passing_entrance_exam(self):
-        """
-        Test courseware access page without passing entrance exam
-        """
-        url = reverse(
-            'courseware_chapter',
-            kwargs={'course_id': str(self.course.id), 'chapter': self.chapter.url_name}
-        )
-        response = self.client.get(url)
-        expected_url = reverse('courseware_section',
-                               kwargs={
-                                   'course_id': str(self.course.id),
-                                   'chapter': self.entrance_exam.location.block_id,
-                                   'section': self.exam_1.location.block_id
-                               })
-        self.assertRedirects(response, expected_url, status_code=302, target_status_code=200)
-
-    @override_waffle_flag(DISABLE_UNIFIED_COURSE_TAB_FLAG, active=True)
-    def test_courseinfo_page_access_without_passing_entrance_exam(self):
-        """
-        Test courseware access page without passing entrance exam
-        """
-        url = reverse('info', args=[str(self.course.id)])
-        response = self.client.get(url)
-        redirect_url = reverse('courseware', args=[str(self.course.id)])
-        self.assertRedirects(response, redirect_url, status_code=302, target_status_code=302)
-        response = self.client.get(redirect_url)
-        exam_url = response.get('Location')
-        self.assertRedirects(response, exam_url)
-
-    @patch('lms.djangoapps.courseware.entrance_exams.get_entrance_exam_content', Mock(return_value=None))
-    def test_courseware_page_access_after_passing_entrance_exam(self):
-        """
-        Test courseware access page after passing entrance exam
-        """
-        self._assert_chapter_loaded(self.course, self.chapter)
-
-    @patch('common.djangoapps.util.milestones_helpers.get_required_content', Mock(return_value=['a value']))
-    def test_courseware_page_access_with_staff_user_without_passing_entrance_exam(self):
-        """
-        Test courseware access page without passing entrance exam but with staff user
-        """
-        self.logout()
-        staff_user = StaffFactory.create(course_key=self.course.id)
-        self.login(staff_user.email, 'test')
-        CourseEnrollmentFactory(user=staff_user, course_id=self.course.id)
-        self._assert_chapter_loaded(self.course, self.chapter)
-
-    def test_courseware_page_access_with_staff_user_after_passing_entrance_exam(self):
-        """
-        Test courseware access page after passing entrance exam but with staff user
-        """
-        self.logout()
-        staff_user = StaffFactory.create(course_key=self.course.id)
-        self.login(staff_user.email, 'test')
-        CourseEnrollmentFactory(user=staff_user, course_id=self.course.id)
-        self._assert_chapter_loaded(self.course, self.chapter)
-
-    @patch.dict("django.conf.settings.FEATURES", {'ENTRANCE_EXAMS': False})
-    def test_courseware_page_access_when_entrance_exams_disabled(self):
-        """
-        Test courseware page access when ENTRANCE_EXAMS feature is disabled
-        """
-        self._assert_chapter_loaded(self.course, self.chapter)
 
     def test_can_skip_entrance_exam_with_anonymous_user(self):
         """
@@ -532,7 +314,7 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
         )
         assert user_has_passed_entrance_exam(self.request.user, course)
 
-    @patch.dict("django.conf.settings.FEATURES", {'ENABLE_MASQUERADE': False})
+    @override_settings(ENABLE_MASQUERADE=False)
     def test_entrance_exam_xblock_response(self):
         """
         Tests entrance exam xblock has `entrance_exam_passed` key in json response.
@@ -554,17 +336,6 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
         assert response.status_code == 200
         self.assertContains(response, 'entrance_exam_passed')
 
-    def _assert_chapter_loaded(self, course, chapter):
-        """
-        Asserts courseware chapter load successfully.
-        """
-        url = reverse(
-            'courseware_chapter',
-            kwargs={'course_id': str(course.id), 'chapter': chapter.url_name}
-        )
-        response = self.client.get(url)
-        assert response.status_code == 200
-
     def _return_table_of_contents(self):
         """
         Returns table of content for the entrance exam specific to this test
@@ -572,7 +343,7 @@ class EntranceExamTestCases(LoginEnrollmentTestCase, ModuleStoreTestCase, Milest
         Returns the table of contents for course self.course, for chapter
         self.entrance_exam, and for section self.exam1
         """
-        self.field_data_cache = FieldDataCache.cache_for_descriptor_descendents(  # pylint: disable=attribute-defined-outside-init
+        self.field_data_cache = FieldDataCache.cache_for_block_descendents(  # pylint: disable=attribute-defined-outside-init
             self.course.id,
             self.request.user,
             self.entrance_exam
@@ -604,19 +375,19 @@ def answer_entrance_exam_problem(course, request, problem, user=None, value=1, m
         user = request.user
 
     grade_dict = {'value': value, 'max_value': max_value, 'user_id': user.id}
-    field_data_cache = FieldDataCache.cache_for_descriptor_descendents(
+    field_data_cache = FieldDataCache.cache_for_block_descendents(
         course.id,
         user,
         course,
         depth=2
     )
-    module = get_module(
+    block = get_block(
         user,
         request,
         problem.scope_ids.usage_id,
         field_data_cache,
     )
-    module.system.publish(problem, 'grade', grade_dict)
+    block.runtime.publish(problem, 'grade', grade_dict)
 
 
 def add_entrance_exam_milestone(course, entrance_exam):

@@ -2,14 +2,15 @@
 
 
 import datetime
-import pytest
+
 import ddt
+import pytest
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 
-from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
 from common.djangoapps.student.models import UserProfile
 from common.djangoapps.student.tests.factories import UserFactory
+from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
 
 
 @ddt.ddt
@@ -107,23 +108,43 @@ class UserProfilePropertiesTest(CacheIsolationTestCase):
         assert cache.get(cache_key) != country
         assert cache.get(cache_key) is None
 
-    def test_phone_number_can_only_contain_digits(self):
-        # validating the profile will fail, because there are letters
-        # in the phone number
-        self.profile.phone_number = 'abc'
-        pytest.raises(ValidationError, self.profile.full_clean)
-        # fail if mixed digits/letters
-        self.profile.phone_number = '1234gb'
-        pytest.raises(ValidationError, self.profile.full_clean)
-        # fail if whitespace
-        self.profile.phone_number = '   123'
-        pytest.raises(ValidationError, self.profile.full_clean)
-        # fail with special characters
-        self.profile.phone_number = '123!@#$%^&*'
-        pytest.raises(ValidationError, self.profile.full_clean)
-        # valid phone number
-        self.profile.phone_number = '123456789'
-        try:
-            self.profile.full_clean()
-        except ValidationError:
-            self.fail("This phone number should  be valid.")
+    def test_valid_phone_numbers(self):
+        """
+        Test that valid phone numbers are accepted.
+
+        Expected behavior:
+            - The phone number '+123456789' should be considered valid.
+            - The phone number '123456789' (without '+') should also be valid.
+
+        This test verifies that valid phone numbers are accepted by the profile model validation.
+        """
+        valid_numbers = ['+123456789', '123456789']
+
+        for number in valid_numbers:
+            self.profile.phone_number = number
+
+            try:
+                self.profile.full_clean()
+            except ValidationError:
+                self.fail("This phone number should be valid.")
+
+    def test_invalid_phone_numbers(self):
+        """
+        Test that invalid phone numbers raise ValidationError.
+
+        Expected behavior:
+            - Phone numbers with letters, mixed digits/letters, whitespace,
+              or special characters should raise a ValidationError.
+
+        This test verifies that invalid phone numbers are rejected by the profile model validation.
+        """
+        invalid_phone_numbers = [
+            'abc',          # Letters in the phone number
+            '1234gb',       # Mixed digits and letters
+            '   123',       # Whitespace
+            '123!@#$%^&*'   # Special characters
+        ]
+
+        for number in invalid_phone_numbers:
+            self.profile.phone_number = number
+            pytest.raises(ValidationError, self.profile.full_clean)

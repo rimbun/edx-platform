@@ -6,20 +6,38 @@ Django models related to course groups functionality.
 import json
 import logging
 
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models.signals import pre_delete
 from django.dispatch import receiver
-
 from opaque_keys.edx.django.models import CourseKeyField
+from openedx_events.learning.data import (  # pylint: disable=wrong-import-order
+    CohortData,
+    CourseData,
+    UserData,
+    UserPersonalData,
+)
+from openedx_events.learning.signals import (
+    COHORT_MEMBERSHIP_CHANGED,  # pylint: disable=wrong-import-order
+)
+from openedx_filters.learning.filters import CohortAssignmentRequested, CohortChangeRequested
 
 from openedx.core.djangolib.model_mixins import DeletableByUserValue
 
-from openedx_events.learning.data import CohortData, CourseData, UserData, UserPersonalData
-from openedx_events.learning.signals import COHORT_MEMBERSHIP_CHANGED
-
 log = logging.getLogger(__name__)
+
+
+class CohortMembershipException(Exception):
+    pass
+
+
+class CohortChangeNotAllowed(CohortMembershipException):
+    pass
+
+
+class CohortAssignmentNotAllowed(CohortMembershipException):
+    pass
 
 
 class CourseUserGroup(models.Model):
@@ -33,7 +51,7 @@ class CourseUserGroup(models.Model):
     class Meta:
         unique_together = (('name', 'course_id'), )
 
-    name = models.CharField(max_length=255,
+    name = models.CharField(max_length=255,  # noqa: DJ012
                             help_text=("What is the name of this group?  "
                                        "Must be unique within a course."))
     users = models.ManyToManyField(User, db_index=True, related_name='course_groups',
@@ -69,11 +87,11 @@ class CourseUserGroup(models.Model):
             name=name
         )
 
-    def __str__(self):
+    def __str__(self):  # noqa: DJ012
         return self.name
 
 
-class CohortMembership(models.Model):
+class CohortMembership(models.Model):  # noqa: DJ008
     """
     Used internally to enforce our particular definition of uniqueness.
 
@@ -86,7 +104,7 @@ class CohortMembership(models.Model):
     class Meta:
         unique_together = (('user', 'course_id'), )
 
-    def clean_fields(self, *args, **kwargs):  # lint-amnesty, pylint: disable=signature-differs
+    def clean_fields(self, *args, **kwargs):  # pylint: disable=signature-differs
         if self.course_id is None:
             self.course_id = self.course_user_group.course_id
         super().clean_fields(*args, **kwargs)
@@ -104,6 +122,13 @@ class CohortMembership(models.Model):
         cohort
         Returns CohortMembership, previous_cohort (if any)
         """
+        try:
+            # .. filter_implemented_name: CohortAssignmentRequested
+            # .. filter_type: org.openedx.learning.cohort.assignment.requested.v1
+            user, cohort = CohortAssignmentRequested.run_filter(user=user, target_cohort=cohort)
+        except CohortAssignmentRequested.PreventCohortAssignment as exc:
+            raise CohortAssignmentNotAllowed(str(exc)) from exc
+
         with transaction.atomic():
             membership, created = cls.objects.select_for_update().get_or_create(
                 user__id=user.id,
@@ -117,11 +142,21 @@ class CohortMembership(models.Model):
                 membership.course_user_group.users.add(user)
                 previous_cohort = None
             elif membership.course_user_group == cohort:
-                raise ValueError("User {user_name} already present in cohort {cohort_name}".format(
+                raise ValueError("User {user_name} already present in cohort {cohort_name}".format(  # noqa: UP032
                     user_name=user.username,
                     cohort_name=cohort.name))
             else:
                 previous_cohort = membership.course_user_group
+
+                try:
+                    # .. filter_implemented_name: CohortChangeRequested
+                    # .. filter_type: org.openedx.learning.cohort.change.requested.v1
+                    membership, cohort = CohortChangeRequested.run_filter(
+                        current_membership=membership, target_cohort=cohort,
+                    )
+                except CohortChangeRequested.PreventCohortChange as exc:
+                    raise CohortChangeNotAllowed(str(exc)) from exc
+
                 previous_cohort.users.remove(user)
 
                 membership.course_user_group = cohort
@@ -129,9 +164,11 @@ class CohortMembership(models.Model):
                 membership.save()
         return membership, previous_cohort
 
-    def save(self, force_insert=False, force_update=False, using=None, update_fields=None):
+    def save(self, *args, **kwargs):  # noqa: DJ012
         self.full_clean(validate_unique=False)
 
+        # .. event_implemented_name: COHORT_MEMBERSHIP_CHANGED
+        # .. event_type: org.openedx.learning.cohort_membership.changed.v1
         COHORT_MEMBERSHIP_CHANGED.send_event(
             cohort=CohortData(
                 user=UserData(
@@ -151,12 +188,7 @@ class CohortMembership(models.Model):
         )
 
         log.info("Saving CohortMembership for user '%s' in '%s'", self.user.id, self.course_id)
-        return super().save(
-            force_insert=force_insert,
-            force_update=force_update,
-            using=using,
-            update_fields=update_fields
-        )
+        return super().save(*args, **kwargs)
 
 
 # Needs to exist outside class definition in order to use 'sender=CohortMembership'
@@ -170,7 +202,7 @@ def remove_user_from_cohort(sender, instance, **kwargs):  # pylint: disable=unus
     instance.course_user_group.save()
 
 
-class CourseUserGroupPartitionGroup(models.Model):
+class CourseUserGroupPartitionGroup(models.Model):  # noqa: DJ008
     """
     Create User Partition Info.
 
@@ -187,7 +219,7 @@ class CourseUserGroupPartitionGroup(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
 
-class CourseCohortsSettings(models.Model):
+class CourseCohortsSettings(models.Model):  # noqa: DJ008
     """
     This model represents cohort settings for courses.
     The only non-deprecated fields are `is_cohorted` and `course_id`.
@@ -203,11 +235,11 @@ class CourseCohortsSettings(models.Model):
         help_text="Which course are these settings associated with?",
     )
 
-    _cohorted_discussions = models.TextField(db_column='cohorted_discussions', null=True, blank=True)  # JSON list
+    _cohorted_discussions = models.TextField(db_column='cohorted_discussions', null=True, blank=True)  # JSON list  # noqa: DJ001  # pylint: disable=line-too-long
 
     # Note that although a default value is specified here for always_cohort_inline_discussions (False),
     # in reality the default value at the time that cohorting is enabled for a course comes from
-    # course_module.always_cohort_inline_discussions (via `migrate_cohort_settings`).
+    # course_block.always_cohort_inline_discussions (via `migrate_cohort_settings`).
     # DEPRECATED-- DO NOT USE: Instead use `CourseDiscussionSettings.always_divide_inline_discussions`
     # via `CourseDiscussionSettings.get` or `CourseDiscussionSettings.update`.
     always_cohort_inline_discussions = models.BooleanField(default=False)
@@ -228,7 +260,7 @@ class CourseCohortsSettings(models.Model):
         self._cohorted_discussions = json.dumps(value)
 
 
-class CourseCohort(models.Model):
+class CourseCohort(models.Model):  # noqa: DJ008
     """
     This model represents cohort related info.
 
@@ -264,7 +296,7 @@ class CourseCohort(models.Model):
         return course_cohort
 
 
-class UnregisteredLearnerCohortAssignments(DeletableByUserValue, models.Model):
+class UnregisteredLearnerCohortAssignments(DeletableByUserValue, models.Model):  # noqa: DJ008
     """
     Tracks the assignment of an unregistered learner to a course's cohort.
 
@@ -276,6 +308,13 @@ class UnregisteredLearnerCohortAssignments(DeletableByUserValue, models.Model):
     class Meta:
         unique_together = (('course_id', 'email'), )
 
-    course_user_group = models.ForeignKey(CourseUserGroup, on_delete=models.CASCADE)
+    course_user_group = models.ForeignKey(CourseUserGroup, on_delete=models.CASCADE)  # noqa: DJ012
     email = models.CharField(blank=True, max_length=255, db_index=True)
     course_id = CourseKeyField(max_length=255)
+
+    @classmethod
+    def redact_before_delete_fields(cls):
+        """
+        Redact email before deleting records for downstream soft-delete systems.
+        """
+        return {'email': 'redacted-before-delete@safe.com'}

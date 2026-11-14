@@ -2,20 +2,29 @@
 Discussion API forms
 """
 import urllib.parse
+
 from django.core.exceptions import ValidationError
+from django.db.models import TextChoices
 from django.forms import BooleanField, CharField, ChoiceField, Form, IntegerField
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
 from opaque_keys.edx.locator import CourseLocator
 
 from lms.djangoapps.courseware.courses import get_course_with_access
+from lms.djangoapps.discussion.rest_api.serializers import TopicOrdering
 from openedx.core.djangoapps.django_comment_common.models import (
     FORUM_ROLE_COMMUNITY_TA,
     FORUM_ROLE_GROUP_MODERATOR,
     FORUM_ROLE_MODERATOR,
-    Role
+    Role,
 )
 from openedx.core.djangoapps.util.forms import ExtendedNullBooleanField, MultiValueField
+
+
+class UserOrdering(TextChoices):
+    BY_ACTIVITY = 'activity'
+    BY_FLAGS = 'flagged'
+    BY_RECENT_ACTIVITY = 'recency'
 
 
 class _PaginationForm(Form):
@@ -50,7 +59,7 @@ class ThreadListGetForm(_PaginationForm):
     count_flagged = ExtendedNullBooleanField(required=False)
     flagged = ExtendedNullBooleanField(required=False)
     view = ChoiceField(
-        choices=[(choice, choice) for choice in ["unread", "unanswered"]],
+        choices=[(choice, choice) for choice in ["unread", "unanswered", "unresponded"]],
         required=False,
     )
     order_by = ChoiceField(
@@ -77,12 +86,12 @@ class ThreadListGetForm(_PaginationForm):
         try:
             return CourseLocator.from_string(value)
         except InvalidKeyError:
-            raise ValidationError(f"'{value}' is not a valid course id")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise ValidationError(f"'{value}' is not a valid course id")  # pylint: disable=raise-missing-from  # noqa: B904
 
     def clean_following(self):
         """Validate following"""
         value = self.cleaned_data["following"]
-        if value is False:  # lint-amnesty, pylint: disable=no-else-raise
+        if value is False:  # pylint: disable=no-else-raise
             raise ValidationError("The value of the 'following' parameter must be true.")
         else:
             return value
@@ -118,8 +127,27 @@ class CommentListGetForm(_PaginationForm):
     A form to validate query parameters in the comment list retrieval endpoint
     """
     thread_id = CharField()
+    flagged = BooleanField(required=False)
     endorsed = ExtendedNullBooleanField(required=False)
     requested_fields = MultiValueField(required=False)
+    merge_question_type_responses = BooleanField(required=False)
+
+
+class UserCommentListGetForm(_PaginationForm):
+    """
+    A form to validate query parameters in the comment list retrieval endpoint
+    """
+    course_id = CharField()
+    flagged = BooleanField(required=False)
+    requested_fields = MultiValueField(required=False)
+
+    def clean_course_id(self):
+        """Validate course_id"""
+        value = self.cleaned_data["course_id"]
+        try:
+            return CourseLocator.from_string(value)
+        except InvalidKeyError:
+            raise ValidationError(f"'{value}' is not a valid course id")  # pylint: disable=raise-missing-from  # noqa: B904
 
 
 class CommentActionsForm(Form):
@@ -153,11 +181,11 @@ class CourseDiscussionSettingsForm(Form):
         course_id = self.cleaned_data['course_id']
         try:
             course_key = CourseKey.from_string(course_id)
-            self.cleaned_data['course'] = get_course_with_access(self.request_user, 'staff', course_key)
+            self.cleaned_data['course'] = get_course_with_access(self.request_user, 'load', course_key)
             self.cleaned_data['course_key'] = course_key
             return course_id
         except InvalidKeyError:
-            raise ValidationError(f"'{str(course_id)}' is not a valid course key")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise ValidationError(f"'{str(course_id)}' is not a valid course key")  # pylint: disable=raise-missing-from  # noqa: B904
 
 
 class CourseDiscussionRolesForm(CourseDiscussionSettingsForm):
@@ -181,8 +209,26 @@ class CourseDiscussionRolesForm(CourseDiscussionSettingsForm):
         if course_id and rolename:
             try:
                 role = Role.objects.get(name=rolename, course_id=course_id)
-            except Role.DoesNotExist:
-                raise ValidationError(f"Role '{rolename}' does not exist")  # lint-amnesty, pylint: disable=raise-missing-from
+            except Role.DoesNotExist as err:
+                raise ValidationError(f"Role '{rolename}' does not exist") from err
 
             self.cleaned_data['role'] = role
             return rolename
+
+
+class TopicListGetForm(Form):
+    """
+    Form for the topics API get query parameters.
+    """
+    topic_id = CharField(required=False)
+    order_by = ChoiceField(choices=TopicOrdering.choices, required=False)
+
+    def clean_topic_id(self):
+        topic_ids = self.cleaned_data.get("topic_id", None)
+        return set(topic_ids.strip(',').split(',')) if topic_ids else None
+
+
+class CourseActivityStatsForm(_PaginationForm):
+    """Form for validating course activity stats API query parameters"""
+    order_by = ChoiceField(choices=UserOrdering.choices, required=False)
+    username = CharField(required=False)

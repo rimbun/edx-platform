@@ -5,7 +5,7 @@ Models.
 
 from config_models.models import ConfigurationModel
 from django.db import models
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 
 class XBlockConfiguration(ConfigurationModel):
@@ -28,7 +28,7 @@ class XBlockConfiguration(ConfigurationModel):
     )
 
     def __str__(self):
-        return (
+        return (  # noqa: UP032
             "XBlockConfiguration(name={}, enabled={}, deprecated={})"
         ).format(self.name, self.enabled, self.deprecated)
 
@@ -76,6 +76,6 @@ class XBlockStudioConfiguration(ConfigurationModel):
         app_label = "xblock_django"
 
     def __str__(self):
-        return (
+        return (  # noqa: UP032
             "XBlockStudioConfiguration(name={}, template={}, enabled={}, support_level={})"
         ).format(self.name, self.template, self.enabled, self.support_level)

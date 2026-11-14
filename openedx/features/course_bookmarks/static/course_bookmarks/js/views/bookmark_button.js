@@ -13,13 +13,19 @@
                     click: 'toggleBookmark'
                 },
 
-                showBannerInterval: 5000,   // time in ms
+                showBannerInterval: 5000, // time in ms
 
                 initialize: function(options) {
                     this.apiUrl = options.apiUrl;
                     this.bookmarkId = options.bookmarkId;
                     this.bookmarked = options.bookmarked;
                     this.usageId = options.usageId;
+                    if (options.bookmarkedText) {
+                        this.bookmarkedText = options.bookmarkedText;
+                    }
+                    if (options.bookmarkText) {
+                        this.bookmarkText = options.bookmarkText;
+                    }
                     this.setBookmarkState(this.bookmarked);
                 },
 

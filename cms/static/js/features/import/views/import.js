@@ -6,7 +6,7 @@ define(
     function($, _, gettext, moment, HtmlUtils) {
         'use strict';
 
-        /** ******** Private properties ****************************************/
+        /** ******** Private properties *************************************** */
 
         var COOKIE_NAME = 'lastimportupload';
 
@@ -28,7 +28,7 @@ define(
         var current = {stage: 0, state: STATE.READY};
         var deferred = null;
         var file = {name: null, url: null};
-        var timeout = {id: null, delay: 1000};
+        var timeout = {id: null, delay: 3000};
         var $dom = {
             stages: $('ol.status-progress').children(),
             successStage: $('.item-progresspoint-success'),
@@ -37,7 +37,7 @@ define(
 
         var CourseImport;
 
-        /** ******** Private functions *****************************************/
+        /** ******** Private functions **************************************** */
 
         /**
          * Destroys any event listener Import might have needed
@@ -61,7 +61,7 @@ define(
          *
          */
         var initEventListeners = function() {
-            $(window).on('beforeunload.import', function() {  // eslint-disable-line consistent-return
+            $(window).on('beforeunload.import', function() { // eslint-disable-line consistent-return
                 if (current.stage < STAGE.UNPACKING) {
                     return gettext('Your import is in progress; navigating away will abort it.');
                 }
@@ -150,13 +150,13 @@ define(
                 _.map($dom.stages, completeStage);
 
                 $dom.successStage
-                        .find('.item-progresspoint-success-date')
-                        .text('(' + date + ' at ' + time + ' UTC)');
+                    .find('.item-progresspoint-success-date')
+                    .text('(' + date + ' at ' + time + ' UTC)');
 
                 break;
 
             case STATE.ERROR:
-                    // Make all stages up to, and including, the error stage 'complete'.
+                // Make all stages up to, and including, the error stage 'complete'.
                 $prev = $dom.stages.slice(0, current.stage + 1);
                 $curr = $dom.stages.eq(current.stage);
                 $next = $dom.stages.slice(current.stage + 1);
@@ -218,7 +218,7 @@ define(
             deferred.resolve();
         };
 
-        /** ******** Public functions ******************************************/
+        /** ******** Public functions ***************************************** */
 
         CourseImport = {
 
@@ -332,7 +332,7 @@ define(
              * @return {JSON} the data of the previous import
              */
             storedImport: function() {
-                return JSON.parse($.cookie(COOKIE_NAME));
+                return JSON.parse($.cookie(COOKIE_NAME) || null);
             }
         };
 

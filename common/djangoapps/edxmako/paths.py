@@ -1,14 +1,11 @@
 """
 Set up lookup paths for mako templates.
 """
-
-
 import contextlib
 import hashlib
+import importlib.resources as resources
 import os
 
-import pkg_resources
-import six
 from django.conf import settings
 from mako.exceptions import TopLevelLookupException
 from mako.lookup import TemplateLookup
@@ -25,7 +22,7 @@ class TopLevelTemplateURI(str):
     to the URI should be looked up straight in the standard edx-platform location instead of trying to locate an
     overridding template in the current theme first.
     """
-    pass  # lint-amnesty, pylint: disable=unnecessary-pass
+    pass  # pylint: disable=unnecessary-pass
 
 
 class DynamicTemplateLookup(TemplateLookup):
@@ -38,7 +35,7 @@ class DynamicTemplateLookup(TemplateLookup):
         self.__original_module_directory = self.template_args['module_directory']
 
     def __repr__(self):
-        return "<{0.__class__.__name__} {0.directories}>".format(self)
+        return "<{0.__class__.__name__} {0.directories}>".format(self)  # noqa: UP032
 
     def add_directory(self, directory, prepend=False):
         """
@@ -54,7 +51,7 @@ class DynamicTemplateLookup(TemplateLookup):
         # and "foo.html.py" in the module directory has no way to know that.
         # Update the module_directory argument to point to a directory
         # specifically for this lookup path.
-        unique = hashlib.md5(six.b(":".join(str(d) for d in self.directories))).hexdigest()
+        unique = hashlib.md5((":".join(str(d) for d in self.directories)).encode()).hexdigest()
         self.template_args['module_directory'] = os.path.join(self.__original_module_directory, unique)
 
         # Also clear the internal caches. Ick.
@@ -125,7 +122,7 @@ def add_lookup(namespace, directory, package=None, prepend=False):
     """
     Adds a new mako template lookup directory to the given namespace.
 
-    If `package` is specified, `pkg_resources` is used to look up the directory
+    If `package` is specified, `importlib.resources` is used to look up the directory
     inside the given package.  Otherwise `directory` is assumed to be a path
     in the filesystem.
     """
@@ -139,7 +136,9 @@ def add_lookup(namespace, directory, package=None, prepend=False):
             encoding_errors='replace',
         )
     if package:
-        directory = pkg_resources.resource_filename(package, directory)
+        with resources.as_file(resources.files(package.rsplit('.', 1)[0]) / directory) as dir_path:
+            directory = str(dir_path)
+
     templates.add_directory(directory, prepend=prepend)
 
 

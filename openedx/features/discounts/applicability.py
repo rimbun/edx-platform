@@ -9,24 +9,40 @@ not other discounts like coupons or enterprise/program offers configured in ecom
 """
 
 
+import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-import pytz
 from crum import get_current_request, impersonate
+from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from edx_toggles.toggles import LegacyWaffleFlag, LegacyWaffleFlagNamespace
+from edx_toggles.toggles import WaffleFlag
+from openedx_filters.learning.filters import DiscountEligibilityCheckRequested
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.entitlements.models import CourseEntitlement
-from lms.djangoapps.courseware.utils import is_mode_upsellable
+from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.track import segment
 from lms.djangoapps.courseware.toggles import COURSEWARE_MFE_MILESTONES_STREAK_DISCOUNT
+from lms.djangoapps.courseware.utils import is_mode_upsellable
 from lms.djangoapps.experiments.models import ExperimentData
 from lms.djangoapps.experiments.stable_bucketing import stable_bucketing_hash_group
 from openedx.features.discounts.models import DiscountPercentageConfig, DiscountRestrictionConfig
-from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.track import segment
 
+log = logging.getLogger(__name__)
+
+# .. toggle_name: discounts.enable_first_purchase_discount_override
+# .. toggle_implementation: WaffleFlag
+# .. toggle_default: False
+# .. toggle_description: Waffle flag to enable the First Purchase Discount to be overridden from
+#   EDXWELCOME/BIENVENIDOAEDX 15% discount to a new code.
+# .. toggle_use_cases: opt_in
+# .. toggle_creation_date: 2024-07-18
+# .. toggle_target_removal_date: None
+# .. toggle_tickets: REV-4097
+# .. toggle_warning: This feature toggle does not have a target removal date.
+FIRST_PURCHASE_DISCOUNT_OVERRIDE_FLAG = WaffleFlag('discounts.enable_first_purchase_discount_override', __name__)
 
 # .. toggle_name: discounts.enable_discounting
 # .. toggle_implementation: WaffleFlag
@@ -36,12 +52,8 @@ from common.djangoapps.track import segment
 # .. toggle_creation_date: 2019-4-16
 # .. toggle_target_removal_date: None
 # .. toggle_tickets: REVEM-282
-# .. toggle_warnings: This temporary feature toggle does not have a target removal date.
-DISCOUNT_APPLICABILITY_FLAG = LegacyWaffleFlag(
-    waffle_namespace=LegacyWaffleFlagNamespace(name='discounts'),
-    flag_name='enable_discounting',
-    module_name=__name__,
-)
+# .. toggle_warning: This temporary feature toggle does not have a target removal date.
+DISCOUNT_APPLICABILITY_FLAG = WaffleFlag('discounts.enable_discounting', __name__)
 
 DISCOUNT_APPLICABILITY_HOLDBACK = 'first_purchase_discount_holdback'
 REV1008_EXPERIMENT_ID = 16
@@ -92,7 +104,7 @@ def can_show_streak_discount_coupon(user, course):
     """
 
     # Feature needs to be enabled
-    if not COURSEWARE_MFE_MILESTONES_STREAK_DISCOUNT.is_enabled():
+    if not COURSEWARE_MFE_MILESTONES_STREAK_DISCOUNT.is_enabled(course.id):
         return False
 
     # Course end date needs to be in the future
@@ -116,10 +128,13 @@ def can_show_streak_discount_coupon(user, course):
     if not is_mode_upsellable(user, enrollment):
         return False
 
-    # We can't import this at Django load time within the openedx tests settings context
-    from openedx.features.enterprise_support.utils import is_enterprise_learner
-    # Don't give discount to enterprise users
-    if is_enterprise_learner(user):
+    # Allow plugins to mark this user as ineligible for the discount.
+    try:
+        DiscountEligibilityCheckRequested.run_filter(
+            user=user, course_key=course.id,
+        )
+    except DiscountEligibilityCheckRequested.DiscountIneligible as exc:
+        log.info("User is ineligible for streak discount: %s", exc.message)
         return False
 
     return True
@@ -170,10 +185,13 @@ def can_receive_discount(user, course, discount_expiration_date=None):
     if CourseEntitlement.objects.filter(user=user).exists():
         return False
 
-    # We can't import this at Django load time within the openedx tests settings context
-    from openedx.features.enterprise_support.utils import is_enterprise_learner
-    # Don't give discount to enterprise users
-    if is_enterprise_learner(user):
+    # Allow plugins to mark this user as ineligible for the discount.
+    try:
+        DiscountEligibilityCheckRequested.run_filter(
+            user=user, course_key=course.id,
+        )
+    except DiscountEligibilityCheckRequested.DiscountIneligible as exc:
+        log.info("User is ineligible for discount: %s", exc.message)
         return False
 
     # Turn holdback on
@@ -188,7 +206,7 @@ def _is_in_holdback_and_bucket(user):
     Return whether the specified user is in the first-purchase-discount holdback group.
     This will also stable bucket the user.
     """
-    if datetime(2020, 8, 1, tzinfo=pytz.UTC) <= datetime.now(tz=pytz.UTC):
+    if datetime(2020, 8, 1, tzinfo=ZoneInfo("UTC")) <= datetime.now(tz=ZoneInfo("UTC")):
         return False
 
     # Holdback is 10%
@@ -219,6 +237,13 @@ def discount_percentage(course):
     """
     Get the configured discount amount.
     """
+    if FIRST_PURCHASE_DISCOUNT_OVERRIDE_FLAG.is_enabled():
+        return getattr(
+            settings,
+            'FIRST_PURCHASE_DISCOUNT_OVERRIDE_PERCENTAGE',
+            15
+        )
+
     configured_percentage = DiscountPercentageConfig.current(course_key=course.id).percentage
     if configured_percentage:
         return configured_percentage

@@ -4,7 +4,9 @@
 // Docs and troubleshooting tips in common/static/common/js/karma.common.conf.js
 
 'use strict';
+
 var path = require('path');
+
 var configModule = require(path.join(__dirname, '../../common/static/common/js/karma.common.conf.js'));
 
 var options = {
@@ -21,7 +23,10 @@ var options = {
     // Make sure the patterns in sourceFiles and specFiles do not match the same file.
     // Otherwise Istanbul which is used for coverage tracking will cause tests to not run.
     sourceFiles: [
-        {pattern: 'cms/js/**/!(*spec|djangojs).js'},
+        // Split cms/js/ patterns to exclude spec/main*.js test entry points (handled by runFiles)
+        {pattern: 'cms/js/!(*spec|djangojs).js'},  // Direct children of cms/js/
+        {pattern: 'cms/js/!(spec)/**/!(*spec|djangojs).js'},  // Subdirs of cms/js/ except spec/
+        {pattern: 'cms/js/spec/**/!(*spec|djangojs|main*).js'},  // spec/ subdir, excluding main* files
         {pattern: 'js/**/!(*spec|djangojs).js'}
     ],
 

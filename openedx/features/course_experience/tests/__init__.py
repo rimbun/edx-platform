@@ -5,11 +5,16 @@ Common test code for course_experience, like shared base classes.
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.courseware.courses import get_course_info_usage_key
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 
 class BaseCourseUpdatesTestCase(SharedModuleStoreTestCase):
@@ -23,9 +28,9 @@ class BaseCourseUpdatesTestCase(SharedModuleStoreTestCase):
                 cls.course = CourseFactory.create()
                 with cls.store.bulk_operations(cls.course.id):
                     # Create a basic course structure
-                    chapter = ItemFactory.create(category='chapter', parent_location=cls.course.location)
-                    section = ItemFactory.create(category='sequential', parent_location=chapter.location)
-                    ItemFactory.create(category='vertical', parent_location=section.location)
+                    chapter = BlockFactory.create(category='chapter', parent_location=cls.course.location)
+                    section = BlockFactory.create(category='sequential', parent_location=chapter.location)
+                    BlockFactory.create(category='vertical', parent_location=section.location)
 
     @classmethod
     def setUpTestData(cls):

@@ -9,16 +9,16 @@ successful completion of a course on EdX
 import datetime
 import logging
 from collections import defaultdict
+from zoneinfo import ZoneInfo
 
-import pytz
 from config_models.models import ConfigurationModel
 from django.conf import settings
 from django.core.cache import cache
 from django.core.validators import RegexValidator
 from django.db import IntegrityError, models, transaction
 from django.dispatch import receiver
-from django.utils.translation import ugettext as _  # lint-amnesty, pylint: disable=unused-import
-from django.utils.translation import ugettext_lazy
+from django.utils.translation import gettext as _  # pylint: disable=unused-import  # noqa: F401
+from django.utils.translation import gettext_lazy
 from edx_django_utils.cache import RequestCache
 from jsonfield.fields import JSONField
 from model_utils.models import TimeStampedModel
@@ -51,7 +51,7 @@ class CreditProvider(TimeStampedModel):
                 code="invalid_provider_id",
             )
         ],
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Unique identifier for this credit provider. "
             "Only alphanumeric characters and hyphens (-) are allowed. "
             "The identifier is case-sensitive."
@@ -60,17 +60,17 @@ class CreditProvider(TimeStampedModel):
 
     active = models.BooleanField(
         default=True,
-        help_text=ugettext_lazy("Whether the credit provider is currently enabled.")
+        help_text=gettext_lazy("Whether the credit provider is currently enabled.")
     )
 
     display_name = models.CharField(
         max_length=255,
-        help_text=ugettext_lazy("Name of the credit provider displayed to users")
+        help_text=gettext_lazy("Name of the credit provider displayed to users")
     )
 
     enable_integration = models.BooleanField(
         default=False,
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "When true, automatically notify the credit provider "
             "when a user requests credit. "
             "In order for this to work, a shared secret key MUST be configured "
@@ -80,7 +80,7 @@ class CreditProvider(TimeStampedModel):
 
     provider_url = models.URLField(
         default="",
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "URL of the credit provider.  If automatic integration is "
             "enabled, this will the the end-point that we POST to "
             "to notify the provider of a credit request.  Otherwise, the "
@@ -91,7 +91,7 @@ class CreditProvider(TimeStampedModel):
 
     provider_status_url = models.URLField(
         default="",
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "URL from the credit provider where the user can check the status "
             "of his or her request for credit.  This is displayed to students "
             "*after* they have requested credit."
@@ -100,33 +100,35 @@ class CreditProvider(TimeStampedModel):
 
     provider_description = models.TextField(
         default="",
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Description for the credit provider displayed to users."
         )
     )
 
-    fulfillment_instructions = models.TextField(
+    fulfillment_instructions = models.TextField(  # noqa: DJ001
         null=True,
         blank=True,
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Plain text or html content for displaying further steps on "
             "receipt page *after* paying for the credit to get credit for a "
             "credit course against a credit provider."
         )
     )
 
+    # pylint: disable-next=pii-invalid-no-pii-annotation  # field does not store user PII data, safe under OEP-30
     eligibility_email_message = models.TextField(
         default="",
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Plain text or html content for displaying custom message inside "
             "credit eligibility email content which is sent when user has met "
             "all credit eligibility requirements."
         )
     )
 
+    # pylint: disable-next=pii-invalid-no-pii-annotation  # field does not store user PII data, safe under OEP-30
     receipt_email_message = models.TextField(
         default="",
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Plain text or html content for displaying custom message inside "
             "credit receipt email content which is sent *after* paying to get "
             "credit for a credit course."
@@ -136,7 +138,7 @@ class CreditProvider(TimeStampedModel):
     thumbnail_url = models.URLField(
         default="",
         max_length=255,
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Thumbnail image url of the credit provider."
         )
     )
@@ -262,7 +264,7 @@ class CreditCourse(models.Model):
         """
         return cls.objects.get(course_key=course_key, enabled=True)
 
-    def __str__(self):
+    def __str__(self):  # noqa: DJ012
         """Unicode representation of the credit course. """
         return str(self.course_key)
 
@@ -424,7 +426,9 @@ class CreditRequirementStatus(TimeStampedModel):
 
     In case (3), no CreditRequirementStatus record will exist for the requirement and user.
 
-    .. no_pii:
+    .. pii: Contains username, anonymized by retire_user().
+    .. pii_types: username
+    .. pii_retirement: local_api
     """
 
     REQUIREMENT_STATUS_CHOICES = (
@@ -446,7 +450,7 @@ class CreditRequirementStatus(TimeStampedModel):
 
     class Meta:
         unique_together = ('username', 'requirement')
-        verbose_name_plural = ugettext_lazy('Credit requirement statuses')
+        verbose_name_plural = gettext_lazy('Credit requirement statuses')
 
     @classmethod
     def get_statuses(cls, requirements, username):
@@ -508,13 +512,12 @@ class CreditRequirementStatus(TimeStampedModel):
             requirement_status.delete()
         except cls.DoesNotExist:
             log_msg = (
-                'The requirement status {requirement} does not exist for username {username}.'.format(
+                'The requirement status {requirement} does not exist for username {username}.'.format(  # noqa: UP032
                     requirement=requirement,
                     username=username
                 )
             )
             log.error(log_msg)
-            return
 
     @classmethod
     def retire_user(cls, retirement):
@@ -537,7 +540,7 @@ def default_deadline_for_credit_eligibility():
     """
     The default deadline to use when creating a new CreditEligibility model.
     """
-    return datetime.datetime.now(pytz.UTC) + datetime.timedelta(
+    return datetime.datetime.now(ZoneInfo("UTC")) + datetime.timedelta(
         days=getattr(settings, "CREDIT_ELIGIBILITY_EXPIRATION_DAYS", 365)
     )
 
@@ -546,7 +549,9 @@ class CreditEligibility(TimeStampedModel):
     """
     A record of a user's eligibility for credit for a specific course.
 
-    .. no_pii:
+    .. pii: Contains username, anonymized by retire_user().
+    .. pii_types: username
+    .. pii_retirement: local_api
     """
     username = models.CharField(max_length=255, db_index=True)
     course = models.ForeignKey(CreditCourse, related_name="eligibilities", on_delete=models.CASCADE)
@@ -558,7 +563,7 @@ class CreditEligibility(TimeStampedModel):
     # we need to override the deadline for particular students.
     deadline = models.DateTimeField(
         default=default_deadline_for_credit_eligibility,
-        help_text=ugettext_lazy("Deadline for purchasing and requesting credit.")
+        help_text=gettext_lazy("Deadline for purchasing and requesting credit.")
     )
 
     class Meta:
@@ -618,7 +623,7 @@ class CreditEligibility(TimeStampedModel):
         return cls.objects.filter(
             username=username,
             course__enabled=True,
-            deadline__gt=datetime.datetime.now(pytz.UTC)
+            deadline__gt=datetime.datetime.now(ZoneInfo("UTC"))
         ).select_related('course')
 
     @classmethod
@@ -637,12 +642,12 @@ class CreditEligibility(TimeStampedModel):
             course__course_key=course_key,
             course__enabled=True,
             username=username,
-            deadline__gt=datetime.datetime.now(pytz.UTC),
+            deadline__gt=datetime.datetime.now(ZoneInfo("UTC")),
         ).exists()
 
     def __str__(self):
         """Unicode representation of the credit eligibility. """
-        return "{user}, {course}".format(
+        return "{user}, {course}".format(  # noqa: UP032
             user=self.username,
             course=self.course.course_key,
         )
@@ -659,7 +664,9 @@ class CreditRequest(TimeStampedModel):
     (perhaps because the user did not finish filling in forms on the credit provider's site),
     the request record will be updated, but the UUID will remain the same.
 
-    .. no_pii:
+    .. pii: Contains username, anonymized by retire_user().
+    .. pii_types: username
+    .. pii_retirement: local_api
     """
 
     uuid = models.CharField(max_length=32, unique=True, db_index=True)
@@ -767,7 +774,7 @@ class CreditRequest(TimeStampedModel):
 
     def __str__(self):
         """Unicode representation of a credit request."""
-        return "{course}, {provider}, {status}".format(
+        return "{course}, {provider}, {status}".format(  # noqa: UP032
             course=self.course.course_key,
             provider=self.provider.provider_id,
             status=self.status,
@@ -783,9 +790,9 @@ class CreditConfig(ConfigurationModel):
     CACHE_KEY = 'credit.providers.api.data'
 
     cache_ttl = models.PositiveIntegerField(
-        verbose_name=ugettext_lazy("Cache Time To Live"),
+        verbose_name=gettext_lazy("Cache Time To Live"),
         default=0,
-        help_text=ugettext_lazy(
+        help_text=gettext_lazy(
             "Specified in seconds. Enable caching by setting this to a value greater than 0."
         )
     )

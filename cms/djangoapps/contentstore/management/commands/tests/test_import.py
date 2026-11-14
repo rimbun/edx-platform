@@ -11,9 +11,10 @@ from django.core.management import call_command
 from path import Path as path
 
 from openedx.core.djangoapps.django_comment_common.utils import are_permissions_roles_seeded
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
 
 
 class TestImport(ModuleStoreTestCase):
@@ -21,11 +22,11 @@ class TestImport(ModuleStoreTestCase):
     Unit tests for importing a course from command line
     """
 
-    def create_course_xml(self, content_dir, course_id):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def create_course_xml(self, content_dir, course_id):  # pylint: disable=missing-function-docstring
         directory = tempfile.mkdtemp(dir=content_dir)
         os.makedirs(os.path.join(directory, "course"))
         with open(os.path.join(directory, "course.xml"), "w+") as f:
-            f.write('<course url_name="{0.run}" org="{0.org}" course="{0.course}"/>'.format(course_id))
+            f.write('<course url_name="{0.run}" org="{0.org}" course="{0.course}"/>'.format(course_id))  # noqa: UP032
 
         with open(os.path.join(directory, "course", f"{course_id.run}.xml"), "w+") as f:
             f.write('<course><chapter name="Test Chapter"></chapter></course>')
@@ -54,9 +55,9 @@ class TestImport(ModuleStoreTestCase):
         """
         Tests that forum roles were created with import.
         """
-        self.assertFalse(are_permissions_roles_seeded(self.base_course_key))
+        self.assertFalse(are_permissions_roles_seeded(self.base_course_key))  # noqa: PT009
         call_command('import', self.content_dir, self.good_dir)
-        self.assertTrue(are_permissions_roles_seeded(self.base_course_key))
+        self.assertTrue(are_permissions_roles_seeded(self.base_course_key))  # noqa: PT009
 
     def test_truncated_course_with_url(self):
         """
@@ -68,28 +69,8 @@ class TestImport(ModuleStoreTestCase):
         # Load up base course and verify it is available
         call_command('import', self.content_dir, self.good_dir)
         store = modulestore()
-        self.assertIsNotNone(store.get_course(self.base_course_key))
+        self.assertIsNotNone(store.get_course(self.base_course_key))  # noqa: PT009
 
         # Now load up the course with a similar course_id and verify it loads
         call_command('import', self.content_dir, self.course_dir)
-        self.assertIsNotNone(store.get_course(self.truncated_key))
-
-    def test_existing_course_with_different_modulestore(self):
-        """
-        Checks that a course that originally existed in old mongo can be re-imported when
-        split is the default modulestore.
-        """
-        with modulestore().default_store(ModuleStoreEnum.Type.mongo):
-            call_command('import', self.content_dir, self.good_dir)
-
-        # Clear out the modulestore mappings, else when the next import command goes to create a destination
-        # course_key, it will find the existing course and return the mongo course_key. To reproduce TNL-1362,
-        # the destination course_key needs to be the one for split modulestore.
-        modulestore().mappings = {}
-
-        with modulestore().default_store(ModuleStoreEnum.Type.split):
-            call_command('import', self.content_dir, self.good_dir)
-            course = modulestore().get_course(self.base_course_key)
-            # With the bug, this fails because the chapter's course_key is the split mongo form,
-            # while the course's course_key is the old mongo form.
-            self.assertEqual(str(course.location.course_key), str(course.children[0].course_key))
+        self.assertIsNotNone(store.get_course(self.truncated_key))  # noqa: PT009

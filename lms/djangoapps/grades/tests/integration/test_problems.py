@@ -1,21 +1,27 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 import datetime
 import itertools
 
 import ddt
 import pytz
 from crum import set_current_request
+from django.test.utils import override_settings
+from xblock_problem.capa.testing.response_xml_factory import MultipleChoiceResponseXMLFactory
 
-from capa.tests.response_xml_factory import MultipleChoiceResponseXMLFactory
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.course_blocks.api import get_course_blocks
 from lms.djangoapps.courseware.tests.test_submitting_problems import ProblemSubmissionTestMixin
 from openedx.core.djangolib.testing.utils import get_mock_request
+from xmodule.capa_block import reset_class
 from xmodule.graders import ProblemScore
 from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import (
+    TEST_DATA_SPLIT_MODULESTORE,
+    ModuleStoreTestCase,
+    SharedModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.modulestore.tests.utils import TEST_DATA_DIR
 from xmodule.modulestore.xml_importer import import_course_from_xml
 
@@ -24,26 +30,29 @@ from ..utils import answer_problem, mock_get_submissions_score
 
 
 @ddt.ddt
-class TestMultipleProblemTypesSubsectionScores(SharedModuleStoreTestCase):
+class _TestMultipleProblemTypesSubsectionScoresBase(SharedModuleStoreTestCase):
     """
     Test grading of different problem types.
     """
+    __test__ = False
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     SCORED_BLOCK_COUNT = 7
     ACTUAL_TOTAL_POSSIBLE = 17.0
 
     @classmethod
     def setUpClass(cls):
+        reset_class()
         super().setUpClass()
         cls.load_scoreable_course()
         chapter1 = cls.course.get_children()[0]
         cls.seq1 = chapter1.get_children()[0]
 
     def setUp(self):
+        reset_class()
         super().setUp()
-        password = 'test'
-        self.student = UserFactory.create(is_staff=False, username='test_student', password=password)
-        self.client.login(username=self.student.username, password=password)
+        self.student = UserFactory.create(is_staff=False, username='test_student', password=self.TEST_PASSWORD)
+        self.client.login(username=self.student.username, password=self.TEST_PASSWORD)
         self.addCleanup(set_current_request, None)
         self.request = get_mock_request(self.student)
         self.course_structure = get_course_blocks(self.student, self.course.location)
@@ -56,10 +65,11 @@ class TestMultipleProblemTypesSubsectionScores(SharedModuleStoreTestCase):
         For details on the contents and structure of the file, see
         `common/test/data/scoreable/README`.
         """
+        user = UserFactory.create(is_staff=False, username='test_student', password=cls.TEST_PASSWORD)
 
         course_items = import_course_from_xml(
             cls.store,
-            'test_user',
+            user.id,
             TEST_DATA_DIR,
             source_dirs=['scoreable'],
             static_content_store=None,
@@ -96,12 +106,25 @@ class TestMultipleProblemTypesSubsectionScores(SharedModuleStoreTestCase):
         assert score.all_total.possible == (possible_per_block * block_count)
 
 
+@override_settings(USE_EXTRACTED_PROBLEM_BLOCK=True)
+class ExtractedTestMultipleProblemTypesSubsectionScores(_TestMultipleProblemTypesSubsectionScoresBase):
+    __test__ = True
+
+
+@override_settings(USE_EXTRACTED_PROBLEM_BLOCK=False)
+class BuiltInTestMultipleProblemTypesSubsectionScores(_TestMultipleProblemTypesSubsectionScoresBase):
+    __test__ = True
+
+
 @ddt.ddt
-class TestVariedMetadata(ProblemSubmissionTestMixin, ModuleStoreTestCase):
+class _TestVariedMetadataBase(ProblemSubmissionTestMixin, ModuleStoreTestCase):
     """
     Test that changing the metadata on a block has the desired effect on the
     persisted score.
     """
+    __test__ = False
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
+
     default_problem_metadata = {
         'graded': True,
         'weight': 2.5,
@@ -109,21 +132,22 @@ class TestVariedMetadata(ProblemSubmissionTestMixin, ModuleStoreTestCase):
     }
 
     def setUp(self):
+        reset_class()
         super().setUp()
         self.course = CourseFactory.create()
         with self.store.bulk_operations(self.course.id):
-            self.chapter = ItemFactory.create(
+            self.chapter = BlockFactory.create(
                 parent=self.course,
                 category="chapter",
                 display_name="Test Chapter"
             )
-            self.sequence = ItemFactory.create(
+            self.sequence = BlockFactory.create(
                 parent=self.chapter,
                 category='sequential',
                 display_name="Test Sequential 1",
                 graded=True
             )
-            self.vertical = ItemFactory.create(
+            self.vertical = BlockFactory.create(
                 parent=self.sequence,
                 category='vertical',
                 display_name='Test Vertical 1'
@@ -138,7 +162,7 @@ class TestVariedMetadata(ProblemSubmissionTestMixin, ModuleStoreTestCase):
         '''
         self.addCleanup(set_current_request, None)
         self.request = get_mock_request(UserFactory())
-        self.client.login(username=self.request.user.username, password="test")
+        self.client.login(username=self.request.user.username, password=self.TEST_PASSWORD)
         CourseEnrollment.enroll(self.request.user, self.course.id)
 
     def _get_altered_metadata(self, alterations):
@@ -156,7 +180,7 @@ class TestVariedMetadata(ProblemSubmissionTestMixin, ModuleStoreTestCase):
         """
 
         metadata = self._get_altered_metadata(alterations)
-        ItemFactory.create(
+        BlockFactory.create(
             parent=self.vertical,
             category="problem",
             display_name="problem",
@@ -205,25 +229,38 @@ class TestVariedMetadata(ProblemSubmissionTestMixin, ModuleStoreTestCase):
         assert score.graded_total.possible == expected_possible
 
 
+@override_settings(USE_EXTRACTED_PROBLEM_BLOCK=True)
+class ExtractedTestVariedMetadata(_TestVariedMetadataBase):
+    __test__ = True
+
+
+@override_settings(USE_EXTRACTED_PROBLEM_BLOCK=False)
+class BuiltInTestVariedMetadata(_TestVariedMetadataBase):
+    __test__ = True
+
+
 @ddt.ddt
-class TestWeightedProblems(SharedModuleStoreTestCase):
+class _TestWeightedProblemsBase(SharedModuleStoreTestCase):
     """
     Test scores and grades with various problem weight values.
     """
+    __test__ = False
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     @classmethod
     def setUpClass(cls):
+        reset_class()
         super().setUpClass()
         cls.course = CourseFactory.create()
         with cls.store.bulk_operations(cls.course.id):
-            cls.chapter = ItemFactory.create(parent=cls.course, category="chapter", display_name="chapter")
-            cls.sequential = ItemFactory.create(parent=cls.chapter, category="sequential", display_name="sequential")
-            cls.vertical = ItemFactory.create(parent=cls.sequential, category="vertical", display_name="vertical1")
+            cls.chapter = BlockFactory.create(parent=cls.course, category="chapter", display_name="chapter")
+            cls.sequential = BlockFactory.create(parent=cls.chapter, category="sequential", display_name="sequential")
+            cls.vertical = BlockFactory.create(parent=cls.sequential, category="vertical", display_name="vertical1")
             problem_xml = cls._create_problem_xml()
             cls.problems = []
             for i in range(2):
                 cls.problems.append(
-                    ItemFactory.create(
+                    BlockFactory.create(
                         parent=cls.vertical,
                         category="problem",
                         display_name=f"problem_{i}",
@@ -232,6 +269,7 @@ class TestWeightedProblems(SharedModuleStoreTestCase):
                 )
 
     def setUp(self):
+        reset_class()
         super().setUp()
         self.user = UserFactory()
         self.addCleanup(set_current_request, None)
@@ -310,3 +348,13 @@ class TestWeightedProblems(SharedModuleStoreTestCase):
             first_attempted=datetime.datetime(2010, 1, 1),
         )
         self._verify_grades(raw_earned, raw_possible, weight, expected_score)
+
+
+@override_settings(USE_EXTRACTED_PROBLEM_BLOCK=True)
+class ExtractedTestWeightedProblems(_TestWeightedProblemsBase):
+    __test__ = True
+
+
+@override_settings(USE_EXTRACTED_PROBLEM_BLOCK=False)
+class BuiltInTestWeightedProblems(_TestWeightedProblemsBase):
+    __test__ = True

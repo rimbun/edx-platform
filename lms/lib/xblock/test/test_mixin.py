@@ -1,4 +1,4 @@
-# lint-amnesty, pylint: disable=django-not-configured
+# pylint: disable=django-not-configured
 """
 Tests of the LMS XBlock Mixin
 """
@@ -11,12 +11,19 @@ from lms.djangoapps.lms_xblock.mixin import (
     INVALID_USER_PARTITION_GROUP_VALIDATION_UNIT,
     INVALID_USER_PARTITION_VALIDATION_COMPONENT,
     INVALID_USER_PARTITION_VALIDATION_UNIT,
-    NONSENSICAL_ACCESS_RESTRICTION
+    NONSENSICAL_ACCESS_RESTRICTION,
 )
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import TEST_DATA_MIXED_MODULESTORE, ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory, ToyCourseFactory
-from xmodule.partitions.partitions import Group, UserPartition
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (  # pylint: disable=wrong-import-order
+    TEST_DATA_SPLIT_MODULESTORE,
+    ModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+    ToyCourseFactory,
+)
+from xmodule.partitions.partitions import Group, UserPartition  # pylint: disable=wrong-import-order
 
 
 class LmsXBlockMixinTestCase(ModuleStoreTestCase):
@@ -41,20 +48,20 @@ class LmsXBlockMixinTestCase(ModuleStoreTestCase):
         self.group1 = self.user_partition.groups[0]
         self.group2 = self.user_partition.groups[1]
         self.course = CourseFactory.create(user_partitions=[self.user_partition])
-        section = ItemFactory.create(parent=self.course, category='chapter', display_name='Test Section')
-        subsection = ItemFactory.create(parent=section, category='sequential', display_name='Test Subsection')
-        vertical = ItemFactory.create(parent=subsection, category='vertical', display_name='Test Unit')
-        video = ItemFactory.create(parent=vertical, category='video', display_name='Test Video 1')
-        split_test = ItemFactory.create(parent=vertical, category='split_test', display_name='Test Content Experiment')
-        child_vertical = ItemFactory.create(parent=split_test, category='vertical')
-        child_html_module = ItemFactory.create(parent=child_vertical, category='html')
+        section = BlockFactory.create(parent=self.course, category='chapter', display_name='Test Section')
+        subsection = BlockFactory.create(parent=section, category='sequential', display_name='Test Subsection')
+        vertical = BlockFactory.create(parent=subsection, category='vertical', display_name='Test Unit')
+        video = BlockFactory.create(parent=vertical, category='video', display_name='Test Video 1')
+        split_test = BlockFactory.create(parent=vertical, category='split_test', display_name='Test Content Experiment')
+        child_vertical = BlockFactory.create(parent=split_test, category='vertical')
+        child_html_block = BlockFactory.create(parent=child_vertical, category='html')
         self.section_location = section.location
         self.subsection_location = subsection.location
         self.vertical_location = vertical.location
         self.video_location = video.location
         self.split_test_location = split_test.location
         self.child_vertical_location = child_vertical.location
-        self.child_html_module_location = child_html_module.location
+        self.child_html_block_location = child_html_block.location
 
     def set_group_access(self, block_location, access_dict):
         """
@@ -180,14 +187,14 @@ class XBlockValidationTest(LmsXBlockMixinTestCase):
         self.set_group_access(self.vertical_location, {self.user_partition.id: [self.group1.id]})
         self.set_group_access(self.split_test_location, {self.user_partition.id: [self.group2.id]})
         self.set_group_access(self.child_vertical_location, {self.user_partition.id: [self.group2.id]})
-        self.set_group_access(self.child_html_module_location, {self.user_partition.id: [self.group2.id]})
-        validation = self.store.get_item(self.child_html_module_location).validate()
+        self.set_group_access(self.child_html_block_location, {self.user_partition.id: [self.group2.id]})
+        validation = self.store.get_item(self.child_html_block_location).validate()
         assert len(validation.messages) == 0
 
         # Test that a validation message is displayed on split_test child when the child contradicts the parent,
         # even though the child agrees with the grandparent unit.
-        self.set_group_access(self.child_html_module_location, {self.user_partition.id: [self.group1.id]})
-        validation = self.store.get_item(self.child_html_module_location).validate()
+        self.set_group_access(self.child_html_block_location, {self.user_partition.id: [self.group1.id]})
+        validation = self.store.get_item(self.child_html_block_location).validate()
         assert len(validation.messages) == 1
         self.verify_validation_message(
             validation.messages[0],
@@ -282,8 +289,8 @@ class OpenAssessmentBlockMixinTestCase(ModuleStoreTestCase):
     def setUp(self):
         super().setUp()
         self.course = CourseFactory.create()
-        self.section = ItemFactory.create(parent=self.course, category='chapter', display_name='Test Section')
-        self.open_assessment = ItemFactory.create(
+        self.section = BlockFactory.create(parent=self.course, category='chapter', display_name='Test Section')
+        self.open_assessment = BlockFactory.create(
             parent=self.section,
             category="openassessment",
             display_name="untitled",
@@ -296,17 +303,15 @@ class OpenAssessmentBlockMixinTestCase(ModuleStoreTestCase):
         assert self.open_assessment.has_score
 
 
-@ddt.ddt
 class XBlockGetParentTest(LmsXBlockMixinTestCase):
     """
     Test that XBlock.get_parent returns correct results with each modulestore
     backend.
     """
-    MODULESTORE = TEST_DATA_MIXED_MODULESTORE
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_parents(self, modulestore_type):
-        with self.store.default_store(modulestore_type):
+    def test_parents(self):
+        with self.store.default_store(ModuleStoreEnum.Type.split):
 
             # setting up our own local course tree here, since it needs to be
             # created with the correct modulestore type.
@@ -330,13 +335,12 @@ class XBlockGetParentTest(LmsXBlockMixinTestCase):
             visited = recurse(course)
             assert len(visited) == 28
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
-    def test_parents_draft_content(self, modulestore_type):
+    def test_parents_draft_content(self):
         # move the video to the new vertical
-        with self.store.default_store(modulestore_type):
+        with self.store.default_store(ModuleStoreEnum.Type.split):
             self.build_course()
             subsection = self.store.get_item(self.subsection_location)
-            new_vertical = ItemFactory.create(parent=subsection, category='vertical', display_name='New Test Unit')
+            new_vertical = BlockFactory.create(parent=subsection, category='vertical', display_name='New Test Unit')
             child_to_move_location = self.video_location.for_branch(None)
             new_parent_location = new_vertical.location.for_branch(None)
             old_parent_location = self.vertical_location.for_branch(None)
@@ -370,7 +374,7 @@ class RenamedTuple(tuple):
     This class is only used to allow overriding __name__ on the tuples passed
     through ddt, in order to have the generated test names make sense.
     """
-    pass  # lint-amnesty, pylint: disable=unnecessary-pass
+    pass  # pylint: disable=unnecessary-pass
 
 
 def ddt_named(parent, child):

@@ -9,18 +9,18 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test.utils import override_settings
 from django.urls import reverse
+from edx_toggles.toggles.testutils import override_waffle_flag  # pylint: disable=wrong-import-order
 from rest_framework.test import APIClient
 
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
-from edx_toggles.toggles.testutils import override_waffle_flag
 from lms.djangoapps.course_goals.models import CourseGoal
-from lms.djangoapps.course_goals.toggles import COURSE_GOALS_NUMBER_OF_DAYS_GOALS
 from lms.djangoapps.course_home_api.tests.utils import BaseCourseHomeTests
-from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.features.course_experience import ENABLE_COURSE_GOALS
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 EVENT_NAME_ADDED = 'edx.course.goal.added'
 EVENT_NAME_UPDATED = 'edx.course.goal.updated'
@@ -29,7 +29,6 @@ User = get_user_model()
 
 
 @override_waffle_flag(ENABLE_COURSE_GOALS, active=True)
-@override_waffle_flag(COURSE_GOALS_NUMBER_OF_DAYS_GOALS, active=True)
 class TestCourseGoalsAPI(SharedModuleStoreTestCase):
     """
     Testing the Course Goals API.
@@ -75,7 +74,6 @@ class TestCourseGoalsAPI(SharedModuleStoreTestCase):
             'courserun_key': str(self.course.id),
             'days_per_week': 1,
             'subscribed_to_reminders': True,
-            'goal_key': 'unsure',
         })
 
         current_goals = CourseGoal.objects.filter(user=self.user, course_key=self.course.id)
@@ -92,7 +90,6 @@ class TestCourseGoalsAPI(SharedModuleStoreTestCase):
             'courserun_key': str(self.course.id),
             'days_per_week': 1,
             'subscribed_to_reminders': True,
-            'goal_key': 'unsure',
         })
 
         self.save_course_goal(3, True)
@@ -100,7 +97,6 @@ class TestCourseGoalsAPI(SharedModuleStoreTestCase):
             'courserun_key': str(self.course.id),
             'days_per_week': 3,
             'subscribed_to_reminders': True,
-            'goal_key': 'unsure',
         })
 
         self.save_course_goal(5, False)
@@ -108,7 +104,6 @@ class TestCourseGoalsAPI(SharedModuleStoreTestCase):
             'courserun_key': str(self.course.id),
             'days_per_week': 5,
             'subscribed_to_reminders': False,
-            'goal_key': 'unsure',
         })
 
         current_goals = CourseGoal.objects.filter(user=self.user, course_key=self.course.id)
@@ -134,7 +129,7 @@ class TestCourseGoalsAPI(SharedModuleStoreTestCase):
         assert len(current_goals) == 1
         assert current_goals[0].subscribed_to_reminders is True
 
-        response = self.save_course_goal(None, False)
+        response = self.save_course_goal(None, False)  # noqa: F841
         current_goals = CourseGoal.objects.filter(user=self.user, course_key=self.course.id)
         assert current_goals[0].subscribed_to_reminders is False
 

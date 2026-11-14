@@ -4,6 +4,7 @@ Classes that override default django-oauth-toolkit behavior
 
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth import authenticate, get_user_model
 from django.db.models.signals import pre_save
@@ -11,9 +12,9 @@ from django.dispatch import receiver
 from oauth2_provider.models import AccessToken
 from oauth2_provider.oauth2_validators import OAuth2Validator
 from oauth2_provider.scopes import get_scopes_backend
-from pytz import utc
 
 from ..models import RestrictedApplication
+
 # pylint: disable=W0223
 
 
@@ -23,7 +24,7 @@ def on_access_token_presave(sender, instance, *args, **kwargs):  # pylint: disab
     Mark AccessTokens as expired for 'restricted applications' if required.
     """
     if RestrictedApplication.should_expire_access_token(instance.application):
-        instance.expires = datetime(1970, 1, 1, tzinfo=utc)
+        instance.expires = datetime(1970, 1, 1, tzinfo=ZoneInfo("UTC"))
 
 
 class EdxOAuth2Validator(OAuth2Validator):
@@ -91,6 +92,22 @@ class EdxOAuth2Validator(OAuth2Validator):
         request.grant_type = grant_type
         request.user = user
 
+    def get_default_scopes(self, client_id, request, *args, **kwargs):
+        """
+        Returns the default scopes.
+
+        If the request payload does not have `scopes` attribute for a grant_type of
+        client credentials, add `user_id` as a default scope if it is an allowed scope.
+        """
+        default_scopes = super().get_default_scopes(client_id, request, *args, **kwargs)
+        if request.grant_type == 'client_credentials' and not request.scopes:
+            if get_scopes_backend().has_user_id_in_application_scopes(application=request.client):
+                # copy the default scopes and add user_id to it to avoid modifying the original list
+                extended_default_scopes = default_scopes.copy()
+                extended_default_scopes.append('user_id')
+                return extended_default_scopes
+        return default_scopes
+
     def validate_scopes(self, client_id, scopes, client, request, *args, **kwargs):
         """
         Ensure required scopes are permitted (as specified in the settings file)
@@ -136,4 +153,4 @@ def _get_utc_now():
     """
     Return current time in UTC.
     """
-    return datetime.utcnow().replace(tzinfo=utc)
+    return datetime.utcnow().replace(tzinfo=ZoneInfo("UTC"))

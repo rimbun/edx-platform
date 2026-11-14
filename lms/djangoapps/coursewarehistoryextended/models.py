@@ -18,8 +18,8 @@ from django.db import models
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from lms.djangoapps.courseware.models import BaseStudentModuleHistory, StudentModule
 from lms.djangoapps.courseware.fields import UnsignedBigIntAutoField
+from lms.djangoapps.courseware.models import BaseStudentModuleHistory, StudentModule
 
 
 class StudentModuleHistoryExtended(BaseStudentModuleHistory):
@@ -33,11 +33,16 @@ class StudentModuleHistoryExtended(BaseStudentModuleHistory):
     class Meta:
         app_label = 'coursewarehistoryextended'
         get_latest_by = "created"
-        index_together = ['student_module']
+        indexes = [
+            models.Index(
+                fields=['student_module'],
+                name="student_module_idx"
+            ),
+        ]
 
     id = UnsignedBigIntAutoField(primary_key=True)  # pylint: disable=invalid-name
 
-    student_module = models.ForeignKey(StudentModule, db_index=True, db_constraint=False, on_delete=models.DO_NOTHING)
+    student_module = models.ForeignKey(StudentModule, db_index=False, db_constraint=False, on_delete=models.DO_NOTHING)
 
     @receiver(post_save, sender=StudentModule)
     def save_history(sender, instance, **kwargs):  # pylint: disable=no-self-argument, unused-argument
@@ -46,14 +51,11 @@ class StudentModuleHistoryExtended(BaseStudentModuleHistory):
         StudentModuleHistoryExtended entry if the module_type is one that
         we save.
         """
-        if instance.module_type in StudentModuleHistoryExtended.HISTORY_SAVING_TYPES:
-            history_entry = StudentModuleHistoryExtended(student_module=instance,
-                                                         version=None,
-                                                         created=instance.modified,
-                                                         state=instance.state,
-                                                         grade=instance.grade,
-                                                         max_grade=instance.max_grade)
-            history_entry.save()
+        BaseStudentModuleHistory.save_history_entry(
+            instance,
+            StudentModuleHistoryExtended,
+            "lms.djangoapps.coursewarehistoryextended.models.student_module_history_extended_map"
+        )
 
     @receiver(post_delete, sender=StudentModule)
     def delete_history(sender, instance, **kwargs):  # pylint: disable=no-self-argument, unused-argument

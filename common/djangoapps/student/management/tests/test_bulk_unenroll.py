@@ -2,16 +2,18 @@
 
 from tempfile import NamedTemporaryFile
 
-import six
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
+from django.test import override_settings
 from testfixtures import LogCapture
 
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from common.djangoapps.student.models import BulkUnenrollConfiguration, CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 LOGGER_NAME = 'common.djangoapps.student.management.commands.bulk_unenroll'
 
@@ -48,7 +50,7 @@ class BulkUnenrollTests(SharedModuleStoreTestCase):
         """Write a test csv file with the lines provided"""
         csv.write(b"username,course_id\n")
         for line in lines:
-            csv.write(six.b(line))
+            csv.write(line.encode())
         csv.seek(0)
         return csv
 
@@ -129,8 +131,29 @@ class BulkUnenrollTests(SharedModuleStoreTestCase):
                 (
                     LOGGER_NAME,
                     'INFO',
-                    'User [{}] have been successfully unenrolled from the course: {}'.format(
+                    'User [{}] have been successfully unenrolled from the course: {}'.format(  # noqa: UP032
                         self.enrollments[0].username, self.enrollments[0].course.id
                     )
                 ),
             )
+
+    @override_settings(SQUELCH_PII_IN_LOGS=True)
+    def test_users_unenroll_logged_with_user_id_when_squelching_pii(self):
+        """Verify unenrolled users are logged by user id, not username, when PII is squelched."""
+        user = self.enrollments[0].user
+        lines = "username,course_id\n"
+        lines += user.username + "," + str(self.enrollments[0].course.id) + "\n"
+        csv_file = SimpleUploadedFile(name='test.csv', content=lines.encode('utf-8'), content_type='text/csv')
+        BulkUnenrollConfiguration.objects.create(enabled=True, csv_file=csv_file)
+
+        with LogCapture(LOGGER_NAME) as log:
+            call_command("bulk_unenroll", "--commit")
+            log.check_present(
+                (
+                    LOGGER_NAME,
+                    'INFO',
+                    f'User [{user.id}] have been successfully unenrolled from the course: '
+                    f'{self.enrollments[0].course.id}',
+                ),
+            )
+            assert all(user.username not in record.getMessage() for record in log.records)

@@ -14,13 +14,15 @@ from organizations.api import get_organizations
 
 from lms.djangoapps.certificates.models import (
     CertificateDateOverride,
-    CertificateGenerationConfiguration,
     CertificateGenerationCommandConfiguration,
+    CertificateGenerationConfiguration,
     CertificateGenerationCourseSetting,
     CertificateHtmlViewConfiguration,
     CertificateTemplate,
     CertificateTemplateAsset,
-    GeneratedCertificate
+    GeneratedCertificate,
+    ModifiedCertificateTemplateCommandConfiguration,
+    PurgeReferencestoPDFCertificatesCommandConfiguration,
 )
 
 
@@ -45,7 +47,7 @@ class CertificateTemplateForm(forms.ModelForm):
 
     class Meta:
         model = CertificateTemplate
-        fields = '__all__'
+        fields = '__all__'  # noqa: DJ007
 
 
 class CertificateTemplateAdmin(admin.ModelAdmin):
@@ -92,8 +94,18 @@ class CertificateGenerationCourseSettingAdmin(admin.ModelAdmin):
     show_full_result_count = False
 
 
+@admin.register(ModifiedCertificateTemplateCommandConfiguration)
+class ModifiedCertificateTemplateCommandConfigurationAdmin(ConfigurationModelAdmin):
+    pass
+
+
 @admin.register(CertificateGenerationCommandConfiguration)
 class CertificateGenerationCommandConfigurationAdmin(ConfigurationModelAdmin):
+    pass
+
+
+@admin.register(PurgeReferencestoPDFCertificatesCommandConfiguration)
+class PurgeReferencestoPDFCertificatesCommandConfigurationAdmin(ConfigurationModelAdmin):
     pass
 
 

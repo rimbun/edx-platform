@@ -2,7 +2,7 @@
 <%inherit file="/main.html" />
 <%namespace name='static' file='/static_content.html'/>
 <%!
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from openedx.core.djangolib.markup import HTML
 from openedx.core.djangolib.js_utils import js_escaped_string
@@ -42,7 +42,7 @@ ${static.get_page_title_breadcrumbs(course_name())}
 <script type="text/javascript" src="${static.url('js/jquery.autocomplete.js')}" async></script>
 <script type="text/javascript" src="${static.url('js/src/tooltip_manager.js')}" async></script>
 
-<link href="${static.url('css/vendor/jquery.autocomplete.css')}" rel="preload" type="text/css">
+<link href="${static.url('css/vendor/jquery.autocomplete.css')}" rel="preload" type="text/css" as="style">
   ${HTML(fragment.head_html())}
 
 % if is_learning_mfe:
@@ -68,7 +68,7 @@ ${static.get_page_title_breadcrumbs(course_name())}
   <%static:js group='courseware'/>
 
   % if enable_mathjax:
-    <%include file="/mathjax_include.html" args="disable_fast_preview=True"/>
+    <%include file="/mathjax_include.html" />
   % endif
   % if staff_access:
   	<%include file="xqa_interface.html"/>
@@ -77,6 +77,8 @@ ${static.get_page_title_breadcrumbs(course_name())}
 ${HTML(fragment.foot_html())}
 
 </%block>
+
+<%block name="body_extra"/>
 
 <div class="course-wrapper chromeless">
   <section class="course-content" id="course-content"\
@@ -98,7 +100,7 @@ ${HTML(fragment.foot_html())}
     <nav class="nav-utilities ${"has-utility-calculator" if course.show_calculator else ""}" aria-label="${_('Course Utilities')}">
       ## Utility: Notes
       % if edx_notes_enabled:
-        <%include file="/edxnotes/toggle_notes.html" args="course=course"/>
+        <%include file="/edxnotes/toggle_notes.html" args="course=course, block=block"/>
       % endif
 
       ## Utility: Calc
@@ -109,7 +111,7 @@ ${HTML(fragment.foot_html())}
   % endif
 % else:
   % if edx_notes_enabled:
-    <%include file="/edxnotes/toggle_notes.html" args="course=course"/>
+    <%include file="/edxnotes/toggle_notes.html" args="course=course, block=block"/>
   % endif
 % endif
 
@@ -126,28 +128,41 @@ ${HTML(fragment.foot_html())}
       var contentElement = document.getElementById('content');
 
       function dispatchResizeMessage(event) {
-        // Note: event is actually an Array of MutationRecord objects
-        // when fired from the MutationObserver
-        var eventType = event.type || 'mutate';
+        // Note: event is actually an Array of MutationRecord objects when fired from the MutationObserver
+        var isLoadEvent = event.type === 'load';
         var newHeight = contentElement.offsetHeight;
         var newWidth = contentElement.offsetWidth;
-        if (eventType !== 'load' && newWidth === lastWidth && newHeight === lastHeight) {
+        if (!isLoadEvent && newWidth === lastWidth && newHeight === lastHeight) {
             // Monitor when any anchor tag is clicked, it is checked to make sure
             // it is referencing an element's id or name (not an external website). If
-            // the href attribute is an id or name, the location of the selected focus
-            // element is sent through its offset attribute. The offset will
-            // allow the page to scroll to the location of the focus element so
-            // that it is at the top of the page. Unique ids and names are
-            // required for proper scrolling.
+            // the href attribute is an id or name, the page will scroll the id or name.
             $('a').on("click", function(event){
-              if ($(this).attr('href')[0] === "#") {
+              if ($(this).attr('href')[0] === '#') {
                 var targetId = $(this).attr('href');
-                var targetName = $(this).attr('href').slice(1);
-                // Checks if the target uses an id or name to focus and gets offset.
-                var targetOffset = $(targetId).offset() || $(document.getElementsByName(targetName)[0]).offset();
-                if (targetOffset) {
+                // Checks if the href attribute is auto scrolling video transcripts.
+                // The scroll behavior for transcript scrolling requires the viewport
+                // to stay in relatively the same position so viewing of the video
+                // is not disrupted.
+                if ($(this).attr('class') === 'transcript-start'||$(this).attr('class') === 'transcript-end') {
+                  var target = $(targetId)[0];
                   event.preventDefault();
-                  window.parent.postMessage({"offset": targetOffset.top}, document.referrer);
+                  target.scrollIntoView({
+                    block: 'nearest',
+                  });
+                  target.focus();
+                } else {
+                  var targetName = $(this).attr('href').slice(1);
+                  // Checks if the target uses an id or name.
+                  var target = $(targetId)[0] || document.getElementsByName(targetName)[0];
+                  // The scroll behavior fro all other types of href's will scroll
+                  // the target to the top of the page
+                  if (target) {
+                    event.preventDefault();
+                    target.scrollIntoView({
+                      block: 'start',
+                    });
+                    target.focus();
+                  }
                 }
               }
             })
@@ -197,7 +212,9 @@ ${HTML(fragment.foot_html())}
       observer.observe(document.body, { attributes: true, childList: true, subtree: true });
 
       window.addEventListener('load', dispatchResizeMessage);
-      window.addEventListener('resize', dispatchResizeMessage);
+
+      const resizeObserver = new ResizeObserver(dispatchResizeMessage);
+      resizeObserver.observe(document.body);
     }
   }());
 </script>

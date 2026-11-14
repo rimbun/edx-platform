@@ -4,7 +4,7 @@ and course access based on these limits.
 """
 
 from django.utils import timezone
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from edx_django_utils.cache import RequestCache
 from web_fragments.fragment import Fragment
 
@@ -13,8 +13,8 @@ from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.util.date_utils import strftime_localized, strftime_localized_html
 from lms.djangoapps.courseware.access_response import AccessError
 from lms.djangoapps.courseware.access_utils import ACCESS_GRANTED
-from lms.djangoapps.courseware.utils import verified_upgrade_deadline_link
 from lms.djangoapps.courseware.masquerade import get_course_masquerade, is_masquerading_as_specific_student
+from lms.djangoapps.courseware.utils import verified_upgrade_deadline_link
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.course_date_signals.utils import get_expected_duration
 from openedx.core.djangolib.markup import HTML
@@ -42,7 +42,7 @@ class AuditExpiredError(AccessError):
                 expiration_date=expiration_date
             )
 
-        # lint-amnesty, pylint: disable=super-with-arguments
+        # pylint: disable=super-with-arguments
         super().__init__(error_code, developer_message, user_message, additional_context_user_message)
 
 
@@ -68,7 +68,7 @@ def get_user_course_duration(user, course):
     return get_expected_duration(course.id)
 
 
-def get_user_course_expiration_date(user, course):
+def get_user_course_expiration_date(user, course, enrollment=None):
     """
     Return expiration date for given user course pair.
     Return None if the course does not expire.
@@ -81,7 +81,7 @@ def get_user_course_expiration_date(user, course):
     if access_duration is None:
         return None
 
-    enrollment = CourseEnrollment.get_enrollment(user, course.id)
+    enrollment = enrollment or CourseEnrollment.get_enrollment(user, course.id)
     if enrollment is None or enrollment.mode != CourseMode.AUDIT:
         return None
 
@@ -242,11 +242,14 @@ def course_expiration_wrapper(user, block, view, frag, context):  # pylint: disa
     An XBlock wrapper that prepends a message to the beginning of a vertical if
     a user's course is about to expire.
     """
+    if context.get('is_mobile_app'):
+        return frag
+
     if block.category != 'vertical':
         return frag
 
     course_expiration_fragment = generate_course_expired_fragment_from_key(
-        user, block.course_id
+        user, block.scope_ids.usage_id.context_key
     )
     if not course_expiration_fragment:
         return frag

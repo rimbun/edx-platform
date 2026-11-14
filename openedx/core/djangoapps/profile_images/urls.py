@@ -5,21 +5,21 @@ NOTE: These views are deprecated.  These routes are superseded by
 ``/api/user/v1/accounts/{username}/image``, found in
 ``openedx.core.djangoapps.user_api.urls``.
 """
-# pylint: enable=unicode-format-string  # lint-amnesty, pylint: disable=bad-option-value
+# pylint: enable=unicode-format-string  # pylint: disable=bad-option-value
 
 
 from django.conf import settings
-from django.conf.urls import url
+from django.urls import re_path
 
 from .views import ProfileImageRemoveView, ProfileImageUploadView
 
 urlpatterns = [
-    url(
+    re_path(
         r'^v1/' + settings.USERNAME_PATTERN + '/upload$',
         ProfileImageUploadView.as_view(),
         name="profile_image_upload"
     ),
-    url(
+    re_path(
         r'^v1/' + settings.USERNAME_PATTERN + '/remove$',
         ProfileImageRemoveView.as_view(),
         name="profile_image_remove"

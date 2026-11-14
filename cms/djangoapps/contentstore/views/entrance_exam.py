@@ -1,5 +1,5 @@
 """
-Entrance Exams view module -- handles all requests related to entrance exam management via Studio
+Entrance Exams view block -- handles all requests related to entrance exam management via Studio
 Intended to be utilized as an AJAX callback handler, versus a proper view/screen
 """
 
@@ -10,21 +10,22 @@ from functools import wraps
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponse, HttpResponseBadRequest
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from django.views.decorators.csrf import ensure_csrf_cookie
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey, UsageKey
 
+from cms.djangoapps.contentstore.xblock_storage_handlers.create_xblock import create_xblock
+from cms.djangoapps.contentstore.xblock_storage_handlers.view_handlers import delete_item
 from cms.djangoapps.models.settings.course_metadata import CourseMetadata
 from common.djangoapps.student.auth import has_course_author_access
 from common.djangoapps.util import milestones_helpers
 from openedx.core import toggles as core_toggles
 from openedx.core.djangolib.js_utils import dump_js_escaped_json
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import ItemNotFoundError  # pylint: disable=wrong-import-order
 
-from .helpers import create_xblock, remove_entrance_exam_graders
-from .item import delete_item
+from ..helpers import remove_entrance_exam_graders
 
 __all__ = ['entrance_exam', ]
 
@@ -64,9 +65,9 @@ def entrance_exam(request, course_key_string):
     deleting assets, and changing the "locked" state of an asset.
 
     GET
-        Retrieves the entrance exam module (metadata) for the specified course
+        Retrieves the entrance exam block (metadata) for the specified course
     POST
-        Adds an entrance exam module to the specified course.
+        Adds an entrance exam block to the specified course.
     DELETE
         Removes the entrance exam from the course
     """
@@ -76,7 +77,7 @@ def entrance_exam(request, course_key_string):
     if not has_course_author_access(request.user, course_key):
         return HttpResponse(status=403)
 
-    # Retrieve the entrance exam module for the specified course (returns 404 if none found)
+    # Retrieve the entrance exam block for the specified course (returns 404 if none found)
     if request.method == 'GET':
         return _get_entrance_exam(request, course_key)
 
@@ -94,7 +95,7 @@ def entrance_exam(request, course_key_string):
             return create_entrance_exam(request, course_key, entrance_exam_minimum_score_pct)
         return HttpResponse(status=400)
 
-    # Remove the entrance exam module for the specified course (returns 204 regardless of existence)
+    # Remove the entrance exam block for the specified course (returns 204 regardless of existence)
     elif request.method == 'DELETE':
         return delete_entrance_exam(request, course_key)
 
@@ -176,9 +177,9 @@ def _get_entrance_exam(request, course_key):
     except InvalidKeyError:
         return HttpResponse(status=404)
     try:
-        exam_descriptor = modulestore().get_item(exam_key)
-        return HttpResponse(  # lint-amnesty, pylint: disable=http-response-with-content-type-json
-            dump_js_escaped_json({'locator': str(exam_descriptor.location)}),
+        exam_block = modulestore().get_item(exam_key)
+        return HttpResponse(  # pylint: disable=http-response-with-content-type-json
+            dump_js_escaped_json({'locator': str(exam_block.location)}),
             status=200, content_type='application/json')
     except ItemNotFoundError:
         return HttpResponse(status=404)
@@ -223,7 +224,7 @@ def _delete_entrance_exam(request, course_key):
     if course.entrance_exam_id:
         metadata = {
             'entrance_exam_enabled': False,
-            'entrance_exam_minimum_score_pct': None,
+            'entrance_exam_minimum_score_pct': _get_default_entrance_exam_minimum_pct(),
             'entrance_exam_id': None,
         }
         CourseMetadata.update_from_dict(metadata, course, request.user)
@@ -234,7 +235,7 @@ def _delete_entrance_exam(request, course_key):
     return HttpResponse(status=204)
 
 
-def add_entrance_exam_milestone(course_id, x_block):  # lint-amnesty, pylint: disable=missing-function-docstring
+def add_entrance_exam_milestone(course_id, x_block):  # pylint: disable=missing-function-docstring
     # Add an entrance exam milestone if one does not already exist for given xBlock
     # As this is a standalone method for entrance exam, We should check that given xBlock should be an entrance exam.
     if x_block.is_entrance_exam:
@@ -244,7 +245,7 @@ def add_entrance_exam_milestone(course_id, x_block):  # lint-amnesty, pylint: di
             course_id
         )
         milestones = milestones_helpers.get_milestones(milestone_namespace)
-        if len(milestones):  # lint-amnesty, pylint: disable=len-as-condition
+        if len(milestones):  # pylint: disable=len-as-condition
             milestone = milestones[0]
         else:
             description = f'Autogenerated during {str(course_id)} entrance exam creation.'

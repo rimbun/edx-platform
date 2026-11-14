@@ -8,12 +8,11 @@ import json
 from unittest import mock
 from urllib.parse import urljoin
 
-import pytest
 import ddt
 import httpretty
+import pytest
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
-from django.test import TestCase
 from django.test.utils import override_settings
 from opaque_keys.edx.keys import CourseKey
 from requests import Timeout
@@ -21,6 +20,8 @@ from requests import Timeout
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.student.signals import REFUND_ORDER
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
+from common.test.utils import assert_dict_contains_subset
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
 
 from ..models import CommerceConfiguration
 from ..utils import _generate_refund_notification_body, _send_refund_notification, create_zendesk_ticket
@@ -34,7 +35,7 @@ ZENDESK_API_KEY = 'abc123'
 
 @ddt.ddt
 @override_settings(ZENDESK_URL=ZENDESK_URL, ZENDESK_USER=ZENDESK_USER, ZENDESK_API_KEY=ZENDESK_API_KEY)
-class TestRefundSignal(TestCase):
+class TestRefundSignal(ModuleStoreTestCase):
     """
     Exercises logic triggered by the REFUND_ORDER signal.
     """
@@ -184,7 +185,7 @@ class TestRefundSignal(TestCase):
                 assert not mock_send_notification.called
 
                 last_request = httpretty.last_request()
-                self.assertDictEqual(json.loads(last_request.body.decode('utf8')), {'action': 'approve_payment_only'})
+                self.assertDictEqual(json.loads(last_request.body.decode('utf8')), {'action': 'approve_payment_only'})  # noqa: PT009  # pylint: disable=line-too-long
 
     @mock.patch('lms.djangoapps.commerce.utils._send_refund_notification')
     def test_notification_no_refund(self, mock_send_notification):
@@ -306,10 +307,10 @@ class TestRefundSignal(TestCase):
         expected = {
             'content-type': JSON,
             'Authorization': 'Basic {}'.format(base64.b64encode(
-                f'{ZENDESK_USER}/token:{ZENDESK_API_KEY}'.encode('utf8')).decode('utf8')
+                f'{ZENDESK_USER}/token:{ZENDESK_API_KEY}'.encode('utf8')).decode('utf8')  # noqa: UP012
             )
         }
-        self.assertDictContainsSubset(expected, last_request.headers)
+        assert_dict_contains_subset(self, expected, last_request.headers)
 
         # Verify the content
         expected = {
@@ -323,4 +324,7 @@ class TestRefundSignal(TestCase):
                 'tags': ['LMS'] + tags
             }
         }
-        self.assertDictEqual(json.loads(last_request.body.decode('utf8')), expected)
+        response_dict = json.loads(last_request.body.decode('utf8'))
+        response_dict['ticket']['tags'].sort()
+        expected['ticket']['tags'].sort()
+        self.assertDictEqual(response_dict, expected)  # noqa: PT009

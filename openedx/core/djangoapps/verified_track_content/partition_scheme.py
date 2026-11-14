@@ -9,14 +9,13 @@ from django.conf import settings
 from opaque_keys.edx.keys import CourseKey
 
 from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.student.models import CourseEnrollment
 from lms.djangoapps.courseware.masquerade import (
     get_course_masquerade,
     get_masquerading_user_group,
-    is_masquerading_as_specific_student
+    is_masquerading_as_specific_student,
 )
-from openedx.core.djangoapps.verified_track_content.models import VerifiedTrackCohortedCourse
-from common.djangoapps.student.models import CourseEnrollment
-from xmodule.partitions.partitions import Group, UserPartition
+from xmodule.partitions.partitions import Group, UserPartition  # pylint: disable=wrong-import-order
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,14 +37,8 @@ class EnrollmentTrackUserPartition(UserPartition):
         Return the groups (based on CourseModes) for the course associated with this
         EnrollmentTrackUserPartition instance. Note that only groups based on selectable
         CourseModes are returned (which means that Credit will never be returned).
-
-        If a course is using the Verified Track Cohorting pilot feature, this method
-        returns an empty array regardless of registered CourseModes.
         """
         course_key = CourseKey.from_string(self.parameters["course_id"])
-
-        if is_course_using_cohort_instead(course_key):
-            return []
 
         return [
             Group(ENROLLMENT_GROUP_IDS[mode.slug]["id"], str(mode.name))
@@ -66,13 +59,7 @@ class EnrollmentTrackPartitionScheme:
         Returns the Group from the specified user partition to which the user
         is assigned, via enrollment mode. If a user is in a Credit mode, the Verified or
         Professional mode for the course is returned instead.
-
-        If a course is using the Verified Track Cohorting pilot feature, this method
-        returns None regardless of the user's enrollment mode.
         """
-        if is_course_using_cohort_instead(course_key):
-            return None
-
         # First, check if we have to deal with masquerading.
         # If the current user is masquerading as a specific student, use the
         # same logic as normal to return that student's group. If the current
@@ -124,11 +111,3 @@ class EnrollmentTrackPartitionScheme:
             parameters,
             active
         )
-
-
-def is_course_using_cohort_instead(course_key):
-    """
-    Returns whether the given course_context is using verified-track cohorts
-    and therefore shouldn't use a track-based partition.
-    """
-    return VerifiedTrackCohortedCourse.is_verified_track_cohort_enabled(course_key)

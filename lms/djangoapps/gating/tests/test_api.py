@@ -12,8 +12,13 @@ from milestones.tests.utils import MilestonesTestCaseMixin
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from lms.djangoapps.gating.api import evaluate_prerequisite
 from openedx.core.lib.gating import api as gating_api
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 
 class GatingTestCase(LoginEnrollmentTestCase, ModuleStoreTestCase):
@@ -37,22 +42,22 @@ class GatingTestCase(LoginEnrollmentTestCase, ModuleStoreTestCase):
         )
         self.course.enable_subsection_gating = True
         self.course.save()
-        self.store.update_item(self.course, 0)
+        self.update_course(self.course, 0)
 
         # create chapter
-        self.chapter1 = ItemFactory.create(
+        self.chapter1 = BlockFactory.create(
             parent_location=self.course.location,
             category='chapter',
             display_name='untitled chapter 1'
         )
 
         # create sequentials
-        self.seq1 = ItemFactory.create(
+        self.seq1 = BlockFactory.create(
             parent_location=self.chapter1.location,
             category='sequential',
             display_name='gating sequential'
         )
-        self.seq2 = ItemFactory.create(
+        self.seq2 = BlockFactory.create(
             parent_location=self.chapter1.location,
             category='sequential',
             display_name='gated sequential'

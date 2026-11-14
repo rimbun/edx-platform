@@ -1,21 +1,25 @@
 """
 Logistration API View Tests
 """
+import socket
 from unittest.mock import patch
 from urllib.parse import urlencode
-import socket
+
 import ddt
 from django.conf import settings
+from django.test.utils import override_settings
 from django.urls import reverse
+from rest_framework import status
 from rest_framework.test import APITestCase
 
 from common.djangoapps.student.models import Registration
 from common.djangoapps.student.tests.factories import UserFactory
-from openedx.core.djangoapps.user_api.tests.test_views import UserAPITestCase
-from openedx.core.djangolib.testing.utils import skip_unless_lms
 from common.djangoapps.third_party_auth import pipeline
 from common.djangoapps.third_party_auth.tests.testutil import ThirdPartyAuthTestMixin, simulate_running_pipeline
 from openedx.core.djangoapps.geoinfo.api import country_code_from_ip
+from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration
+from openedx.core.djangoapps.user_api.tests.test_views import UserAPITestCase
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 
 @skip_unless_lms
@@ -31,12 +35,14 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
         """
         super().setUp()
 
+        self.user = UserFactory.create(username='test_user', password='password123')
         self.url = reverse('mfe_context')
         self.query_params = {'next': '/dashboard'}
 
         hostname = socket.gethostname()
         ip_address = socket.gethostbyname(hostname)
         self.country_code = country_code_from_ip(ip_address)
+        self.pipeline_user_details = {}
 
         # Several third party auth providers are created for these tests:
         self.configure_google_provider(enabled=True, visible=True)
@@ -68,6 +74,7 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
                 'iconClass': 'fa-facebook',
                 'iconImage': None,
                 'skipHintedLogin': False,
+                'skipRegistrationForm': False,
                 'loginUrl': self._third_party_login_url('facebook', 'login', params),
                 'registerUrl': self._third_party_login_url('facebook', 'register', params)
             },
@@ -77,6 +84,7 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
                 'iconClass': 'fa-google-plus',
                 'iconImage': None,
                 'skipHintedLogin': False,
+                "skipRegistrationForm": False,
                 'loginUrl': self._third_party_login_url('google-oauth2', 'login', params),
                 'registerUrl': self._third_party_login_url('google-oauth2', 'register', params)
             },
@@ -86,20 +94,43 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
         """
         Returns the MFE context
         """
+
+        if add_user_details:
+            self.pipeline_user_details.update(
+                {
+                    'username': None,
+                    'email': 'test@test.com',
+                    'name': None,
+                    'firstName': None,
+                    'lastName': None
+                }
+            )
+
         return {
-            'currentProvider': current_provider,
-            'platformName': settings.PLATFORM_NAME,
-            'providers': self.get_provider_data(params) if params else [],
-            'secondaryProviders': [],
-            'finishAuthUrl': pipeline.get_complete_url(backend_name) if backend_name else None,
-            'errorMessage': None,
-            'registerFormSubmitButtonText': 'Create Account',
-            'syncLearnerProfileData': False,
-            'pipeline_user_details': {'email': 'test@test.com'} if add_user_details else {},
-            'countryCode': self.country_code
+            'contextData': {
+                'currentProvider': current_provider,
+                'platformName': settings.PLATFORM_NAME,
+                'providers': self.get_provider_data(params) if params else [],
+                'secondaryProviders': [],
+                'finishAuthUrl': pipeline.get_complete_url(backend_name) if backend_name else None,
+                'errorMessage': None,
+                'registerFormSubmitButtonText': 'Create Account',
+                'autoSubmitRegForm': False,
+                'syncLearnerProfileData': False,
+                'countryCode': self.country_code,
+                'welcomePageRedirectUrl': None,
+                'pipelineUserDetails': self.pipeline_user_details,
+            },
+            'registrationFields': {
+                'fields': {},
+            },
+            'optionalFields': {
+                'fields': {},
+                'extended_profile': [],
+            },
         }
 
-    @patch.dict(settings.FEATURES, {'ENABLE_THIRD_PARTY_AUTH': False})
+    @override_settings(ENABLE_THIRD_PARTY_AUTH=False)
     def test_no_third_party_auth_providers(self):
         """
         Test that if third party auth is enabled, context returned by API contains
@@ -145,6 +176,30 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
         assert response.status_code == 200
         assert response.data == self.get_context(params, current_provider, current_backend, add_user_details)
 
+    @ddt.data(
+        ('test@test.com', True),
+        (None, False),
+    )
+    @ddt.unpack
+    def test_skip_registration_form_requires_email(self, email, expect_auto_submit):
+        """
+        Regression test for openedx/edx-platform#38780.
+
+        "Skip registration form" should only auto-submit the registration form when the
+        third-party provider actually returned an email claim. Some providers (e.g. Facebook,
+        Microsoft Entra ID) can complete authentication without an email, and blindly
+        auto-submitting in that case silently fails client-side validation in the authn MFE,
+        leaving the learner stuck on a partially-filled form with no explanation.
+        """
+        self.configure_facebook_provider(enabled=True, visible=True, skip_registration_form=True)
+
+        pipeline_target = 'openedx.core.djangoapps.user_authn.views.login_form.third_party_auth.pipeline'
+        with simulate_running_pipeline(pipeline_target, 'facebook', email=email):
+            response = self.client.get(self.url, self.query_params)
+
+        assert response.status_code == 200
+        assert response.data['contextData']['autoSubmitRegForm'] == expect_auto_submit
+
     def test_tpa_hint(self):
         """
         Test that if tpa_hint is provided, the context returns the third party auth provider
@@ -163,12 +218,13 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
             'iconClass': 'fa-linkedin',
             'iconImage': None,
             'skipHintedLogin': False,
+            'skipRegistrationForm': False,
             'loginUrl': self._third_party_login_url('linkedin-oauth2', 'login', params),
             'registerUrl': self._third_party_login_url('linkedin-oauth2', 'register', params)
         })
 
         response = self.client.get(self.url, self.query_params)
-        assert response.data['providers'] == provider_data
+        assert response.data['contextData']['providers'] == provider_data
 
     def test_user_country_code(self):
         """
@@ -177,7 +233,206 @@ class MFEContextViewTest(ThirdPartyAuthTestMixin, APITestCase):
         response = self.client.get(self.url, self.query_params)
 
         assert response.status_code == 200
-        assert response.data['countryCode'] == self.country_code
+        assert response.data['contextData']['countryCode'] == self.country_code
+
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={"first_name": "optional", "city": "optional"}
+    )
+    def test_required_fields_not_configured(self):
+        """
+        Test that when no required fields are configured in REGISTRATION_EXTRA_FIELDS
+        settings, then API returns proper response.
+        """
+        self.query_params.update({'is_register_page': True})
+        response = self.client.get(self.url, self.query_params)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['registrationFields']['fields'] == {}
+
+    @with_site_configuration(
+        configuration={
+            'extended_profile_fields': ['first_name', 'last_name']
+        }
+    )
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={'state': 'required', 'last_name': 'required', 'first_name': 'required'},
+        REGISTRATION_FIELD_ORDER=['first_name', 'last_name', 'state'],
+    )
+    def test_required_field_order(self):
+        """
+        Test that order of required fields
+        """
+        self.query_params.update({'is_register_page': True})
+        response = self.client.get(self.url, self.query_params)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert list(response.data['registrationFields']['fields'].keys()) == ['first_name', 'last_name', 'state']
+
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={"new_field_with_no_description": "optional", "goals": "optional"}
+    )
+    def test_optional_field_has_no_description(self):
+        """
+        Test that if a new optional field is added to REGISTRATION_EXTRA_FIELDS without
+        adding field description then that field is omitted from the final response.
+        """
+        expected_response = {
+            'goals': {
+                'name': 'goals',
+                'type': 'textarea',
+                'label': "Tell us why you're interested in {platform_name}".format(  # noqa: UP032
+                    platform_name=settings.PLATFORM_NAME
+                ),
+                'error_message': '',
+            }
+        }
+        self.query_params.update({'is_register_page': True})
+        response = self.client.get(self.url, self.query_params)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['optionalFields']['fields'] == expected_response
+
+    @with_site_configuration(
+        configuration={
+            'EXTRA_FIELD_OPTIONS': {'profession': ['Software Engineer', 'Teacher', 'Other']},
+            'extended_profile_fields': ['profession', 'specialty']
+        }
+    )
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={'profession': 'optional', 'specialty': 'optional'}
+    )
+    def test_configurable_select_option_fields(self):
+        """
+        Test that if optional fields have configurable options present in EXTRA_FIELD_OPTIONS,
+        they are returned in response as "select" fields otherwise as "text" field.
+        """
+        expected_response = {
+            'profession': {
+                'name': 'profession',
+                'label': 'Profession',
+                'error_message': '',
+                'type': 'select',
+                'options': [('software engineer', 'Software Engineer'), ('teacher', 'Teacher'), ('other', 'Other')],
+            },
+            'specialty': {
+                'name': 'specialty',
+                'label': 'Specialty',
+                'error_message': '',
+                'type': 'text',
+            }
+        }
+        self.query_params.update({'is_register_page': True})
+        response = self.client.get(self.url, self.query_params)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['optionalFields']['fields'] == expected_response
+
+    @with_site_configuration(
+        configuration={
+            'extended_profile_fields': ['specialty']
+        }
+    )
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={'goals': 'optional', 'specialty': 'optional'},
+        REGISTRATION_FIELD_ORDER=['specialty', 'goals'],
+    )
+    def test_optional_field_order(self):
+        """
+        Test that order of optional fields
+        """
+        self.query_params.update({'is_register_page': True})
+        response = self.client.get(self.url, self.query_params)
+        assert response.status_code == status.HTTP_200_OK
+        assert list(response.data['optionalFields']['fields'].keys()) == ['specialty', 'goals']
+
+    @with_site_configuration(
+        configuration={
+            'extended_profile_fields': ['specialty']
+        }
+    )
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={'profession': 'required', 'specialty': 'required'},
+        REGISTRATION_FIELD_ORDER=['specialty', 'profession'],
+    )
+    def test_field_not_available_in_extended_profile_config(self):
+        """
+        Test that if the field is not available in extended_profile configuration then the field
+        will not be sent in response.
+        """
+        self.query_params.update({'is_register_page': True})
+        response = self.client.get(self.url, self.query_params)
+        assert response.status_code == status.HTTP_200_OK
+        assert list(response.data['registrationFields']['fields'].keys()) == ['specialty']
+
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+    )
+    @override_settings(ENABLE_THIRD_PARTY_AUTH=False)
+    def test_response_structure(self):
+        """
+        Test that API return valid response dictionary with both required and optional fields
+        """
+        response = self.client.get(self.url, self.query_params)
+        assert response.data == self.get_context()
+
+    def test_mfe_context_api_serialized_response(self):
+        """
+        Test MFE Context API serialized response
+        """
+        response = self.client.get(self.url, self.query_params)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)  # noqa: PT009
+
+        params = {
+            'next': self.query_params['next']
+        }
+
+        self.assertEqual(  # noqa: PT009
+            response.data,
+            self.get_context(params)
+        )
+
+    def test_mfe_context_api_response_keys(self):
+        """
+        Test MFE Context API response keys
+        """
+        response = self.client.get(self.url, self.query_params)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)  # noqa: PT009
+
+        response_keys = set(response.data.keys())
+        self.assertSetEqual(  # noqa: PT009
+            response_keys,
+            {
+                'contextData',
+                'registrationFields',
+                'optionalFields'
+            }
+        )
+
+    @with_site_configuration(
+        configuration={
+            'extended_profile_fields': ['specialty']
+        }
+    )
+    @override_settings(
+        ENABLE_DYNAMIC_REGISTRATION_FIELDS=True,
+        REGISTRATION_EXTRA_FIELDS={'specialty': 'optional', 'goals': 'optional'},
+        LOGIN_REDIRECT_WHITELIST=['openedx.service'],
+    )
+    def test_welcome_page_context(self):
+        """
+        Test MFE Context API response for welcome page
+        """
+        redirect_url = 'https://openedx.service/coolpage'
+        self.query_params.update({'is_welcome_page': True, 'next': redirect_url})
+        response = self.client.get(self.url, self.query_params, HTTP_ACCEPT='*/*')
+        assert response.status_code == status.HTTP_200_OK
+        assert list(response.data['optionalFields']['fields'].keys()) == ['specialty', 'goals']
+        assert list(response.data['optionalFields']['extended_profile']) == ['specialty']
+        assert response.data['contextData']['welcomePageRedirectUrl'] == redirect_url
 
 
 @skip_unless_lms
@@ -191,9 +446,9 @@ class SendAccountActivationEmail(UserAPITestCase):
         Create a user, then log in.
         """
         super().setUp()
-        self.user = UserFactory()
+        self.user = UserFactory(password=self.TEST_PASSWORD)
         Registration().register(self.user)
-        result = self.client.login(username=self.user.username, password="test")
+        result = self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
         assert result, 'Could not log in'
         self.path = reverse('send_account_activation_email')
 

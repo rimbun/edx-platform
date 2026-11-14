@@ -7,26 +7,31 @@ Integration tests for submitting problem responses and getting grades.
 
 import json
 import os
+from datetime import datetime
 from textwrap import dedent
-
 from unittest.mock import patch
+
 import ddt
+import pytz
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.db import connections
 from django.test import TestCase
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils.timezone import now
 from submissions import api as submissions_api
-
-from capa.tests.response_xml_factory import (
+from xblock_problem.capa.testing.codejail import UseUnsafeCodejail
+from xblock_problem.capa.testing.response_xml_factory import (
     CodeResponseXMLFactory,
     CustomResponseXMLFactory,
     OptionResponseXMLFactory,
-    SchematicResponseXMLFactory
+    SchematicResponseXMLFactory,
 )
+from xblock_problem.capa.xqueue_interface import XQueueInterface
+
 from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.student.models import CourseEnrollment, anonymous_id_for_user
 from lms.djangoapps.courseware.models import BaseStudentModuleHistory, StudentModule
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from lms.djangoapps.grades.api import CourseGradeFactory, task_compute_all_grades_for_course
@@ -34,10 +39,14 @@ from openedx.core.djangoapps.credit.api import get_credit_requirement_status, se
 from openedx.core.djangoapps.credit.models import CreditCourse, CreditProvider
 from openedx.core.djangoapps.user_api.tests.factories import UserCourseTagFactory
 from openedx.core.lib.url_utils import quote_slashes
-from common.djangoapps.student.models import CourseEnrollment, anonymous_id_for_user
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
-from xmodule.partitions.partitions import Group, UserPartition
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
+from xmodule.partitions.partitions import Group, UserPartition  # pylint: disable=wrong-import-order
 
 
 class ProblemSubmissionTestMixin(TestCase):
@@ -137,7 +146,7 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
     """
 
     # Tell Django to clean out all databases, not just default
-    databases = {alias for alias in connections}  # lint-amnesty, pylint: disable=unnecessary-comprehension
+    databases = set(connections)
     # arbitrary constant
     COURSE_SLUG = "100"
     COURSE_NAME = "test_course"
@@ -151,7 +160,7 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
         # create a test student
         self.course = CourseFactory.create(display_name=self.COURSE_NAME, number=self.COURSE_SLUG)
         self.student = 'view@test.com'
-        self.password = 'foo'
+        self.password = self.TEST_PASSWORD
         self.create_account('u1', self.student, self.password)
         self.activate_user(self.student)
         self.enroll(self.course)
@@ -178,7 +187,7 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
             correct_option='Correct'
         )
 
-        problem = ItemFactory.create(
+        problem = BlockFactory.create(
             parent_location=section_location,
             category='problem',
             data=prob_xml,
@@ -197,20 +206,24 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
 
         # if we don't already have a chapter create a new one
         if not hasattr(self, 'chapter'):
-            self.chapter = ItemFactory.create(
+            self.chapter = BlockFactory.create(
                 parent_location=self.course.location,
                 category='chapter'
             )
 
         if late:
-            section = ItemFactory.create(
+            section = BlockFactory.create(
                 parent_location=self.chapter.location,
                 display_name=name,
                 category='sequential',
-                metadata={'graded': True, 'format': section_format, 'due': '2013-05-20T23:30'}
+                metadata={
+                    'graded': True,
+                    'format': section_format,
+                    'due': datetime(2013, 5, 20, 23, 30, tzinfo=pytz.utc),
+                },
             )
         elif reset:
-            section = ItemFactory.create(
+            section = BlockFactory.create(
                 parent_location=self.chapter.location,
                 display_name=name,
                 category='sequential',
@@ -222,7 +235,7 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
             )
 
         elif showanswer:
-            section = ItemFactory.create(
+            section = BlockFactory.create(
                 parent_location=self.chapter.location,
                 display_name=name,
                 category='sequential',
@@ -234,7 +247,7 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
             )
 
         else:
-            section = ItemFactory.create(
+            section = BlockFactory.create(
                 parent_location=self.chapter.location,
                 display_name=name,
                 category='sequential',
@@ -275,7 +288,7 @@ class TestSubmittingProblems(ModuleStoreTestCase, LoginEnrollmentTestCase, Probl
         Returns list of scores: [<points on hw_1>, <points on hw_2>, ..., <points on hw_n>]
         """
         return [
-            s.graded_total.earned for s in self.get_course_grade().graded_subsections_by_format['Homework'].values()
+            s.graded_total.earned for s in self.get_course_grade().graded_subsections_by_format()['Homework'].values()
         ]
 
     def hw_grade(self, hw_url_name):
@@ -339,7 +352,7 @@ class TestCourseGrader(TestSubmittingProblems):
     Suite of tests for the course grader.
     """
     # Tell Django to clean out all databases, not just default
-    databases = {alias for alias in connections}  # lint-amnesty, pylint: disable=unnecessary-comprehension
+    databases = set(connections)
 
     def basic_setup(self, late=False, reset=False, showanswer=False):
         """
@@ -490,14 +503,14 @@ class TestCourseGrader(TestSubmittingProblems):
         )
         # count how many state history entries there are
         baseline = BaseStudentModuleHistory.get_history(student_module)
-        assert len(baseline) == 2
+        assert len(baseline) == 1
 
         # now click "show answer"
         self.show_question_answer('p1')
 
         # check that we don't have more state history entries
         csmh = BaseStudentModuleHistory.get_history(student_module)
-        assert len(csmh) == 2
+        assert len(csmh) == 1
 
     def test_grade_with_collected_max_score(self):
         """
@@ -752,7 +765,7 @@ class TestCourseGrader(TestSubmittingProblems):
 class ProblemWithUploadedFilesTest(TestSubmittingProblems):
     """Tests of problems with uploaded files."""
     # Tell Django to clean out all databases, not just default
-    databases = {alias for alias in connections}  # lint-amnesty, pylint: disable=unnecessary-comprehension
+    databases = set(connections)
 
     def setUp(self):
         super().setUp()
@@ -766,7 +779,7 @@ class ProblemWithUploadedFilesTest(TestSubmittingProblems):
         xmldata = CodeResponseXMLFactory().build_xml(
             allowed_files=files, required_files=files,
         )
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=self.section.location,
             category='problem',
             display_name=name,
@@ -776,7 +789,8 @@ class ProblemWithUploadedFilesTest(TestSubmittingProblems):
         # re-fetch the course from the database so the object is up to date
         self.refresh_course()
 
-    def test_three_files(self):
+    @patch.object(XQueueInterface, '_http_post')
+    def test_three_files(self, mock_xqueue_post):
         # Open the test files, and arrange to close them later.
         filenames = "prog1.py prog2.py prog3.py"
         fileobjs = [
@@ -787,28 +801,28 @@ class ProblemWithUploadedFilesTest(TestSubmittingProblems):
             self.addCleanup(fileobj.close)
 
         self.problem_setup("the_problem", filenames)
-        with patch('lms.djangoapps.courseware.module_render.XQUEUE_INTERFACE.session') as mock_session:
-            resp = self.submit_question_answer("the_problem", {'2_1': fileobjs})
+        mock_xqueue_post.return_value = (0, "ok")
+        resp = self.submit_question_answer("the_problem", {'2_1': fileobjs})
 
         assert resp.status_code == 200
         json_resp = json.loads(resp.content.decode('utf-8'))
         assert json_resp['success'] == 'incorrect'
 
         # See how post got called.
-        name, args, kwargs = mock_session.mock_calls[0]
-        assert name == 'post'
-        assert len(args) == 1
+        assert mock_xqueue_post.call_count == 1
+        args, kwargs = mock_xqueue_post.call_args
+        assert len(args) == 2
         assert args[0].endswith('/submit/')
-        self.assertCountEqual(list(kwargs.keys()), ["files", "data", "timeout"])
-        self.assertCountEqual(list(kwargs['files'].keys()), filenames.split())
+        self.assertEqual(list(kwargs['files'].keys()), filenames.split())  # noqa: PT009
 
 
+@UseUnsafeCodejail()
 class TestPythonGradedResponse(TestSubmittingProblems):
     """
     Check that we can submit a schematic and custom response, and it answers properly.
     """
     # Tell Django to clean out all databases, not just default
-    databases = {alias for alias in connections}  # lint-amnesty, pylint: disable=unnecessary-comprehension
+    databases = set(connections)
 
     SCHEMATIC_SCRIPT = dedent("""
         # for a schematic response, submission[i] is the json representation
@@ -912,10 +926,9 @@ class TestPythonGradedResponse(TestSubmittingProblems):
         script = self.SCHEMATIC_SCRIPT
 
         xmldata = SchematicResponseXMLFactory().build_xml(answer=script)
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=self.section.location,
             category='problem',
-            boilerplate='circuitschematic.yaml',
             display_name=name,
             data=xmldata
         )
@@ -936,10 +949,9 @@ class TestPythonGradedResponse(TestSubmittingProblems):
         expect = self.CUSTOM_RESPONSE_CORRECT
         cfn_problem_xml = CustomResponseXMLFactory().build_xml(script=test_csv, cfn='test_csv', expect=expect)
 
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=self.section.location,
             category='problem',
-            boilerplate='customgrader.yaml',
             data=cfn_problem_xml,
             display_name=name
         )
@@ -960,10 +972,9 @@ class TestPythonGradedResponse(TestSubmittingProblems):
 
         computed_xml = CustomResponseXMLFactory().build_xml(answer=script)
 
-        ItemFactory.create(
+        BlockFactory.create(
             parent_location=self.section.location,
             category='problem',
-            boilerplate='customgrader.yaml',
             data=computed_xml,
             display_name=name
         )
@@ -1113,7 +1124,7 @@ class TestConditionalContent(TestSubmittingProblems):
         for index, url in enumerate([vertical_0_url, vertical_1_url]):
             group_id_to_child[str(index)] = url
 
-        split_test = ItemFactory.create(
+        split_test = BlockFactory.create(
             parent_location=self.homework_conditional.location,
             category="split_test",
             display_name="Split test",
@@ -1121,14 +1132,14 @@ class TestConditionalContent(TestSubmittingProblems):
             group_id_to_child=group_id_to_child,
         )
 
-        vertical_0 = ItemFactory.create(
+        vertical_0 = BlockFactory.create(
             parent_location=split_test.location,
             category="vertical",
             display_name="Condition 0 vertical",
             location=vertical_0_url,
         )
 
-        vertical_1 = ItemFactory.create(
+        vertical_1 = BlockFactory.create(
             parent_location=split_test.location,
             category="vertical",
             display_name="Condition 1 vertical",

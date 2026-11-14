@@ -6,17 +6,21 @@ Tests for the API functions in the credit app.
 import datetime
 import json
 from unittest import mock
-import pytest
+from zoneinfo import ZoneInfo
+
 import ddt
 import httpretty
-import pytz
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+import pytest
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core import mail
 from django.db import connection
 from django.test.utils import override_settings
 from opaque_keys.edx.keys import CourseKey
 
 from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.util.date_utils import from_timestamp
 from lms.djangoapps.commerce.tests import TEST_API_URL
 from openedx.core.djangoapps.credit import api
 from openedx.core.djangoapps.credit.email_utils import get_credit_provider_attribute_values, make_providers_strings
@@ -26,7 +30,7 @@ from openedx.core.djangoapps.credit.exceptions import (
     InvalidCreditRequirements,
     InvalidCreditStatus,
     RequestAlreadyCompleted,
-    UserIsNotEligible
+    UserIsNotEligible,
 )
 from openedx.core.djangoapps.credit.models import (
     CreditConfig,
@@ -35,14 +39,13 @@ from openedx.core.djangoapps.credit.models import (
     CreditProvider,
     CreditRequest,
     CreditRequirement,
-    CreditRequirementStatus
+    CreditRequirementStatus,
 )
 from openedx.core.djangolib.testing.utils import skip_unless_lms
-from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import UserFactory
-from common.djangoapps.util.date_utils import from_timestamp
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 TEST_CREDIT_PROVIDER_SECRET_KEY = "931433d583c84ca7ba41784bad3232e6"
 TEST_CREDIT_PROVIDER_SECRET_KEY_TWO = "abcf433d583c8baebae1784bad3232e6"
@@ -400,7 +403,7 @@ class CreditRequirementApiTests(CreditApiTestBase):
         CreditEligibility.objects.create(
             course=credit_course,
             username="staff",
-            deadline=datetime.datetime.now(pytz.UTC) - datetime.timedelta(days=1)
+            deadline=datetime.datetime.now(ZoneInfo("UTC")) - datetime.timedelta(days=1)
         )
 
         # The user should NOT be eligible for credit
@@ -663,7 +666,7 @@ class CreditRequirementApiTests(CreditApiTestBase):
         assert not api.is_user_eligible_for_credit(user.username, self.course_key)
 
         # Satisfy the other requirement
-        with self.assertNumQueries(20):
+        with self.assertNumQueries(22):
             api.set_credit_requirement_status(
                 user,
                 self.course_key,
@@ -747,7 +750,7 @@ class CreditRequirementApiTests(CreditApiTestBase):
         # Since the requirement hasn't been published yet, it won't show
         # up in the list of requirements.
         req_status = api.get_credit_requirement_status(self.course_key, username, namespace="grade", name="grade")
-        assert req_status == []
+        assert not req_status
 
         # Now add the requirements, simulating what happens when a course is published.
         requirements = [
@@ -960,7 +963,7 @@ class CreditProviderIntegrationApiTests(CreditApiTestBase):
         # Validate the timestamp
         assert 'timestamp' in parameters
         parsed_date = from_timestamp(parameters['timestamp'])
-        assert parsed_date < datetime.datetime.now(pytz.UTC)
+        assert parsed_date < datetime.datetime.now(ZoneInfo("UTC"))
 
         # Validate course information
         assert parameters['course_org'] == self.course_key.org
@@ -969,7 +972,7 @@ class CreditProviderIntegrationApiTests(CreditApiTestBase):
         assert parameters['final_grade'] == str(self.FINAL_GRADE)
 
         # Validate user information
-        for key in self.USER_INFO.keys():  # lint-amnesty, pylint: disable=consider-iterating-dictionary
+        for key in self.USER_INFO.keys():  # pylint: disable=consider-iterating-dictionary
             param_key = f'user_{key}'
             assert param_key in parameters
             expected = '' if key == 'mailing_address' else self.USER_INFO[key]
@@ -1220,15 +1223,16 @@ class CourseApiTests(CreditApiTestBase):
         """Verify that parsed providers list is returns after getting course production information."""
         self._mock_ecommerce_courses_api(self.course_key, self.COURSE_API_RESPONSE)
         response_providers = get_credit_provider_attribute_values(self.course_key, 'display_name')
-        self.assertListEqual(self.PROVIDERS_LIST, response_providers)
+        self.assertListEqual(self.PROVIDERS_LIST, response_providers)  # noqa: PT009
 
-    @httpretty.activate
-    @mock.patch('edx_rest_api_client.client.EdxRestApiClient.__init__')
-    def test_get_credit_provider_display_names_method_with_exception(self, mock_init):
-        """Verify that in case of any exception it logs the error and return."""
-        mock_init.side_effect = Exception
+    @mock.patch('openedx.core.djangoapps.credit.email_utils.get_ecommerce_api_client')
+    def test_get_credit_provider_display_names_method_with_exception(self, mock_get_client):
+        """
+        Verify that in case of any exception it logs the error and return.
+        """
+        mock_get_client.side_effect = Exception
         response = get_credit_provider_attribute_values(self.course_key, 'display_name')
-        assert mock_init.called
+        assert mock_get_client.called
         assert response is None
 
     @httpretty.activate
@@ -1239,11 +1243,11 @@ class CourseApiTests(CreditApiTestBase):
 
         # Warm up the cache.
         response_providers = get_credit_provider_attribute_values(self.course_key, 'display_name')
-        self.assertListEqual(self.PROVIDERS_LIST, response_providers)
+        self.assertListEqual(self.PROVIDERS_LIST, response_providers)  # noqa: PT009
 
         # Hit the cache.
         response_providers = get_credit_provider_attribute_values(self.course_key, 'display_name')
-        self.assertListEqual(self.PROVIDERS_LIST, response_providers)
+        self.assertListEqual(self.PROVIDERS_LIST, response_providers)  # noqa: PT009
 
         # Verify only one request was made.
         assert len(httpretty.httpretty.latest_requests) == 1
@@ -1258,10 +1262,10 @@ class CourseApiTests(CreditApiTestBase):
         self._mock_ecommerce_courses_api(self.course_key, self.COURSE_API_RESPONSE)
 
         response_providers = get_credit_provider_attribute_values(self.course_key, 'display_name')
-        self.assertListEqual(self.PROVIDERS_LIST, response_providers)
+        self.assertListEqual(self.PROVIDERS_LIST, response_providers)  # noqa: PT009
 
         response_providers = get_credit_provider_attribute_values(self.course_key, 'display_name')
-        self.assertListEqual(self.PROVIDERS_LIST, response_providers)
+        self.assertListEqual(self.PROVIDERS_LIST, response_providers)  # noqa: PT009
 
         assert len(httpretty.httpretty.latest_requests) == 2
 

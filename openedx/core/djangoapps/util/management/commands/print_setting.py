@@ -3,7 +3,11 @@ print_setting
 =============
 
 Django command to output a single Django setting.
-Useful when paver or a shell script needs such a value.
+Originally used by "paver" scripts before we removed them.
+Still useful when a shell script needs such a value.
+Keep in mind that the LMS/CMS startup time is slow, so if you invoke this
+Django management multiple times in a command that gets run often, you are
+going to be sad.
 
 This handles the one specific use case of the "print_settings" command from
 django-extensions that we were actually using.
@@ -40,7 +44,7 @@ class Command(BaseCommand):
 
         for setting in settings_to_print:
             if not hasattr(settings, setting):
-                raise CommandError('%s not found in settings.' % setting)
+                raise CommandError('%s not found in settings.' % setting)  # noqa: UP031
 
             setting_value = getattr(settings, setting)
 

@@ -19,6 +19,36 @@
                 window.edx.HtmlUtils = HtmlUtils;
                 window.edx.StringUtils = StringUtils;
             });
+
+        window.MathJax = {
+            tex: {
+                inlineMath: [
+                    ['\\(', '\\)'],
+                    ['[mathjaxinline]', '[/mathjaxinline]']
+                ],
+                displayMath: [
+                    ['\\[', '\\]'],
+                    ['[mathjax]', '[/mathjax]']
+                ],
+                autoload: {
+                    color: [],
+                    colorv2: ['color']
+                },
+                packages: {'[+]': ['noerrors']}
+            },
+            options: {
+                ignoreHtmlClass: 'tex2jax_ignore',
+                processHtmlClass: 'tex2jax_process',
+                menuOptions: {
+                    settings: {
+                        collapsible: true
+                    },
+                },
+            },
+            loader: {
+                load: ['input/asciimath', '[tex]/noerrors']
+            }
+        };
     }
 
     requirejs.config({
@@ -39,9 +69,9 @@
             'jquery.cookie': 'xmodule_js/common_static/js/vendor/jquery.cookie',
             'jquery.qtip': 'xmodule_js/common_static/js/vendor/jquery.qtip.min',
             'jquery.fileupload': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.fileupload',
-            'jquery.fileupload-process': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.fileupload-process',   // eslint-disable-line max-len
-            'jquery.fileupload-validate': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.fileupload-validate',   // eslint-disable-line max-len
-            'jquery.iframe-transport': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.iframe-transport',   // eslint-disable-line max-len
+            'jquery.fileupload-process': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.fileupload-process', // eslint-disable-line max-len
+            'jquery.fileupload-validate': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.fileupload-validate', // eslint-disable-line max-len
+            'jquery.iframe-transport': 'xmodule_js/common_static/js/vendor/jQuery-File-Upload/js/jquery.iframe-transport', // eslint-disable-line max-len
             'jquery.inputnumber': 'xmodule_js/common_static/js/vendor/html5-input-polyfills/number-polyfill',
             'jquery.immediateDescendents': 'xmodule_js/common_static/js/src/jquery.immediateDescendents',
             'jquery.simulate': 'xmodule_js/common_static/js/vendor/jquery.simulate',
@@ -69,7 +99,7 @@
             'domReady': 'xmodule_js/common_static/js/vendor/domReady',
             'URI': 'xmodule_js/common_static/js/vendor/URI.min',
             'mock-ajax': 'xmodule_js/common_static/js/vendor/mock-ajax',
-            mathjax: 'https://cdn.jsdelivr.net/npm/mathjax@2.7.5/MathJax.js?config=TeX-MML-AM_SVG&delayStartupUntil=configured',   // eslint-disable-line max-len
+            mathjax: 'https://cdn.jsdelivr.net/npm/mathjax@4.1.2/tex-mml-chtml.js?noext',
             'youtube': '//www.youtube.com/player_api?noext',
             'js/src/ajax_prefix': 'xmodule_js/common_static/js/src/ajax_prefix',
             'js/spec/test_utils': 'js/spec/test_utils'
@@ -172,15 +202,6 @@
             },
             'mathjax': {
                 exports: 'MathJax',
-                init: function() {
-                    window.MathJax.Hub.Config({
-                        tex2jax: {
-                            inlineMath: [['\\(', '\\)'], ['[mathjaxinline]', '[/mathjaxinline]']],
-                            displayMath: [['\\[', '\\]'], ['[mathjax]', '[/mathjax]']]
-                        }
-                    });
-                    return window.MathJax.Hub.Configured();
-                }
             },
             'accessibility': {
                 exports: 'accessibility',
@@ -233,54 +254,31 @@
         'js/spec/models/metadata_spec',
         'js/spec/models/section_spec',
         'js/spec/models/settings_course_grader_spec',
-        'js/spec/models/settings_grading_spec',
-        'js/spec/models/textbook_spec',
         'js/spec/models/upload_spec',
-        'js/spec/views/course_info_spec',
         'js/spec/views/metadata_edit_spec',
-        'js/spec/views/textbook_spec',
         'js/spec/views/upload_spec',
         'js/spec/video/transcripts/message_manager_spec',
         'js/spec/video/transcripts/utils_spec',
         'js/spec/video/transcripts/editor_spec',
-        'js/spec/video/transcripts/videolist_spec',
         'js/spec/video/transcripts/file_uploader_spec',
         'js/spec/models/component_template_spec',
-        'js/spec/models/explicit_url_spec',
         'js/spec/models/xblock_info_spec',
         'js/spec/models/xblock_validation_spec',
         'js/spec/models/license_spec',
         'js/spec/utils/drag_and_drop_spec',
         'js/spec/utils/handle_iframe_binding_spec',
         'js/spec/utils/module_spec',
-        'js/spec/views/active_video_upload_list_spec',
-        'js/spec/views/previous_video_upload_spec',
-        'js/spec/views/video_thumbnail_spec',
-        'js/spec/views/course_video_settings_spec',
-        'js/spec/views/video_transcripts_spec',
-        'js/spec/views/previous_video_upload_list_spec',
         'js/spec/views/assets_spec',
         'js/spec/views/baseview_spec',
         'js/spec/views/paged_container_spec',
-        'js/spec/views/group_configuration_spec',
-        'js/spec/views/unit_outline_spec',
         'js/spec/views/xblock_spec',
         'js/spec/views/xblock_validation_spec',
         'js/spec/views/license_spec',
         'js/spec/views/paging_spec',
-        'js/spec/views/pages/group_configurations_spec',
         'js/spec/views/pages/course_rerun_spec',
         'js/spec/views/pages/index_spec',
-        'js/spec/views/pages/library_users_spec',
         'js/spec/views/modals/base_modal_spec',
-        'js/spec/views/modals/move_xblock_modal_spec',
-        'js/spec/views/modals/validation_error_modal_spec',
-        'js/spec/views/settings/main_spec',
-        'js/certificates/spec/models/certificate_spec',
-        'js/certificates/spec/views/certificate_details_spec',
-        'js/certificates/spec/views/certificate_editor_spec',
-        'js/certificates/spec/views/certificates_list_spec',
-        'js/certificates/spec/views/certificate_preview_spec'
+        'js/spec/views/modals/move_xblock_modal_spec'
     ];
 
     i = 0;
@@ -297,6 +295,6 @@
     ];
 
     requireSerial(specHelpers.concat(testFiles), function() {
-        return window.__karma__.start();  // eslint-disable-line no-underscore-dangle
+        return window.__karma__.start(); // eslint-disable-line no-underscore-dangle
     });
 }).call(this, requirejs, requireSerial);

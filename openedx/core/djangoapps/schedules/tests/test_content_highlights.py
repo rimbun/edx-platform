@@ -1,25 +1,25 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 import datetime
 from unittest.mock import patch
+
 import pytest
+
+from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.tests.factories import UserFactory
 from openedx.core.djangoapps.schedules.content_highlights import (
     course_has_highlights_from_store,
     get_all_course_highlights,
     get_next_section_highlights,
-    get_week_highlights
+    get_week_highlights,
 )
 from openedx.core.djangoapps.schedules.exceptions import CourseUpdateDoesNotExist
 from openedx.core.djangolib.testing.utils import skip_unless_lms
-from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 @skip_unless_lms
-class TestContentHighlights(ModuleStoreTestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
+class TestContentHighlights(ModuleStoreTestCase):  # pylint: disable=missing-class-docstring
     def setUp(self):
         super().setUp()
         self._setup_course()
@@ -36,7 +36,7 @@ class TestContentHighlights(ModuleStoreTestCase):  # lint-amnesty, pylint: disab
         CourseEnrollment.enroll(self.user, self.course_key)
 
     def _create_chapter(self, **kwargs):
-        ItemFactory.create(
+        BlockFactory.create(
             parent=self.course,
             category='chapter',
             **kwargs
@@ -87,7 +87,7 @@ class TestContentHighlights(ModuleStoreTestCase):  # lint-amnesty, pylint: disab
             self._create_chapter(display_name="Week 1")
             self._create_chapter(display_name="Week 2")
 
-        self.course = self.store.get_course(self.course_key)  # lint-amnesty, pylint: disable=attribute-defined-outside-init
+        self.course = self.store.get_course(self.course_key)  # pylint: disable=attribute-defined-outside-init
         assert len(self.course.get_children()) == 2
 
         assert not course_has_highlights_from_store(self.course_key)
@@ -157,21 +157,21 @@ class TestContentHighlights(ModuleStoreTestCase):  # lint-amnesty, pylint: disab
         assert get_next_section_highlights(self.user, self.course_key, two_days_ago, three_days.date()) == (None, None)
         assert get_next_section_highlights(self.user, self.course_key, two_days_ago, four_days.date()) ==\
                (['final week!'], 4)
-        exception_message = f'Last section was reached. There are no more highlights for {self.course_key}'
+        exception_message = f'Last section was reached. There are no more highlights for {self.course_key}'  # noqa: F841  # pylint: disable=line-too-long
         with pytest.raises(CourseUpdateDoesNotExist):
             get_next_section_highlights(self.user, self.course_key, two_days_ago, six_days.date())
 
-    @patch('lms.djangoapps.courseware.module_render.get_module_for_descriptor')
-    def test_get_highlights_without_module(self, mock_get_module):
-        mock_get_module.return_value = None
+    @patch('lms.djangoapps.courseware.block_render.get_block_for_descriptor')
+    def test_get_highlights_without_block(self, mock_get_block):
+        mock_get_block.return_value = None
 
         with self.store.bulk_operations(self.course_key):
             self._create_chapter(highlights=['Test highlight'])
 
-        with self.assertRaisesRegex(CourseUpdateDoesNotExist, 'Course module .* not found'):
+        with self.assertRaisesRegex(CourseUpdateDoesNotExist, 'Course block .* not found'):  # noqa: PT027
             get_week_highlights(self.user, self.course_key, 1)
 
         yesterday = datetime.datetime.utcnow() - datetime.timedelta(days=1)
         today = datetime.datetime.utcnow()
-        with self.assertRaisesRegex(CourseUpdateDoesNotExist, 'Course module .* not found'):
+        with self.assertRaisesRegex(CourseUpdateDoesNotExist, 'Course block .* not found'):  # noqa: PT027
             get_next_section_highlights(self.user, self.course_key, yesterday, today.date())

@@ -2,15 +2,14 @@
 Django pipeline finder for handling static assets required by XBlocks.
 """
 
+import importlib.resources as resources
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from django.contrib.staticfiles import utils
 from django.contrib.staticfiles.finders import BaseFinder
 from django.contrib.staticfiles.storage import FileSystemStorage
 from django.core.files.storage import Storage
-from django.utils import timezone
-from pkg_resources import resource_exists, resource_filename, resource_isdir, resource_listdir
 from xblock.core import XBlock
 
 from openedx.core.lib.xblock_utils import xblock_resource_pkg
@@ -38,16 +37,16 @@ class XBlockPackageStorage(Storage):
         """
         Returns a file system filename for the specified file name.
         """
-        return resource_filename(self.module, os.path.join(self.base_dir, name))
+        with resources.as_file(resources.files(self.module.rsplit('.', 1)[0]) / self.base_dir / name) as file_path:
+            return str(file_path)
 
-    def exists(self, path):  # lint-amnesty, pylint: disable=arguments-differ
+    def exists(self, path):  # pylint: disable=arguments-differ
         """
         Returns True if the specified path exists.
         """
         if self.base_dir is None:
             return False
-
-        return resource_exists(self.module, os.path.join(self.base_dir, path))
+        return (resources.files(self.module.rsplit('.', 1)[0]) / self.base_dir / path).exists()
 
     def listdir(self, path):
         """
@@ -55,13 +54,14 @@ class XBlockPackageStorage(Storage):
         """
         directories = []
         files = []
-        for item in resource_listdir(self.module, os.path.join(self.base_dir, path)):
-            __, file_extension = os.path.splitext(item)
-            if file_extension not in [".py", ".pyc", ".scss"]:
-                if resource_isdir(self.module, os.path.join(self.base_dir, path, item)):
-                    directories.append(item)
-                else:
-                    files.append(item)
+        base_path = resources.files(self.module.rsplit('.', 1)[0]) / self.base_dir / path
+        if base_path.is_dir():
+            for item in base_path.iterdir():
+                if item.suffix not in [".py", ".pyc", ".scss"]:
+                    if item.is_dir():
+                        directories.append(item.name)
+                    else:
+                        files.append(item.name)
         return directories, files
 
     def open(self, name, mode='rb'):
@@ -81,19 +81,19 @@ class XBlockPackageStorage(Storage):
         """
         Returns a URL to the package resource.
         """
-        return datetime.fromtimestamp(os.path.getatime(self.path(name)), timezone.utc)
+        return datetime.fromtimestamp(os.path.getatime(self.path(name)), timezone.utc)  # noqa: UP017
 
     def get_created_time(self, name):
         """
         Returns the created time of the package resource.
         """
-        return datetime.fromtimestamp(os.path.getctime(self.path(name)), timezone.utc)
+        return datetime.fromtimestamp(os.path.getctime(self.path(name)), timezone.utc)  # noqa: UP017
 
     def get_modified_time(self, name):
         """
         Returns the modified time of the resource.
         """
-        return datetime.fromtimestamp(os.path.getmtime(self.path(name)), timezone.utc)
+        return datetime.fromtimestamp(os.path.getmtime(self.path(name)), timezone.utc)  # noqa: UP017
 
     def url(self, name):
         """
@@ -108,7 +108,7 @@ class XBlockPackageStorage(Storage):
         raise NotImplementedError("Deleting files from a package is not supported")
 
 
-class XBlockPipelineFinder(BaseFinder):  # lint-amnesty, pylint: disable=abstract-method
+class XBlockPipelineFinder(BaseFinder):  # pylint: disable=abstract-method
     """
     A static files finder that gets static assets from xblocks.
     """
@@ -123,7 +123,7 @@ class XBlockPipelineFinder(BaseFinder):  # lint-amnesty, pylint: disable=abstrac
 
         # xblock_resource_info holds (package_name, resources_dir) tuples. While
         # it never happens in practice, the XBlock API does allow different
-        # XBlocks installed with the same setup.py to refer to their shared
+        # XBlocks installed from the same package to refer to their shared
         # static assets using different prefixes.
         xblock_resource_info = {
             (xblock_resource_pkg(xblock_class), xblock_class.get_resources_dir())
@@ -143,15 +143,25 @@ class XBlockPipelineFinder(BaseFinder):  # lint-amnesty, pylint: disable=abstrac
                 for path in utils.get_files(storage, ignore_patterns):
                     yield path, storage
 
-    def find(self, path, all=False):  # pylint: disable=redefined-builtin
+    def find(self, path, *args, **kwargs):  # pylint: disable=redefined-builtin
         """
         Looks for files in the xblock package directories.
         """
+        if 'all' in kwargs:
+            # Note this method signature where we accept all and find_all is being used so that we can be
+            # compatible with both Django 4.2 and Django 5.2 at the same time.  After we have fully
+            # dropped Django 4.2 support, the method signature can be updated to just consume the
+            # `find_all` paramater.
+            find_all = kwargs.get('all', False)
+        elif 'find_all' in kwargs:
+            find_all = kwargs.get('find_all', False)
+        else:
+            find_all = args[0] if args else False
         matches = []
         for storage in self.package_storages:
             if storage.exists(path):
                 match = storage.path(path)
-                if not all:
+                if not find_all:
                     return match
                 matches.append(match)
         return matches

@@ -6,8 +6,10 @@ Tests for VideoBlockURLTransformer.
 from unittest import mock
 
 from openedx.core.djangoapps.content.block_structure.factory import BlockStructureFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import ToyCourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import ToyCourseFactory  # pylint: disable=wrong-import-order
 
 from ..student_view import StudentViewTransformer
 from ..video_urls import VideoBlockURLTransformer
@@ -63,7 +65,7 @@ class TestVideoBlockURLTransformer(ModuleStoreTestCase):
             block_structure=self.block_structure,
         )
 
-    @mock.patch('xmodule.video_module.VideoBlock.student_view_data')
+    @mock.patch('xmodule.video_block.VideoBlock.student_view_data')
     def test_rewrite_for_encoded_videos(self, mock_video_data):
         """
         Test that video URLs for videos with available encodings
@@ -93,7 +95,7 @@ class TestVideoBlockURLTransformer(ModuleStoreTestCase):
         for video_format, video_url in post_transform_data.items():
             assert pre_transform_data[video_format] != video_url
 
-    @mock.patch('xmodule.video_module.VideoBlock.student_view_data')
+    @mock.patch('xmodule.video_block.VideoBlock.student_view_data')
     def test_no_rewrite_for_third_party_vendor(self, mock_video_data):
         """
         Test that video URLs aren't re-written for the videos
@@ -123,7 +125,7 @@ class TestVideoBlockURLTransformer(ModuleStoreTestCase):
         for video_format, video_url in post_transform_data.items():
             assert pre_transform_data[video_format] == video_url
 
-    @mock.patch('xmodule.video_module.VideoBlock.student_view_data')
+    @mock.patch('xmodule.video_block.VideoBlock.student_view_data')
     def test_no_rewrite_for_web_only_videos(self, mock_video_data):
         """
         Verify no rewrite attempt is made for the videos
@@ -136,4 +138,4 @@ class TestVideoBlockURLTransformer(ModuleStoreTestCase):
         pre_transform_data = self.get_pre_transform_data(video_block_key)
         self.collect_and_transform()
         post_transform_data = self.get_post_transform_data(video_block_key)
-        self.assertDictEqual(pre_transform_data, post_transform_data)
+        self.assertDictEqual(pre_transform_data, post_transform_data)  # noqa: PT009

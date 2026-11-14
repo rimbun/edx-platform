@@ -2,38 +2,74 @@
 Toggles for course home experience.
 """
 
-from edx_toggles.toggles import LegacyWaffleFlagNamespace
-
 from openedx.core.djangoapps.waffle_utils import CourseWaffleFlag
 
-WAFFLE_FLAG_NAMESPACE = LegacyWaffleFlagNamespace(name='course_home')
+WAFFLE_FLAG_NAMESPACE = 'course_home'
 
-COURSE_HOME_MICROFRONTEND_PROGRESS_TAB = CourseWaffleFlag(WAFFLE_FLAG_NAMESPACE, 'course_home_mfe_progress_tab',  # lint-amnesty, pylint: disable=toggle-missing-annotation
-                                                          __name__)
+# .. toggle_name: course_home.course_home_mfe_progress_tab
+# .. toggle_implementation: WaffleFlag
+# .. toggle_default: False
+# .. toggle_description: This toggle controls the user interface behavior of the progress tab in
+#   the Learning Management System. When set to True, the progress tab utilizes the newly introduced
+#   Learning MFE graphs. When set to False (default), it utilizes existing grade graph from edx-platform.
+# .. toggle_use_cases: temporary
+# .. toggle_creation_date: 2021-03-12
+# .. toggle_target_removal_date: 2024-01-01
+# .. toggle_tickets: https://github.com/openedx/edx-platform/pull/26978
+COURSE_HOME_MICROFRONTEND_PROGRESS_TAB = CourseWaffleFlag(
+    f'{WAFFLE_FLAG_NAMESPACE}.course_home_mfe_progress_tab', __name__
+)
 
-# .. toggle_name: course_home.course_home_use_legacy_frontend
+
+# Waffle flag to enable new discussion sidebar view on course home page
+#
+# .. toggle_name: course_home.new_discussion_sidebar_view
 # .. toggle_implementation: CourseWaffleFlag
 # .. toggle_default: False
-# .. toggle_description: This flag enables the use of the legacy view of course home as the default course frontend.
-# .. Learning microfrontend (frontend-app-learning) is now an opt-out view, where if this flag is
-# .. enabled the default changes from the learning microfrontend to legacy.
-# .. toggle_warnings: None
-# .. toggle_use_cases: temporary
-# .. toggle_creation_date: 2021-06-11
-# .. toggle_target_removal_date: 2022-05-15
-# .. toggle_tickets: https://openedx.atlassian.net/browse/AA-797
-COURSE_HOME_USE_LEGACY_FRONTEND = CourseWaffleFlag(WAFFLE_FLAG_NAMESPACE, 'course_home_use_legacy_frontend', __name__)
+# .. toggle_description: This toggle controls the user interface behavior of the discussion sidebar on course home page.
+# .. toggle_use_cases: open_edx, temporary
+# .. toggle_creation_date: 2024-04-22
+# .. toggle_target_removal_date: None
+# .. toggle_tickets: INF-1338
+COURSE_HOME_NEW_DISCUSSION_SIDEBAR_VIEW = CourseWaffleFlag(
+    f'{WAFFLE_FLAG_NAMESPACE}.new_discussion_sidebar_view', __name__
+)
 
 
-def course_home_legacy_is_active(course_key):
-    return COURSE_HOME_USE_LEGACY_FRONTEND.is_enabled(course_key) or course_key.deprecated
+# Waffle flag to enable emission of course progress analytics for students in their courses.
+#
+# .. toggle_name: course_home.send_course_progress_analytics_for_student
+# .. toggle_implementation: CourseWaffleFlag
+# .. toggle_default: False
+# .. toggle_description: This toggle controls whether the system will enqueue a Celery task responsible for emitting an
+#   analytics events describing how much course content a learner has completed in a course.
+# .. toggle_use_cases: open_edx
+# .. toggle_creation_date: 2025-04-02
+# .. toggle_target_removal_date: None
+COURSE_HOME_SEND_COURSE_PROGRESS_ANALYTICS_FOR_STUDENT = CourseWaffleFlag(
+    f'{WAFFLE_FLAG_NAMESPACE}.send_course_progress_analytics_for_student', __name__
+)
 
 
 def course_home_mfe_progress_tab_is_active(course_key):
     # Avoiding a circular dependency
     from .models import DisableProgressPageStackedConfig
     return (
-        (not course_home_legacy_is_active(course_key)) and
+        not course_key.deprecated and
         COURSE_HOME_MICROFRONTEND_PROGRESS_TAB.is_enabled(course_key) and
         not DisableProgressPageStackedConfig.current(course_key=course_key).disabled
     )
+
+
+def new_discussion_sidebar_view_is_enabled(course_key):
+    """
+    Returns True if the new discussion sidebar view is enabled for the given course.
+    """
+    return COURSE_HOME_NEW_DISCUSSION_SIDEBAR_VIEW.is_enabled(course_key)
+
+
+def send_course_progress_analytics_for_student_is_enabled(course_key):
+    """
+    Returns True if the course completion analytics feature is enabled for a given course.
+    """
+    return COURSE_HOME_SEND_COURSE_PROGRESS_ANALYTICS_FOR_STUDENT.is_enabled(course_key)

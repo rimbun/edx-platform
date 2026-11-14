@@ -1,7 +1,7 @@
 <%page args="section_data" expression_filter="h"/>
 <%namespace name='static' file='/static_content.html'/>
 <%!
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from openedx.core.djangolib.markup import HTML, Text
 %>
 
@@ -33,6 +33,10 @@ from openedx.core.djangolib.markup import HTML, Text
                             data-endpoint="${ section_data['get_students_who_may_enroll_url'] }" data-csv="true">
                         Learner
                         who can enroll
+                    </option>
+                    <option value="inactiveEnrolledlearners"
+                            data-endpoint="${ section_data['get_inactive_enrolled_students_url'] }" data-csv="true">
+                        Enrolled Learner who has an inactive account
                     </option>
                     <option value="listEnrolledPeople"
                             data-endpoint="${ section_data['get_students_features_url'] }"
@@ -94,6 +98,9 @@ from openedx.core.djangolib.markup import HTML, Text
 
             <p hidden="hidden" class="selectionInfo reports learnerWhoCanEnroll">${_("Click to generate a CSV file \
                 that lists learners who can enroll in the course but have not yet done so.")}</p>
+
+            <p hidden="hidden" class="selectionInfo reports inactiveEnrolledlearners">${_("Click to generate a CSV file \
+                that lists learners who are enrolled in the course but have not yet activated their account.")}</p>
 
             <p hidden="hidden" class="selectionInfo reports proctoredExamResults">${_("Click to generate a CSV file \
                 of all proctored exam results in this course.")}</p>

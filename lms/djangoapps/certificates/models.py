@@ -2,11 +2,11 @@
 Course certificates are created for a student and an offering of a course (a course run).
 """
 
-
 import json
 import logging
 import os
 import uuid
+from datetime import timezone
 
 from config_models.models import ConfigurationModel
 from django.apps import apps
@@ -16,27 +16,31 @@ from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import Count
 from django.dispatch import receiver
-
-from django.utils.translation import ugettext_lazy as _
-from edx_name_affirmation.api import get_verified_name, should_use_verified_name_for_certs
-from edx_name_affirmation.toggles import is_verified_name_enabled
+from django.utils.translation import gettext_lazy as _
 from model_utils import Choices
 from model_utils.models import TimeStampedModel
 from opaque_keys.edx.django.models import CourseKeyField
+from openedx_events.learning.data import (  # pylint: disable=wrong-import-order
+    CertificateData,
+    CourseData,
+    UserData,
+    UserPersonalData,
+)
+from openedx_events.learning.signals import (  # pylint: disable=wrong-import-order
+    CERTIFICATE_CHANGED,
+    CERTIFICATE_CREATED,
+    CERTIFICATE_REVOKED,
+)
 from simple_history.models import HistoricalRecords
 
 from common.djangoapps.student import models_api as student_api
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.util.milestones_helpers import fulfill_course_milestone, is_prerequisite_courses_enabled
-from lms.djangoapps.badges.events.course_complete import course_badge_check
-from lms.djangoapps.badges.events.course_meta import completion_check, course_group_check
 from lms.djangoapps.certificates.data import CertificateStatuses
 from lms.djangoapps.instructor_task.models import InstructorTask
 from openedx.core.djangoapps.signals.signals import COURSE_CERT_AWARDED, COURSE_CERT_CHANGED, COURSE_CERT_REVOKED
 from openedx.core.djangoapps.xmodule_django.models import NoneToEmptyManager
-
-from openedx_events.learning.data import CourseData, UserData, UserPersonalData, CertificateData
-from openedx_events.learning.signals import CERTIFICATE_CHANGED, CERTIFICATE_CREATED, CERTIFICATE_REVOKED
+from openedx.features.name_affirmation_api.utils import get_name_affirmation_service
 
 log = logging.getLogger(__name__)
 User = get_user_model()
@@ -64,9 +68,9 @@ class CertificateAllowlist(TimeStampedModel):
     objects = NoneToEmptyManager()
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)
-    course_id = CourseKeyField(max_length=255, blank=True, default=None)
+    course_id = CourseKeyField(blank=True, default=None)
     allowlist = models.BooleanField(default=0)
-    notes = models.TextField(default=None, null=True)
+    notes = models.TextField(default=None, null=True)  # noqa: DJ001
 
     # This is necessary because CMS does not install the certificates app, but it
     # imports this model's code. Simple History will attempt to connect to the installed
@@ -162,13 +166,13 @@ class EligibleAvailableCertificateManager(EligibleCertificateManager):
         )
 
 
-class GeneratedCertificate(models.Model):
+class GeneratedCertificate(models.Model):  # noqa: DJ008
     """
     Base model for generated course certificates
 
-    .. pii: PII can exist in the generated certificate linked to in this model. Certificate data is currently retained.
-    .. pii_types: name, username
-    .. pii_retirement: retained
+    .. pii: PII can exist in the generated certificate linked to in this model.
+    .. pii_types: name
+    .. pii_retirement: local_api
 
     course_id       - Course run key
     created_date    - Date and time the certificate was created
@@ -212,16 +216,19 @@ class GeneratedCertificate(models.Model):
         'professional',
         'no-id-professional',
         'masters',
-        'executive-education'
+        'executive-education',
+        'paid-executive-education',
+        'paid-bootcamp',
     )
 
-    VERIFIED_CERTS_MODES = [CourseMode.VERIFIED, CourseMode.CREDIT_MODE, CourseMode.MASTERS, CourseMode.EXECUTIVE_EDUCATION]  # pylint: disable=line-too-long
+    VERIFIED_CERTS_MODES = [
+        CourseMode.VERIFIED, CourseMode.CREDIT_MODE, CourseMode.MASTERS, CourseMode.EXECUTIVE_EDUCATION,
+        CourseMode.PAID_EXECUTIVE_EDUCATION, CourseMode.PAID_BOOTCAMP
+    ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)
-    course_id = CourseKeyField(max_length=255, blank=True, default=None)
+    course_id = CourseKeyField(blank=True, default=None)
     verify_uuid = models.CharField(max_length=32, blank=True, default='', db_index=True)
-    download_uuid = models.CharField(max_length=32, blank=True, default='')
-    download_url = models.CharField(max_length=128, blank=True, default='')
     grade = models.CharField(max_length=5, blank=True, default='')
     key = models.CharField(max_length=32, blank=True, default='')
     distinction = models.BooleanField(default=False)
@@ -230,12 +237,21 @@ class GeneratedCertificate(models.Model):
     name = models.CharField(blank=True, max_length=255)
     created_date = models.DateTimeField(auto_now_add=True)
     modified_date = models.DateTimeField(auto_now=True)
+
+    # These fields have been kept around even though they are not used.
+    # See lms/djangoapps/certificates/docs/decisions/008-certificate-model-remnants.rst for the ADR.
+    download_uuid = models.CharField(max_length=32, blank=True, default='')
+    download_url = models.CharField(max_length=128, blank=True, default='')
     error_reason = models.CharField(max_length=512, blank=True, default='')
 
     # This is necessary because CMS does not install the certificates app, but it
     # imports this model's code. Simple History will attempt to connect to the installed
     # model in the certificates app, which will fail.
     if 'certificates' in apps.app_configs:
+        # The PII is retained by default, but can be removed by enabling ``REDACT_CERTIFICATES_HISTORICAL_PII``.
+        # .. pii: The auto-generated ``HistoricalGeneratedCertificate`` table mirrors all fields of this model.
+        # .. pii_types: name
+        # .. pii_retirement: retained
         history = HistoricalRecords()
 
     class Meta:
@@ -297,8 +313,8 @@ class GeneratedCertificate(models.Model):
         else:
             return query.values('status').annotate(count=Count('status'))
 
-    def __repr__(self):
-        return "<GeneratedCertificate: {course_id}, user={user}>".format(
+    def __repr__(self):  # noqa: DJ012
+        return "<GeneratedCertificate: {course_id}, user={user}>".format(  # noqa: UP032
             course_id=self.course_id,
             user=self.user
         )
@@ -371,6 +387,10 @@ class GeneratedCertificate(models.Model):
 
         if not grade:
             grade = ''
+        # the grade can come through revocation as a float, so we must convert it to a string to be compatible with the
+        # `CERTIFICATE_REVOKED` event definition
+        elif isinstance(grade, float):
+            grade = str(grade)
 
         if not mode:
             mode = self.mode
@@ -394,7 +414,10 @@ class GeneratedCertificate(models.Model):
             status=self.status,
         )
 
+        # .. event_implemented_name: CERTIFICATE_REVOKED
+        # .. event_type: org.openedx.learning.certificate.revoked.v1
         CERTIFICATE_REVOKED.send_event(
+            time=self.modified_date.astimezone(timezone.utc),  # noqa: UP017
             certificate=CertificateData(
                 user=UserData(
                     pii=UserPersonalData(
@@ -435,9 +458,10 @@ class GeneratedCertificate(models.Model):
         a circular dependency.
         """
         name_to_use = student_api.get_name(user.id)
+        name_affirmation_service = get_name_affirmation_service()
 
-        if is_verified_name_enabled() and should_use_verified_name_for_certs(user):
-            verified_name_obj = get_verified_name(user, is_verified=True)
+        if name_affirmation_service and name_affirmation_service.should_use_verified_name_for_certs(user):
+            verified_name_obj = name_affirmation_service.get_verified_name(user, is_verified=True)
             if verified_name_obj:
                 name_to_use = verified_name_obj.verified_name
 
@@ -452,7 +476,7 @@ class GeneratedCertificate(models.Model):
         """
         return self.status == CertificateStatuses.downloadable
 
-    def save(self, *args, **kwargs):  # pylint: disable=signature-differs
+    def save(self, *args, **kwargs):  # pylint: disable=signature-differs  # noqa: DJ012
         """
         After the base save() method finishes, fire the COURSE_CERT_CHANGED signal. If the learner is currently passing
         the course we also fire the COURSE_CERT_AWARDED signal.
@@ -464,6 +488,9 @@ class GeneratedCertificate(models.Model):
         Credentials IDA.
         """
         super().save(*args, **kwargs)
+
+        timestamp = self.modified_date.astimezone(timezone.utc)  # noqa: UP017
+
         COURSE_CERT_CHANGED.send_robust(
             sender=self.__class__,
             user=self.user,
@@ -472,7 +499,10 @@ class GeneratedCertificate(models.Model):
             status=self.status,
         )
 
+        # .. event_implemented_name: CERTIFICATE_CHANGED
+        # .. event_type: org.openedx.learning.certificate.changed.v1
         CERTIFICATE_CHANGED.send_event(
+            time=timestamp,
             certificate=CertificateData(
                 user=UserData(
                     pii=UserPersonalData(
@@ -503,7 +533,10 @@ class GeneratedCertificate(models.Model):
                 status=self.status,
             )
 
+            # .. event_implemented_name: CERTIFICATE_CREATED
+            # .. event_type: org.openedx.learning.certificate.created.v1
             CERTIFICATE_CREATED.send_event(
+                time=timestamp,
                 certificate=CertificateData(
                     user=UserData(
                         pii=UserPersonalData(
@@ -533,7 +566,7 @@ class CertificateGenerationHistory(TimeStampedModel):
     .. no_pii:
     """
 
-    course_id = CourseKeyField(max_length=255)
+    course_id = CourseKeyField()
     generated_by = models.ForeignKey(User, on_delete=models.CASCADE)
     instructor_task = models.ForeignKey(InstructorTask, on_delete=models.CASCADE)
     is_regeneration = models.BooleanField(default=False)
@@ -559,7 +592,7 @@ class CertificateGenerationHistory(TimeStampedModel):
         if not task_input.strip():
             # if task input is empty, it means certificates were generated for all learners
             # Translators: This string represents task was executed for all learners.
-            return _("All learners")
+            return _("All Learners")
 
         task_input_json = json.loads(task_input)
 
@@ -578,16 +611,16 @@ class CertificateGenerationHistory(TimeStampedModel):
         # for backwards compatibility.
         if 'student_set' in task_input_json or 'students' in task_input_json:
             # Translators: This string represents task was executed for students having exceptions.
-            return _("For exceptions")
+            return _("Granted Exceptions")
         else:
-            return _("All learners")
+            return _("All Learners")
 
     class Meta:
         app_label = "certificates"
 
     def __str__(self):
         return "certificates %s by %s on %s for %s" % \
-               ("regenerated" if self.is_regeneration else "generated", self.generated_by, self.created, self.course_id)
+               ("regenerated" if self.is_regeneration else "generated", self.generated_by, self.created, self.course_id)  # noqa: UP031  # pylint: disable=line-too-long
 
 
 class CertificateInvalidation(TimeStampedModel):
@@ -598,7 +631,7 @@ class CertificateInvalidation(TimeStampedModel):
     """
     generated_certificate = models.ForeignKey(GeneratedCertificate, on_delete=models.CASCADE)
     invalidated_by = models.ForeignKey(User, on_delete=models.CASCADE)
-    notes = models.TextField(default=None, null=True)
+    notes = models.TextField(default=None, null=True)  # noqa: DJ001
     active = models.BooleanField(default=True)
 
     # This is necessary because CMS does not install the certificates app, but
@@ -613,7 +646,7 @@ class CertificateInvalidation(TimeStampedModel):
 
     def __str__(self):
         return "Certificate %s, invalidated by %s on %s." % \
-               (self.generated_certificate, self.invalidated_by, self.created)
+               (self.generated_certificate, self.invalidated_by, self.created)  # noqa: UP031
 
     def deactivate(self):
         """
@@ -693,7 +726,7 @@ class ExampleCertificateSet(TimeStampedModel):
 
     .. no_pii:
     """
-    course_key = CourseKeyField(max_length=255, db_index=True)
+    course_key = CourseKeyField(db_index=True)
 
     class Meta:
         get_latest_by = 'created'
@@ -761,9 +794,9 @@ class ExampleCertificateSet(TimeStampedModel):
     def _template_for_mode(mode_slug, course_key):
         """Calculate the template PDF based on the course mode. """
         return (
-            "certificate-template-{key.org}-{key.course}-verified.pdf".format(key=course_key)
+            "certificate-template-{key.org}-{key.course}-verified.pdf".format(key=course_key)  # noqa: UP032
             if mode_slug == 'verified'
-            else "certificate-template-{key.org}-{key.course}.pdf".format(key=course_key)
+            else "certificate-template-{key.org}-{key.course}.pdf".format(key=course_key)  # noqa: UP032
         )
 
 
@@ -864,13 +897,13 @@ class ExampleCertificate(TimeStampedModel):
         help_text=_("The status of the example certificate.")
     )
 
-    error_reason = models.TextField(
+    error_reason = models.TextField(  # noqa: DJ001
         null=True,
         default=None,
         help_text=_("The reason an error occurred during certificate generation.")
     )
 
-    download_url = models.CharField(
+    download_url = models.CharField(  # noqa: DJ001
         max_length=255,
         null=True,
         default=None,
@@ -900,7 +933,7 @@ class ExampleCertificate(TimeStampedModel):
 
         """
         if status not in [self.STATUS_SUCCESS, self.STATUS_ERROR]:
-            msg = "Invalid status: must be either '{success}' or '{error}'.".format(
+            msg = "Invalid status: must be either '{success}' or '{error}'.".format(  # noqa: UP032
                 success=self.STATUS_SUCCESS,
                 error=self.STATUS_ERROR
             )
@@ -954,7 +987,7 @@ class CertificateGenerationCourseSetting(TimeStampedModel):
 
     .. no_pii:
     """
-    course_key = CourseKeyField(max_length=255, db_index=True)
+    course_key = CourseKeyField(db_index=True)
 
     self_generation_enabled = models.BooleanField(
         default=False,
@@ -972,15 +1005,15 @@ class CertificateGenerationCourseSetting(TimeStampedModel):
             "certificate template."
         )
     )
-    include_hours_of_effort = models.NullBooleanField(
+    include_hours_of_effort = models.BooleanField(
         default=None,
         help_text=(
             "Display estimated time to complete the course, which is equal to the maximum hours of effort per week "
             "times the length of the course in weeks. This attribute will only be displayed in a certificate when the "
             "attributes 'Weeks to complete' and 'Max effort' have been provided for the course run and its "
             "certificate template includes Hours of Effort."
-        )
-    )
+        ),
+        null=True)
 
     class Meta:
         get_latest_by = 'created'
@@ -1103,8 +1136,11 @@ class CertificateHtmlViewConfiguration(ConfigurationModel):
 class CertificateTemplate(TimeStampedModel):
     """A set of custom web certificate templates.
 
-    Web certificate templates are Django web templates
+    Web certificate templates are Mako templates
     to replace PDF certificate.
+
+    Mako runs arbitrary Python, so anyone who can edit a template can run
+    code on the LMS server.
 
     A particular course may have several kinds of certificate templates
     (e.g. honor and verified).
@@ -1115,14 +1151,17 @@ class CertificateTemplate(TimeStampedModel):
         max_length=255,
         help_text=_('Name of template.'),
     )
-    description = models.CharField(
+    description = models.CharField(  # noqa: DJ001
         max_length=255,
         null=True,
         blank=True,
         help_text=_('Description and/or admin notes.'),
     )
     template = models.TextField(
-        help_text=_('Django template HTML.'),
+        help_text=_(
+            'Mako template HTML. Mako runs any Python code in the template on the LMS server, so only give '
+            'add or change access to certificate templates to users you would trust with shell access to the LMS.'
+        ),
     )
     organization_id = models.IntegerField(
         null=True,
@@ -1136,7 +1175,7 @@ class CertificateTemplate(TimeStampedModel):
         blank=True,
         db_index=True,
     )
-    mode = models.CharField(
+    mode = models.CharField(  # noqa: DJ001
         max_length=125,
         choices=GeneratedCertificate.MODES,
         default=GeneratedCertificate.MODES.honor,
@@ -1148,7 +1187,7 @@ class CertificateTemplate(TimeStampedModel):
         help_text=_('On/Off switch.'),
         default=False,
     )
-    language = models.CharField(
+    language = models.CharField(  # noqa: DJ001
         max_length=2,
         blank=True,
         null=True,
@@ -1188,7 +1227,7 @@ class CertificateTemplateAsset(TimeStampedModel):
 
     .. no_pii:
     """
-    description = models.CharField(
+    description = models.CharField(  # noqa: DJ001
         max_length=255,
         null=True,
         blank=True,
@@ -1199,7 +1238,7 @@ class CertificateTemplateAsset(TimeStampedModel):
         upload_to=template_assets_path,
         help_text=_('Asset file. It could be an image or css file.'),
     )
-    asset_slug = models.SlugField(
+    asset_slug = models.SlugField(  # noqa: DJ001
         max_length=255,
         unique=True,
         null=True,
@@ -1224,29 +1263,28 @@ class CertificateTemplateAsset(TimeStampedModel):
         app_label = "certificates"
 
 
-@receiver(COURSE_CERT_AWARDED, sender=GeneratedCertificate)
-# pylint: disable=unused-argument
-def create_course_badge(sender, user, course_key, status, **kwargs):
+class ModifiedCertificateTemplateCommandConfiguration(ConfigurationModel):
     """
-    Standard signal hook to create course badges when a certificate has been generated.
-    """
-    course_badge_check(user, course_key)
+    Manages configuration for a run of the modify_cert_template management command.
 
+    .. no_pii:
+    """
 
-@receiver(COURSE_CERT_AWARDED, sender=GeneratedCertificate)
-def create_completion_badge(sender, user, course_key, status, **kwargs):  # pylint: disable=unused-argument
-    """
-    Standard signal hook to create 'x courses completed' badges when a certificate has been generated.
-    """
-    completion_check(user)
+    class Meta:
+        app_label = "certificates"
+        verbose_name = "modify_cert_template argument"
 
+    arguments = models.TextField(
+        blank=True,
+        help_text=(
+            "Arguments for the 'modify_cert_template' management command. Specify like '--old-text \"foo\" "
+            "--new-text \"bar\" --template_ids <id1> <id2>'"
+        ),
+        default="",
+    )
 
-@receiver(COURSE_CERT_AWARDED, sender=GeneratedCertificate)
-def create_course_group_badge(sender, user, course_key, status, **kwargs):  # pylint: disable=unused-argument
-    """
-    Standard signal hook to create badges when a user has completed a prespecified set of courses.
-    """
-    course_group_check(user, course_key)
+    def __str__(self):
+        return str(self.arguments)
 
 
 class CertificateGenerationCommandConfiguration(ConfigurationModel):
@@ -1264,6 +1302,30 @@ class CertificateGenerationCommandConfiguration(ConfigurationModel):
         blank=True,
         help_text=(
             "Arguments for the 'cert_generation' management command. Specify like '-u <user_id> -c <course_run_key>'"
+        ),
+        default="",
+    )
+
+    def __str__(self):
+        return str(self.arguments)
+
+
+class PurgeReferencestoPDFCertificatesCommandConfiguration(ConfigurationModel):
+    """
+    Manages configuration for a run of the purge_references_to_pdf_certificates management command.
+
+    .. no_pii:
+    """
+
+    class Meta:
+        app_label = "certificates"
+        verbose_name = "purge_references_to_pdf_certificates argument"
+
+    arguments = models.TextField(
+        blank=True,
+        help_text=(
+            "Arguments for the 'purge_references_to_pdf_certificates' management command. "
+            "Specify like '--certificate_ids <id1> <id2>'"
         ),
         default="",
     )
@@ -1308,7 +1370,7 @@ class CertificateDateOverride(TimeStampedModel):
 
     def __str__(self):
         return "Certificate %s, date overridden to %s by %s on %s." % \
-               (self.generated_certificate, self.date, self.overridden_by, self.created)
+               (self.generated_certificate, self.date, self.overridden_by, self.created)  # noqa: UP031
 
     def send_course_cert_changed_signal(self):
         COURSE_CERT_CHANGED.send_robust(

@@ -16,8 +16,9 @@ from common.djangoapps.student.roles import CourseInstructorRole, CourseStaffRol
 from lms.djangoapps.courseware.courses import has_access
 from lms.djangoapps.discussion.django_comment_client.utils import has_discussion_privileges
 from lms.djangoapps.teams.models import CourseTeam, CourseTeamMembership
+from openedx.core.lib.log_utils import get_username_or_pii_safe_user_id_for_log
 from openedx.core.lib.teams_config import TeamsetType
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,7 @@ def user_organization_protection_status(user, course_key):
         else:
             return OrganizationProtectionStatus.unprotected
     else:
-        raise ValueError(  # lint-amnesty, pylint: disable=raising-format-tuple
+        raise ValueError(  # pylint: disable=raising-format-tuple
             'Cannot check the org_protection status on a student [%s] not enrolled in course [%s]',
             user.id,
             course_key
@@ -205,31 +206,31 @@ def has_specific_team_access(user, team):
     )
 
 
-def has_specific_teamset_access(user, course_module, teamset_id):
+def has_specific_teamset_access(user, course_block, teamset_id):
     """
     Staff have access to all teamsets.
     All non-staff users have access to open and public_managed teamsets.
     Non-staff users only have access to a private_managed teamset if they are in a team in that teamset
     """
-    return has_course_staff_privileges(user, course_module.id) or \
-        teamset_is_public_or_user_is_on_team_in_teamset(user, course_module, teamset_id)
+    return has_course_staff_privileges(user, course_block.id) or \
+        teamset_is_public_or_user_is_on_team_in_teamset(user, course_block, teamset_id)
 
 
-def teamset_is_public_or_user_is_on_team_in_teamset(user, course_module, teamset_id):
+def teamset_is_public_or_user_is_on_team_in_teamset(user, course_block, teamset_id):
     """
     The only users who should be able to see private_managed teamsets
     or recieve any information about them at all from the API are:
     - Course staff
     - Users who are enrolled in a team in a private_managed teamset
 
-    course_module is passed in because almost universally where we'll be calling this, we will already
+    course_block is passed in because almost universally where we'll be calling this, we will already
     need to have looked up the course from modulestore to make sure that the topic we're interested in
     exists in the course.
     """
-    teamset = course_module.teams_configuration.teamsets_by_id[teamset_id]
+    teamset = course_block.teams_configuration.teamsets_by_id[teamset_id]
     if teamset.teamset_type != TeamsetType.private_managed:
         return True
-    return CourseTeamMembership.user_in_team_for_teamset(user, course_module.id, topic_id=teamset_id)
+    return CourseTeamMembership.user_in_team_for_teamset(user, course_block.id, topic_id=teamset_id)
 
 
 def user_on_team_or_team_is_public(user, team):
@@ -242,8 +243,8 @@ def user_on_team_or_team_is_public(user, team):
     """
     if CourseTeamMembership.is_user_on_team(user, team):
         return True
-    course_module = modulestore().get_course(team.course_id)
-    teamset = course_module.teams_configuration.teamsets_by_id[team.topic_id]
+    course_block = modulestore().get_course(team.course_id)
+    teamset = course_block.teams_configuration.teamsets_by_id[team.topic_id]
     return teamset.teamset_type != TeamsetType.private_managed
 
 
@@ -289,8 +290,8 @@ def get_teams_accessible_by_user(user, topic_id_set, course_id, organization_pro
         return CourseTeam.objects.filter(**filter_query)
 
     # Private teams should be hidden unless the student is a member
-    course_module = modulestore().get_course(course_id)
-    private_teamset_ids = [ts.teamset_id for ts in course_module.teamsets if ts.is_private_managed]
+    course_block = modulestore().get_course(course_id)
+    private_teamset_ids = [ts.teamset_id for ts in course_block.teamsets if ts.is_private_managed]
     return CourseTeam.objects.filter(**filter_query).exclude(
         Q(topic_id__in=private_teamset_ids), ~Q(membership__user=user)
     )
@@ -349,7 +350,7 @@ def get_team_for_user_course_topic(user, course_id, topic_id):
     try:
         course_key = CourseKey.from_string(course_id)
     except InvalidKeyError:
-        raise ValueError("The supplied course id {course_id} is not valid.".format(  # lint-amnesty, pylint: disable=raise-missing-from
+        raise ValueError("The supplied course id {course_id} is not valid.".format(  # pylint: disable=raise-missing-from  # noqa: B904, UP032
             course_id=course_id
         ))
     try:
@@ -364,7 +365,7 @@ def get_team_for_user_course_topic(user, course_id, topic_id):
         # This shouldn't ever happen but it's here for safety's sake
         msg = "user {username} is on multiple teams within course {course} topic {topic}"
         logger.error(msg.format(
-            username=user.username,
+            username=get_username_or_pii_safe_user_id_for_log(user),
             course=course_id,
             topic=topic_id,
         ))
@@ -373,6 +374,22 @@ def get_team_for_user_course_topic(user, course_id, topic_id):
             membership__user__username=user.username,
             topic_id=topic_id,
         ).first()
+
+
+def get_teams_in_teamset(course_id, topic_id):
+    """
+    Given a course_id and topic_id, return all CourseTeams in the course and topic
+    """
+    try:
+        course_key = CourseKey.from_string(course_id)
+    except InvalidKeyError as exc:
+        raise ValueError("The supplied course id {course_id} is not valid.".format(  # noqa: UP032
+            course_id=course_id
+        )) from exc
+    return CourseTeam.objects.filter(
+        course_id=course_key,
+        topic_id=topic_id,
+    ).all()
 
 
 def anonymous_user_ids_for_team(user, team):
@@ -386,7 +403,7 @@ def anonymous_user_ids_for_team(user, team):
         raise Exception("User and team must be provided for ID lookup")
 
     if not has_course_staff_privileges(user, team.course_id) and not user_is_a_team_member(user, team):
-        raise Exception("User {user} is not permitted to access team info for {team}".format(
+        raise Exception("User {user} is not permitted to access team info for {team}".format(  # noqa: UP032
             user=user.username,
             team=team.team_id
         ))
@@ -401,7 +418,7 @@ def get_assignments_for_team(user, team):
     """ Get openassessment XBlocks configured for the current teamset """
     # Confirm access
     if not has_specific_team_access(user, team):
-        raise Exception("User {user} is not permitted to access team info for {team}".format(
+        raise Exception("User {user} is not permitted to access team info for {team}".format(  # noqa: UP032
             user=user.username,
             team=team.team_id
         ))

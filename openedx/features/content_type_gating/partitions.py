@@ -8,11 +8,11 @@ of audit learners.
 
 import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 import crum
-import pytz
 from django.template.loader import render_to_string
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from web_fragments.fragment import Fragment
 
 from common.djangoapps.course_modes.models import CourseMode
@@ -22,7 +22,10 @@ from openedx.core.lib.mobile_utils import is_request_from_mobile_app
 from openedx.features.content_type_gating.helpers import CONTENT_GATING_PARTITION_ID, FULL_ACCESS, LIMITED_ACCESS
 from openedx.features.content_type_gating.models import ContentTypeGatingConfig
 from openedx.features.discounts.utils import format_strikeout_price
-from xmodule.partitions.partitions import UserPartition, UserPartitionError
+from xmodule.partitions.partitions import (  # pylint: disable=wrong-import-order
+    UserPartition,
+    UserPartitionError,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -88,10 +91,10 @@ class ContentTypeGatingPartition(UserPartition):
             return None
 
         expiration_datetime = verified_mode.expiration_datetime
-        if expiration_datetime and expiration_datetime < datetime.datetime.now(pytz.UTC):
+        if expiration_datetime and expiration_datetime < datetime.datetime.now(ZoneInfo("UTC")):
             ecommerce_checkout_link = None
         else:
-            ecommerce_checkout_link = self._get_checkout_link(user, verified_mode.sku)
+            ecommerce_checkout_link = self._get_checkout_link(user, verified_mode.sku, str(course_key))
 
         request = crum.get_current_request()
 
@@ -118,11 +121,11 @@ class ContentTypeGatingPartition(UserPartition):
         else:
             return _("Graded assessments are available to Verified Track learners. Upgrade to Unlock.")
 
-    def _get_checkout_link(self, user, sku):
+    def _get_checkout_link(self, user, sku, course_run_key):
         ecomm_service = EcommerceService()
         ecommerce_checkout = ecomm_service.is_enabled(user)
         if ecommerce_checkout and sku:
-            return ecomm_service.get_checkout_page_url(sku) or ''
+            return ecomm_service.get_checkout_page_url(sku, course_run_keys=[course_run_key]) or ''
 
     def _get_course_key_from_course_block(self, block):
         """

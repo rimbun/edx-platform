@@ -2,10 +2,10 @@
 Tests for account linking Python API.
 """
 
-
 from unittest.mock import patch
 from uuid import uuid4
 
+import ddt
 from django.test import TestCase
 from edx_django_utils.cache import RequestCache
 from opaque_keys.edx.keys import CourseKey
@@ -17,15 +17,16 @@ from common.djangoapps.student.tests.factories import CourseAccessRoleFactory, U
 from lms.djangoapps.program_enrollments.tests.factories import (
     CourseAccessRoleAssignmentFactory,
     ProgramCourseEnrollmentFactory,
-    ProgramEnrollmentFactory
+    ProgramEnrollmentFactory,
 )
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
 
 from ..linking import (
     NO_LMS_USER_TEMPLATE,
     NO_PROGRAM_ENROLLMENT_TEMPLATE,
     _user_already_linked_message,
-    link_program_enrollments
+    link_program_enrollments,
 )
 
 LOG_PATH = 'lms.djangoapps.program_enrollments.api.linking'
@@ -98,7 +99,7 @@ class TestLinkProgramEnrollmentsMixin:
         if refresh:
             user.refresh_from_db()
         enrollment = user.programenrollment_set.get(
-            program_uuid=program_uuid, external_user_key=external_user_key
+            program_uuid=program_uuid, external_user_key__iexact=external_user_key
         )
         assert enrollment is not None
 
@@ -122,12 +123,13 @@ class TestLinkProgramEnrollmentsMixin:
             for program_course_enrollment in program_course_enrollments
         ]
         assert all(course_enrollment.is_active for course_enrollment in course_enrollments)
-        self.assertCountEqual(
+        self.assertCountEqual(  # noqa: PT009
             course_keys,
             [course_enrollment.course.id for course_enrollment in course_enrollments]
         )
 
 
+@ddt.ddt
 class TestLinkProgramEnrollments(TestLinkProgramEnrollmentsMixin, TestCase):
     """ Tests for linking behavior """
 
@@ -152,6 +154,22 @@ class TestLinkProgramEnrollments(TestLinkProgramEnrollmentsMixin, TestCase):
         )
 
         self._assert_no_user(another_program_enrollment)
+
+    def test_link_mixed_case_external_user_key(self):
+        """
+        Test that when linking the program enrollment with same external user key,
+        but the casing on external_user_key is mixed, the linking is still successful
+        """
+        program_enrollment = self._create_waiting_enrollment(self.program, 'student-43')
+        self._create_waiting_course_enrollment(program_enrollment, self.fruit_course)
+        self._create_waiting_course_enrollment(program_enrollment, self.animal_course)
+
+        link_program_enrollments(self.program, {'STUDEnt-43': self.user_1.username})
+
+        self._assert_program_enrollment(self.user_1, self.program, 'STUDEnt-43')
+        self._assert_user_enrolled_in_program_courses(
+            self.user_1, self.program, self.fruit_course, self.animal_course
+        )
 
     def test_inactive_waiting_course_enrollment(self):
         """
@@ -272,14 +290,24 @@ class TestLinkProgramEnrollments(TestLinkProgramEnrollmentsMixin, TestCase):
         for course_enrollment in course_enrollments:
             assert course_enrollment.mode == course_keys_to_mode[course_enrollment.course.id]
 
+    @ddt.data(
+        ('001', '001'),
+        ('learner-2', 'LEArneR-2'),
+    )
+    @ddt.unpack
     @patch('lms.djangoapps.program_enrollments.api.linking.CourseMode.modes_for_course_dict')
-    def test_update_linking_enrollment_to_another_user(self, mock_modes_for_course_dict):
+    def test_update_linking_enrollment_to_another_user(
+        self,
+        linked_external_key,
+        updated_external_key,
+        mock_modes_for_course_dict,
+    ):
         """
         Test that when link_program_enrollments is called with a program and an external_user_key,
         user pair and that program is already linked to a different user with the same external_user_key
         that the original user's link is removed and replaced by a link with the new user.
         """
-        program_enrollment = self._create_waiting_enrollment(self.program, '0001')
+        program_enrollment = self._create_waiting_enrollment(self.program, linked_external_key)
 
         self._create_waiting_course_enrollment(program_enrollment, self.fruit_course)
         self._create_waiting_course_enrollment(program_enrollment, self.animal_course)
@@ -296,9 +324,9 @@ class TestLinkProgramEnrollments(TestLinkProgramEnrollmentsMixin, TestCase):
         mock_modes_for_course_dict.side_effect = mocked_modes_for_course_dict
 
         # do the initial link of user_1 to the program enrollment
-        link_program_enrollments(self.program, {'0001': self.user_1.username})
+        link_program_enrollments(self.program, {linked_external_key: self.user_1.username})
 
-        self._assert_program_enrollment(self.user_1, self.program, '0001', refresh=False)
+        self._assert_program_enrollment(self.user_1, self.program, linked_external_key, refresh=False)
         self._assert_no_program_enrollment(self.user_2, self.program, refresh=False)
 
         # grab the user's original course enrollment before the link between the program
@@ -310,12 +338,12 @@ class TestLinkProgramEnrollments(TestLinkProgramEnrollmentsMixin, TestCase):
         errors = link_program_enrollments(
             self.program,
             {
-                '0001': self.user_2.username,
+                updated_external_key: self.user_2.username,
             }
         )
 
-        assert errors == {}
-        self._assert_program_enrollment(self.user_2, self.program, '0001')
+        assert not errors
+        self._assert_program_enrollment(self.user_2, self.program, updated_external_key)
         self._assert_no_program_enrollment(self.user_1, self.program)
         # assert that all of user_1's course enrollments as part of the program
         # are inactive
@@ -332,11 +360,11 @@ class TestLinkProgramEnrollments(TestLinkProgramEnrollmentsMixin, TestCase):
         self._assert_course_enrollments_in_mode(course_enrollments_for_user_1, course_keys_to_mode)
 
         # assert that user_2 has been successfully linked to the program
-        self._assert_program_enrollment(self.user_2, self.program, '0001')
+        self._assert_program_enrollment(self.user_2, self.program, updated_external_key)
         self._assert_user_enrolled_in_program_courses(self.user_2, self.program, self.fruit_course, self.animal_course)
 
 
-class TestLinkProgramEnrollmentsErrors(TestLinkProgramEnrollmentsMixin, TestCase):
+class TestLinkProgramEnrollmentsErrors(TestLinkProgramEnrollmentsMixin, ModuleStoreTestCase):
     """ Tests for linking error behavior """
 
     def test_program_enrollment_not_found__nonexistant(self):
@@ -368,7 +396,7 @@ class TestLinkProgramEnrollmentsErrors(TestLinkProgramEnrollmentsMixin, TestCase
             )
             logger.check_present((LOG_PATH, 'WARNING', expected_error_msg))
 
-        self.assertDictEqual(errors, {'0002': expected_error_msg})
+        self.assertDictEqual(errors, {'0002': expected_error_msg})  # noqa: PT009
         self._assert_program_enrollment(self.user_1, self.program, '0001')
         self._assert_no_program_enrollment(self.user_2, self.program)
 
@@ -387,7 +415,7 @@ class TestLinkProgramEnrollmentsErrors(TestLinkProgramEnrollmentsMixin, TestCase
             expected_error_msg = NO_LMS_USER_TEMPLATE.format('nonexistant-user')
             logger.check_present((LOG_PATH, 'WARNING', expected_error_msg))
 
-        self.assertDictEqual(errors, {'0002': expected_error_msg})
+        self.assertDictEqual(errors, {'0002': expected_error_msg})  # noqa: PT009
         self._assert_program_enrollment(self.user_1, self.program, '0001')
         self._assert_no_user(enrollment_2)
 
@@ -412,7 +440,7 @@ class TestLinkProgramEnrollmentsErrors(TestLinkProgramEnrollmentsMixin, TestCase
             expected_error_msg = _user_already_linked_message(program_enrollment, self.user_2)
             logger.check_present((LOG_PATH, 'WARNING', expected_error_msg))
 
-        self.assertDictEqual(errors, {'0002': expected_error_msg})
+        self.assertDictEqual(errors, {'0002': expected_error_msg})  # noqa: PT009
         self._assert_program_enrollment(self.user_1, self.program, '0001')
         self._assert_program_enrollment(self.user_2, self.program, '0002')
 

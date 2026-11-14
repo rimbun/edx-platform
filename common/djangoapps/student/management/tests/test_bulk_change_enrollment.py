@@ -5,7 +5,6 @@ from unittest.mock import call, patch
 
 import ddt
 import pytest
-import django
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
@@ -13,8 +12,10 @@ from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from common.djangoapps.student.models import EVENT_NAME_ENROLLMENT_MODE_CHANGED, CourseEnrollment
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
@@ -28,7 +29,7 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
         self.users = UserFactory.create_batch(5)
         CourseOverview.load_from_module_store(self.course.id)
 
-    @patch('common.djangoapps.student.models.tracker')
+    @patch('common.djangoapps.student.models.course_enrollment.tracker')
     @ddt.data(('audit', 'honor'), ('honor', 'audit'))
     @ddt.unpack
     def test_bulk_convert(self, from_mode, to_mode, mock_tracker):
@@ -39,7 +40,7 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
         # Verify that no users are in the `from` mode yet.
         assert len(CourseEnrollment.objects.filter(mode=to_mode, course_id=self.course.id)) == 0
 
-        args = '--course {course} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(
+        args = '--course {course} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(  # noqa: UP032
             course=str(self.course.id),
             from_mode=from_mode,
             to_mode=to_mode
@@ -56,7 +57,7 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
             CourseEnrollment.objects.get(mode=to_mode, course_id=self.course.id, user=user)
             self._assert_mode_changed(mock_tracker, self.course, user, to_mode)
 
-    @patch('common.djangoapps.student.models.tracker')
+    @patch('common.djangoapps.student.models.course_enrollment.tracker')
     @ddt.data(('audit', 'no-id-professional'), ('no-id-professional', 'audit'))
     @ddt.unpack
     def test_bulk_convert_with_org(self, from_mode, to_mode, mock_tracker):
@@ -74,7 +75,7 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
         assert len(CourseEnrollment.objects.filter(mode=to_mode, course_id=self.course.id)) == 0
         assert len(CourseEnrollment.objects.filter(mode=to_mode, course_id=course_2.id)) == 0
 
-        args = '--org {org} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(
+        args = '--org {org} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(  # noqa: UP032
             org=self.org,
             from_mode=from_mode,
             to_mode=to_mode
@@ -107,12 +108,9 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
                 commit=True,
             )
 
-        if django.VERSION < (3, 0):
-            assert 'Error: one of the arguments -c/--course -o/--org is required' == str(err.value)
-        else:
-            assert 'Error: argument -o/--org: not allowed with argument -c/--course' == str(err.value)
+        assert 'Error: argument -o/--org: not allowed with argument -c/--course' == str(err.value)
 
-    @patch('common.djangoapps.student.models.tracker')
+    @patch('common.djangoapps.student.models.course_enrollment.tracker')
     def test_with_org_and_invalid_to_mode(self, mock_tracker):
         """Verify that enrollments are changed correctly when org was given."""
         from_mode = 'audit'
@@ -129,7 +127,7 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
         assert len(CourseEnrollment.objects.filter(mode=to_mode, course_id=self.course.id)) == 0
         assert len(CourseEnrollment.objects.filter(mode=to_mode, course_id=course_2.id)) == 0
 
-        args = '--org {org} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(
+        args = '--org {org} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(  # noqa: UP032
             org=self.org,
             from_mode=from_mode,
             to_mode=to_mode
@@ -156,7 +154,7 @@ class BulkChangeEnrollmentTests(SharedModuleStoreTestCase):
         self._enroll_users(self.course, self.users, 'audit')
         CourseModeFactory(course_id=self.course.id, mode_slug='no-id-professional')
 
-        with pytest.raises(CommandError) as err:
+        with pytest.raises(CommandError) as err:  # noqa: PT012
             args = '--org {org} --from_mode {from_mode} --to_mode {to_mode} --commit'.format(
                 org='fakeX',
                 from_mode='audit',

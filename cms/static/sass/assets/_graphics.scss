@@ -29,7 +29,14 @@
   display: inline-block;
   width: ($baseline*3);
   height: ($baseline*3);
-  background: url('#{$static-path}/images/large-html-icon.png') center no-repeat;
+  background: url('#{$static-path}/images/large-text-icon.png') center no-repeat;
+}
+
+.large-drag-and-drop-v2-icon {
+  display: inline-block;
+  width: ($baseline*3);
+  height: ($baseline*3);
+  background: url('#{$static-path}/images/large-drag-and-drop-v2-icon.png') center no-repeat;
 }
 
 .large-problem-icon {
@@ -51,4 +58,25 @@
   width: ($baseline*3);
   height: ($baseline*3);
   background: url('#{$static-path}/images/large-openassessment-icon.png') center no-repeat;
+}
+
+.large-library-icon {
+  display: inline-block;
+  width: ($baseline*3);
+  height: ($baseline*3);
+  background: url('#{$static-path}/images/large-library-icon.png') center no-repeat;
+}
+
+.large-library_v2-icon {
+  display: inline-block;
+  width: ($baseline*3);
+  height: ($baseline*3);
+  background: url('#{$static-path}/images/large-library_v2-icon.png') center no-repeat;
+}
+
+.large-itembank-icon {
+  display: inline-block;
+  width: ($baseline*3);
+  height: ($baseline*3);
+  background: url('#{$static-path}/images/large-itembank-icon.png') center no-repeat;
 }

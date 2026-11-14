@@ -1,9 +1,9 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 
 import datetime
 import logging
+from zoneinfo import ZoneInfo
 
-import pytz
 from django.db import transaction
 
 from openedx.core.djangoapps.schedules.models import Schedule
@@ -13,7 +13,7 @@ LOG = logging.getLogger(__name__)
 
 # TODO: consider using a LoggerAdapter instead of this mixin:
 # https://docs.python.org/2/library/logging.html#logging.LoggerAdapter
-class PrefixedDebugLoggerMixin:  # lint-amnesty, pylint: disable=missing-class-docstring
+class PrefixedDebugLoggerMixin:  # pylint: disable=missing-class-docstring
     log_prefix = None
 
     def __init__(self, *args, **kwargs):
@@ -34,7 +34,7 @@ class PrefixedDebugLoggerMixin:  # lint-amnesty, pylint: disable=missing-class-d
         LOG.info(self.log_prefix + ': ' + message, *args, **kwargs)
 
 
-def reset_self_paced_schedule(user, course_key, use_availability_date=False):
+def reset_self_paced_schedule(user, course_key, use_enrollment_date=False):
     """
     Reset the user's schedule if self-paced.
 
@@ -44,7 +44,7 @@ def reset_self_paced_schedule(user, course_key, use_availability_date=False):
     Arguments:
         user (User)
         course_key (CourseKey or str)
-        use_availability_date (bool): if False, reset to now, else reset to when user got access to course material
+        use_enrollment_date (bool): if False, reset to now, else reset to original enrollment creation date
     """
     with transaction.atomic(savepoint=False):
         try:
@@ -56,10 +56,13 @@ def reset_self_paced_schedule(user, course_key, use_availability_date=False):
         except Schedule.DoesNotExist:
             return
 
-        if use_availability_date:
-            enrollment = schedule.enrollment
-            schedule.start_date = max(enrollment.created, enrollment.course.start)
-            schedule.save()
+        if use_enrollment_date:
+            new_start_date = schedule.enrollment.created
         else:
-            schedule.start_date = datetime.datetime.now(pytz.utc)
-            schedule.save()
+            new_start_date = datetime.datetime.now(ZoneInfo("UTC"))
+
+        # Make sure we don't start the clock on the learner's schedule before the course even starts
+        new_start_date = max(new_start_date, schedule.enrollment.course.start)
+
+        schedule.start_date = new_start_date
+        schedule.save()

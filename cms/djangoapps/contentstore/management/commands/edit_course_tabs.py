@@ -1,4 +1,4 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 ###
 ### Script for editing the course's tabs
 ###
@@ -25,7 +25,7 @@ def print_course(course):
         print('num type name')
         for index, item in enumerate(course.tabs):
             print(index + 1, '"' + item.get('type') + '"', '"' + item.get('name', '') + '"')
-    # If a course is bad we will get an error descriptor here, dump it and die instead of
+    # If a course is bad we will get an error here, dump it and die instead of
     # just sending up the error that .id doesn't exist.
     except AttributeError:
         print(course)
@@ -33,12 +33,12 @@ def print_course(course):
 
 
 # course.tabs looks like this
-# [{u'type': u'courseware'}, {u'type': u'course_info', u'name': u'Course Info'}, {u'type': u'textbooks'},
+# [{u'type': u'courseware'}, {u'type': u'textbooks'},
 # {u'type': u'discussion', u'name': u'Discussion'}, {u'type': u'wiki', u'name': u'Wiki'},
 # {u'type': u'progress', u'name': u'Progress'}]
 
 
-class Command(BaseCommand):  # lint-amnesty, pylint: disable=missing-class-docstring
+class Command(BaseCommand):  # pylint: disable=missing-class-docstring
     help = """See and edit a course's tabs list. Only supports insertion
 and deletion. Move and rename etc. can be done with a delete
 followed by an insert. The tabs are numbered starting with 1.
@@ -53,7 +53,7 @@ command again, adding --insert or --delete to edit the list.
 
     course_help = '--course <id> required, e.g. Stanford/CS99/2013_spring'
     delete_help = '--delete <tab-number>'
-    insert_help = '--insert <tab-number> <type> <name>, e.g. 4 "course_info" "Course Info"'
+    insert_help = '--insert <tab-number> <type> <name>, e.g. 4 "discussion" "Discussion"'
 
     def add_arguments(self, parser):
         parser.add_argument('--course',
@@ -98,4 +98,4 @@ command again, adding --insert or --delete to edit the list.
                     tabs.primitive_insert(course, num - 1, tab_type, name)  # -1 as above
         except ValueError as e:
             # Cute: translate to CommandError so the CLI error prints nicely.
-            raise CommandError(e)  # lint-amnesty, pylint: disable=raise-missing-from
+            raise CommandError(e)  # pylint: disable=raise-missing-from  # noqa: B904

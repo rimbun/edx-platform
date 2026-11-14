@@ -9,9 +9,9 @@ from pytz import UTC
 from lms.djangoapps.courseware.access_utils import check_start_date
 from openedx.core.djangoapps.content.block_structure.transformer import (
     BlockStructureTransformer,
-    FilteringTransformerMixin
+    FilteringTransformerMixin,
 )
-from xmodule.course_metadata_utils import DEFAULT_START_DATE
+from xmodule.course_metadata_utils import DEFAULT_START_DATE  # pylint: disable=wrong-import-order
 
 from .utils import collect_merged_date_field
 
@@ -39,8 +39,8 @@ class StartDateTransformer(FilteringTransformerMixin, BlockStructureTransformer)
     @classmethod
     def name(cls):
         """
-        Unique identifier for the transformer's class;
-        same identifier used in setup.py.
+        Unique identifier for the transformer's class.
+        This must match the entry point name in the package configuration.
         """
         return "start_date"
 
@@ -96,15 +96,16 @@ class StartDateTransformer(FilteringTransformerMixin, BlockStructureTransformer)
 
         now = datetime.now(UTC)
 
-        removal_condition = lambda block_key: not check_start_date(
-            usage_info.user,
-            block_structure.get_xblock_field(block_key, 'days_early_for_beta'),
-            self._get_merged_start_date(block_structure, block_key),
-            usage_info.course_key,
-            now=now,
-        )
+        def _removal_condition(block_key):
+            return not check_start_date(
+                usage_info.user,
+                block_structure.get_xblock_field(block_key, 'days_early_for_beta'),
+                self._get_merged_start_date(block_structure, block_key),
+                usage_info.course_key,
+                now=now
+            )
 
         if usage_info.include_has_scheduled_content:
-            self._check_has_scheduled_content(block_structure, removal_condition)
+            self._check_has_scheduled_content(block_structure, _removal_condition)
 
-        return [block_structure.create_removal_filter(removal_condition)]
+        return [block_structure.create_removal_filter(_removal_condition)]

@@ -4,6 +4,7 @@ Contains tests to verify correctness of course expiration functionality
 
 from datetime import timedelta
 from unittest import mock
+from unittest.mock import patch
 
 import ddt
 from django.conf import settings
@@ -13,13 +14,17 @@ from django.utils.timezone import now
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.student.models import CourseEnrollment, FBEEnrollmentExclusion
 from common.djangoapps.student.roles import CourseInstructorRole
-from common.djangoapps.student.tests.factories import BetaTesterFactory
-from common.djangoapps.student.tests.factories import TEST_PASSWORD, CourseEnrollmentFactory, UserFactory
-from common.djangoapps.student.tests.factories import GlobalStaffFactory
-from common.djangoapps.student.tests.factories import InstructorFactory
-from common.djangoapps.student.tests.factories import OrgInstructorFactory
-from common.djangoapps.student.tests.factories import OrgStaffFactory
-from common.djangoapps.student.tests.factories import StaffFactory
+from common.djangoapps.student.tests.factories import (
+    TEST_PASSWORD,
+    BetaTesterFactory,
+    CourseEnrollmentFactory,
+    GlobalStaffFactory,
+    InstructorFactory,
+    OrgInstructorFactory,
+    OrgStaffFactory,
+    StaffFactory,
+    UserFactory,
+)
 from lms.djangoapps.courseware.tests.helpers import MasqueradeMixin
 from lms.djangoapps.discussion.django_comment_client.tests.factories import RoleFactory
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
@@ -28,7 +33,7 @@ from openedx.core.djangoapps.django_comment_common.models import (
     FORUM_ROLE_ADMINISTRATOR,
     FORUM_ROLE_COMMUNITY_TA,
     FORUM_ROLE_GROUP_MODERATOR,
-    FORUM_ROLE_MODERATOR
+    FORUM_ROLE_MODERATOR,
 )
 from openedx.core.djangoapps.schedules.models import Schedule
 from openedx.features.content_type_gating.helpers import CONTENT_GATING_PARTITION_ID, CONTENT_TYPE_GATE_GROUP_IDS
@@ -36,7 +41,7 @@ from openedx.features.course_duration_limits.access import get_user_course_expir
 from openedx.features.course_duration_limits.models import CourseDurationLimitConfig
 from openedx.features.course_experience.tests.views.helpers import add_course_mode
 from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.partitions.partitions import ENROLLMENT_TRACK_PARTITION_ID
 
 
@@ -45,9 +50,29 @@ from xmodule.partitions.partitions import ENROLLMENT_TRACK_PARTITION_ID
 class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
     """Tests to verify the get_user_course_expiration_date function is working correctly"""
     def setUp(self):
-        super().setUp()  # lint-amnesty, pylint: disable=super-with-arguments
+        super().setUp()  # pylint: disable=super-with-arguments
+        self.catalog_patch = patch(
+            'openedx.core.djangoapps.catalog.models.CatalogIntegration.is_enabled',
+            return_value=True
+        )
+        self.catalog_patch.start()
         self.course = CourseFactory(
             start=now() - timedelta(weeks=10),
+        )
+        self.chapter = BlockFactory.create(
+            category='chapter',
+            parent_location=self.course.location,
+            display_name='Test Chapter'
+        )
+        self.sequential = BlockFactory.create(
+            category='sequential',
+            parent_location=self.chapter.location,
+            display_name='Test Sequential'
+        )
+        BlockFactory.create(
+            category='vertical',
+            parent_location=self.sequential.location,
+            display_name='Test Vertical'
         )
         self.user = UserFactory()
         self.THREE_YEARS_AGO = now() - timedelta(days=(365 * 3))
@@ -57,8 +82,14 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
         add_course_mode(self.course)
 
     def tearDown(self):
+        self.catalog_patch.stop()
         CourseEnrollment.unenroll(self.user, self.course.id)
-        super().tearDown()  # lint-amnesty, pylint: disable=super-with-arguments
+        super().tearDown()  # pylint: disable=super-with-arguments
+
+    def get_courseware(self):
+        """Returns a response from a GET on a courseware section"""
+        courseware_url = reverse('render_xblock', args=[str(self.sequential.location)])
+        return self.client.get(courseware_url, follow=True)
 
     def test_enrollment_mode(self):
         """Tests that verified enrollments do not have an expiration"""
@@ -157,7 +188,7 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
         result = get_user_course_expiration_date(
             self.user,
             CourseOverview.get_from_id(future_course.id),
-        )
+        ).replace(microsecond=0)
         content_availability_date = start_date.replace(microsecond=0)
         assert result == (content_availability_date + access_duration)
 
@@ -229,14 +260,13 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
             mode='audit'
         )
         CourseInstructorRole(self.course.id).add_users(instructor)
-        self.client.login(username=instructor.username, password='test')
+        self.client.login(username=instructor.username, password=self.TEST_PASSWORD)
 
         self.update_masquerade(**masquerade_config)
 
-        course_home_url = reverse('openedx.course_experience.course_home', args=[str(self.course.id)])
-        response = self.client.get(course_home_url, follow=True)
+        response = self.get_courseware()
         assert response.status_code == 200
-        self.assertCountEqual(response.redirect_chain, [])
+        self.assertCountEqual(response.redirect_chain, [])  # noqa: PT009
         banner_text = 'You lose all access to this course, including your progress,'
         if show_expiration_banner:
             self.assertContains(response, banner_text)
@@ -266,14 +296,13 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
             mode='audit'
         )
         CourseInstructorRole(self.course.id).add_users(instructor)
-        self.client.login(username=instructor.username, password='test')
+        self.client.login(username=instructor.username, password=self.TEST_PASSWORD)
 
         self.update_masquerade(username='audit')
 
-        course_home_url = reverse('openedx.course_experience.course_home', args=[str(self.course.id)])
-        response = self.client.get(course_home_url, follow=True)
+        response = self.get_courseware()
         assert response.status_code == 200
-        self.assertCountEqual(response.redirect_chain, [])
+        self.assertCountEqual(response.redirect_chain, [])  # noqa: PT009
         banner_text = 'You lose all access to this course, including your progress,'
         self.assertNotContains(response, banner_text)
 
@@ -302,14 +331,13 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
             mode='audit'
         )
         CourseInstructorRole(self.course.id).add_users(instructor)
-        self.client.login(username=instructor.username, password='test')
+        self.client.login(username=instructor.username, password=self.TEST_PASSWORD)
 
         self.update_masquerade(username='audit')
 
-        course_home_url = reverse('openedx.course_experience.course_home', args=[str(self.course.id)])
-        response = self.client.get(course_home_url, follow=True)
+        response = self.get_courseware()
         assert response.status_code == 200
-        self.assertCountEqual(response.redirect_chain, [])
+        self.assertCountEqual(response.redirect_chain, [])  # noqa: PT009
         banner_text = 'This learner does not have access to this course. Their access expired on'
         self.assertContains(response, banner_text)
 
@@ -353,14 +381,13 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
             mode='audit'
         )
 
-        self.client.login(username=staff_user.username, password='test')
+        self.client.login(username=staff_user.username, password=self.TEST_PASSWORD)
 
         self.update_masquerade(username=expired_staff.username)
 
-        course_home_url = reverse('openedx.course_experience.course_home', args=[str(self.course.id)])
-        response = self.client.get(course_home_url, follow=True)
+        response = self.get_courseware()
         assert response.status_code == 200
-        self.assertCountEqual(response.redirect_chain, [])
+        self.assertCountEqual(response.redirect_chain, [])  # noqa: PT009
         banner_text = 'This learner does not have access to this course. Their access expired on'
         self.assertNotContains(response, banner_text)
 
@@ -402,13 +429,12 @@ class CourseExpirationTestCase(ModuleStoreTestCase, MasqueradeMixin):
             mode='audit'
         )
 
-        self.client.login(username=staff_user.username, password='test')
+        self.client.login(username=staff_user.username, password=self.TEST_PASSWORD)
 
         self.update_masquerade(username=expired_staff.username)
 
-        course_home_url = reverse('openedx.course_experience.course_home', args=[str(self.course.id)])
-        response = self.client.get(course_home_url, follow=True)
+        response = self.get_courseware()
         assert response.status_code == 200
-        self.assertCountEqual(response.redirect_chain, [])
+        self.assertCountEqual(response.redirect_chain, [])  # noqa: PT009
         banner_text = 'This learner does not have access to this course. Their access expired on'
         self.assertNotContains(response, banner_text)

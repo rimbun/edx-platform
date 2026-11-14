@@ -5,9 +5,9 @@ Tests for grades.scores module.
 # pylint: disable=protected-access
 import itertools
 from collections import namedtuple
-import pytest
 
 import ddt
+import pytest
 from django.test import TestCase
 from django.utils.timezone import now
 from opaque_keys.edx.locator import BlockUsageLocator, CourseLocator
@@ -16,7 +16,7 @@ import lms.djangoapps.grades.scores as scores
 from lms.djangoapps.grades.models import BlockRecord
 from lms.djangoapps.grades.transformer import GradesTransformer
 from openedx.core.djangoapps.content.block_structure.block_structure import BlockData
-from xmodule.graders import ProblemScore
+from xmodule.graders import ProblemScore  # pylint: disable=wrong-import-order
 
 NOW = now()
 
@@ -58,7 +58,7 @@ class TestScoredBlockTypes(TestCase):
         'course', 'chapter', 'sequential', 'vertical',
         'library_content', 'split_test', 'conditional', 'library', 'randomize',
         'problem', 'drag-and-drop-v2', 'openassessment', 'lti', 'lti_consumer',
-        'videosequence', 'problemset', 'acid_parent', 'done', 'wrapper', 'edx_sga',
+        'acid_parent', 'done', 'wrapper', 'edx_sga',
     }
 
     def test_block_types_possibly_scored(self):

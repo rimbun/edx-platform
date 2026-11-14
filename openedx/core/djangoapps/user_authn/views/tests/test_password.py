@@ -6,29 +6,29 @@ import logging
 import re
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
-import pytest
 import ddt
+import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from freezegun import freeze_time
 from oauth2_provider.models import AccessToken as dot_access_token
 from oauth2_provider.models import RefreshToken as dot_refresh_token
-from pytz import UTC
 from testfixtures import LogCapture
 
+from common.djangoapps.student.tests.factories import UserFactory
 from openedx.core.djangoapps.oauth_dispatch.tests import factories as dot_factories
 from openedx.core.djangoapps.site_configuration.tests.factories import SiteFactory
 from openedx.core.djangoapps.user_api.accounts.tests.test_api import CreateAccountMixin
 from openedx.core.djangoapps.user_api.errors import UserAPIInternalError, UserNotFound
 from openedx.core.djangoapps.user_authn.views.password_reset import request_password_change
 from openedx.core.djangolib.testing.utils import CacheIsolationTestCase, skip_unless_lms
-from common.djangoapps.student.tests.factories import UserFactory
 
 LOGGER_NAME = 'audit'
 User = get_user_model()  # pylint:disable=invalid-name
@@ -99,8 +99,8 @@ class TestPasswordChange(CreateAccountMixin, CacheIsolationTestCase):
 
     USERNAME = "heisenberg"
     ALTERNATE_USERNAME = "walt"
-    OLD_PASSWORD = "ḅḷüëṡḳÿ"
-    NEW_PASSWORD = "B🄸🄶B🄻🅄🄴"
+    OLD_PASSWORD = "ḅḷüëṡḳÿ1"
+    NEW_PASSWORD = "B🄸🄶B🄻🅄🄴1"
     OLD_EMAIL = "walter@graymattertech.com"
     NEW_EMAIL = "walt@savewalterwhite.com"
 
@@ -192,11 +192,11 @@ class TestPasswordChange(CreateAccountMixin, CacheIsolationTestCase):
         UserFactory.create(
             username='edx',
             email='edx@example.com',
-            password='edx',
+            password='Password1234',
             is_superuser=is_superuser,
             is_staff=is_staff,
         )
-        self.client.login(username='edx', password='edx')
+        self.client.login(username='edx', password='Password1234')
 
         response = self._change_password_from_support(email_from_support_tools=self.OLD_EMAIL)
         assert response.status_code == 200
@@ -213,9 +213,9 @@ class TestPasswordChange(CreateAccountMixin, CacheIsolationTestCase):
             side_effect=UserAPIInternalError,
         ):
             self._change_password()
-            self.assertRaises(UserAPIInternalError)
+            self.assertRaises(UserAPIInternalError)  # noqa: PT027
 
-    @patch.dict(settings.FEATURES, {'ENABLE_PASSWORD_RESET_FAILURE_EMAIL': True})
+    @override_settings(ENABLE_PASSWORD_RESET_FAILURE_EMAIL=True)
     def test_password_reset_failure_email(self):
         """Test that a password reset failure email notification is sent, when enabled."""
         # Log the user out
@@ -234,7 +234,7 @@ class TestPasswordChange(CreateAccountMixin, CacheIsolationTestCase):
         html_body = sent_message.alternatives[0][0]
 
         for email_body in [text_body, html_body]:
-            msg = 'However, there is currently no user account associated with your email address: {email}'.format(
+            msg = 'However, there is currently no user account associated with your email address: {email}'.format(  # noqa: UP032  # pylint: disable=line-too-long
                 email=bad_email
             )
 
@@ -319,7 +319,7 @@ class TestPasswordChange(CreateAccountMixin, CacheIsolationTestCase):
 
         # now reset the time to 1 min from now in future and change the email and
         # verify that it will allow another request from same IP
-        reset_time = datetime.now(UTC) + timedelta(seconds=61)
+        reset_time = datetime.now(ZoneInfo("UTC")) + timedelta(seconds=61)
         with freeze_time(reset_time):
             response = self._change_password(email=self.OLD_EMAIL)
             assert response.status_code == 200

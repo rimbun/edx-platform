@@ -4,17 +4,23 @@ Tests for verified_track_content/partition_scheme.py.
 
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-import pytz
 import pytest
+
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
-from xmodule.partitions.partitions import MINIMUM_STATIC_PARTITION_ID, UserPartition, ReadOnlyUserPartitionError
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
+from xmodule.partitions.partitions import (  # pylint: disable=wrong-import-order
+    MINIMUM_UNUSED_PARTITION_ID,
+    ReadOnlyUserPartitionError,
+    UserPartition,
+)
 
-from ..models import VerifiedTrackCohortedCourse
 from ..partition_scheme import ENROLLMENT_GROUP_IDS, EnrollmentTrackPartitionScheme, EnrollmentTrackUserPartition
 
 
@@ -34,17 +40,12 @@ class EnrollmentTrackUserPartitionTest(SharedModuleStoreTestCase):
         assert 1 == len(groups)
         assert 'Audit' == groups[0].name
 
-    def test_using_verified_track_cohort(self):
-        VerifiedTrackCohortedCourse.objects.create(course_key=self.course.id, enabled=True).save()
-        partition = create_enrollment_track_partition(self.course)
-        assert 0 == len(partition.groups)
-
     def test_multiple_groups(self):
         create_mode(self.course, CourseMode.AUDIT, "Audit Enrollment Track", min_price=0)
         # Note that the verified mode is expired-- this is intentional.
         create_mode(
             self.course, CourseMode.VERIFIED, "Verified Enrollment Track", min_price=1,
-            expiration_datetime=datetime.now(pytz.UTC) + timedelta(days=-1)
+            expiration_datetime=datetime.now(ZoneInfo("UTC")) + timedelta(days=-1)
         )
         # Note that the credit mode is not selectable-- this is intentional so we
         # can test that it is filtered out.
@@ -69,11 +70,11 @@ class EnrollmentTrackUserPartitionTest(SharedModuleStoreTestCase):
 
     def test_group_ids(self):
         """
-        Test that group IDs are all less than MINIMUM_STATIC_PARTITION_ID (to avoid overlapping
+        Test that group IDs are all less than MINIMUM_UNUSED_PARTITION_ID (to avoid overlapping
         with group IDs associated with cohort and random user partitions).
         """
         for mode in ENROLLMENT_GROUP_IDS:
-            assert ENROLLMENT_GROUP_IDS[mode]['id'] < MINIMUM_STATIC_PARTITION_ID
+            assert ENROLLMENT_GROUP_IDS[mode]['id'] < MINIMUM_UNUSED_PARTITION_ID
 
     @staticmethod
     def get_group_by_name(partition, name):
@@ -100,7 +101,7 @@ class EnrollmentTrackPartitionSchemeTest(SharedModuleStoreTestCase):
 
     def test_get_scheme(self):
         """
-        Ensure that the scheme extension is correctly plugged in (via entry point in setup.py)
+        Ensure that the scheme extension is correctly plugged in (via entry point in pyproject.toml)
         """
         assert UserPartition.get_scheme('enrollment_track') == EnrollmentTrackPartitionScheme
 
@@ -134,7 +135,7 @@ class EnrollmentTrackPartitionSchemeTest(SharedModuleStoreTestCase):
     def test_enrolled_in_expired(self):
         create_mode(
             self.course, CourseMode.VERIFIED, "Verified Enrollment Track",
-            min_price=1, expiration_datetime=datetime.now(pytz.UTC) + timedelta(days=-1)
+            min_price=1, expiration_datetime=datetime.now(ZoneInfo("UTC")) + timedelta(days=-1)
         )
         CourseEnrollment.enroll(self.student, self.course.id, mode=CourseMode.VERIFIED)
         assert 'Verified Enrollment Track' == self._get_user_group().name
@@ -159,14 +160,9 @@ class EnrollmentTrackPartitionSchemeTest(SharedModuleStoreTestCase):
         # the upgrade deadline has passed (see EDUCATOR-1511 for why this matters).
         create_mode(
             self.course, CourseMode.VERIFIED, "Verified Enrollment Track", min_price=1,
-            expiration_datetime=datetime.now(pytz.UTC) + timedelta(days=-1)
+            expiration_datetime=datetime.now(ZoneInfo("UTC")) + timedelta(days=-1)
         )
         assert 'Verified Enrollment Track' == self._get_user_group().name
-
-    def test_using_verified_track_cohort(self):
-        VerifiedTrackCohortedCourse.objects.create(course_key=self.course.id, enabled=True).save()
-        CourseEnrollment.enroll(self.student, self.course.id)
-        assert self._get_user_group() is None
 
     def _get_user_group(self):
         """

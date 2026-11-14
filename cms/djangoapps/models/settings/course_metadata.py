@@ -3,22 +3,28 @@ Django module for Course Metadata class -- manages advanced settings and related
 """
 
 
-from datetime import datetime
 import logging
+from datetime import datetime
 
 import pytz
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from xblock.fields import Scope
 
 from cms.djangoapps.contentstore import toggles
+from common.djangoapps.util.db import MYSQL_MAX_INT, generate_int_id
+from common.djangoapps.util.proctoring import requires_escalation_email
 from common.djangoapps.xblock_django.models import XBlockStudioConfigurationFlag
+from openedx.core.djangoapps.course_apps.toggles import exams_ida_enabled
 from openedx.core.djangoapps.discussions.config.waffle_utils import legacy_discussion_experience_enabled
-from openedx.core.lib.teams_config import TeamsetType
+from openedx.core.lib.teams_config import CONTENT_GROUPS_FOR_TEAMS, TeamsConfig, TeamsetType
 from openedx.features.course_experience import COURSE_ENABLE_UNENROLLED_ACCESS_FLAG
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import InvalidProctoringProvider
+from xmodule.course_block import get_available_providers  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.exceptions import InvalidProctoringProvider  # pylint: disable=wrong-import-order
+from xmodule.partitions.partitions import MINIMUM_UNUSED_PARTITION_ID
+from xmodule.partitions.partitions_service import get_all_partitions_for_course
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +81,12 @@ class CourseMetadata:
         'default_tab',
         'highlights_enabled_for_messaging',
         'is_onboarding_exam',
+        'discussions_settings',
+        'copied_from_block',
+        "upstream",
+        "upstream_version",
+        "upstream_version_declined",
+        "upstream_display_name",
     ]
 
     @classmethod
@@ -91,19 +103,19 @@ class CourseMetadata:
             exclude_list.append('giturl')
 
         # Do not show edxnotes if the feature is disabled.
-        if not settings.FEATURES.get('ENABLE_EDXNOTES'):
+        if not settings.ENABLE_EDXNOTES:
             exclude_list.append('edxnotes')
 
         # Do not show video auto advance if the feature is disabled
-        if not settings.FEATURES.get('ENABLE_OTHER_COURSE_SETTINGS'):
+        if not settings.ENABLE_OTHER_COURSE_SETTINGS:
             exclude_list.append('other_course_settings')
 
         # Do not show video_upload_pipeline if the feature is disabled.
-        if not settings.FEATURES.get('ENABLE_VIDEO_UPLOAD_PIPELINE'):
+        if not settings.ENABLE_VIDEO_UPLOAD_PIPELINE:
             exclude_list.append('video_upload_pipeline')
 
         # Do not show video auto advance if the feature is disabled
-        if not settings.FEATURES.get('ENABLE_AUTOADVANCE_VIDEOS'):
+        if not settings.ENABLE_AUTOADVANCE_VIDEOS:
             exclude_list.append('video_auto_advance')
 
         # Do not show social sharing url field if the feature is disabled.
@@ -112,21 +124,16 @@ class CourseMetadata:
             exclude_list.append('social_sharing_url')
 
         # Do not show teams configuration if feature is disabled.
-        if not settings.FEATURES.get('ENABLE_TEAMS'):
+        if not settings.ENABLE_TEAMS:
             exclude_list.append('teams_configuration')
 
-        if not settings.FEATURES.get('ENABLE_VIDEO_BUMPER'):
+        if not settings.ENABLE_VIDEO_BUMPER:
             exclude_list.append('video_bumper')
 
         # Do not show enable_ccx if feature is not enabled.
-        if not settings.FEATURES.get('CUSTOM_COURSES_EDX'):
+        if not settings.CUSTOM_COURSES_EDX:
             exclude_list.append('enable_ccx')
             exclude_list.append('ccx_connector')
-
-        # Do not show "Issue Open Badges" in Studio Advanced Settings
-        # if the feature is disabled.
-        if not settings.FEATURES.get('ENABLE_OPENBADGES'):
-            exclude_list.append('issue_badges')
 
         # If the XBlockStudioConfiguration table is not being used, there is no need to
         # display the "Allow Unsupported XBlocks" setting.
@@ -138,28 +145,32 @@ class CourseMetadata:
         if not COURSE_ENABLE_UNENROLLED_ACCESS_FLAG.is_enabled(course_key=course_key):
             exclude_list.append('course_visibility')
 
-        # Do not show "Proctortrack Exam Escalation Contact" if Proctortrack is not
-        # an available proctoring backend.
-        if not settings.PROCTORING_BACKENDS or settings.PROCTORING_BACKENDS.get('proctortrack') is None:
-            exclude_list.append('proctoring_escalation_email')
+        # Do not show "Proctoring Exam Escalation Contact" if 'requires_escalation_email'
+        # is not set on any of the the proctoring backends.
+        escalation_email_required = False
+        for provider in get_available_providers():
+            if requires_escalation_email(provider):
+                escalation_email_required = True
+                break
+        if not escalation_email_required:
+            exclude_list.append("proctoring_escalation_email")
 
         if not legacy_discussion_experience_enabled(course_key):
             exclude_list.append('discussion_blackouts')
             exclude_list.append('allow_anonymous')
             exclude_list.append('allow_anonymous_to_peers')
             exclude_list.append('discussion_topics')
-
         return exclude_list
 
     @classmethod
-    def fetch(cls, descriptor, filter_fields=None):
+    def fetch(cls, block, filter_fields=None):
         """
         Fetch the key:value editable course details for the given course from
         persistence and return a CourseMetadata model.
         """
         result = {}
-        metadata = cls.fetch_all(descriptor, filter_fields=filter_fields)
-        exclude_list_of_fields = cls.get_exclude_list_of_fields(descriptor.id)
+        metadata = cls.fetch_all(block, filter_fields=filter_fields)
+        exclude_list_of_fields = cls.get_exclude_list_of_fields(block.id)
 
         for key, value in metadata.items():
             if key in exclude_list_of_fields:
@@ -168,26 +179,26 @@ class CourseMetadata:
         return result
 
     @classmethod
-    def fetch_all(cls, descriptor, filter_fields=None):
+    def fetch_all(cls, block, filter_fields=None):
         """
         Fetches all key:value pairs from persistence and returns a CourseMetadata model.
         """
         result = {}
-        for field in descriptor.fields.values():
+        for field in block.fields.values():
             if field.scope != Scope.settings:
                 continue
 
             if filter_fields and field.name not in filter_fields:
                 continue
 
-            field_help = _(field.help)  # lint-amnesty, pylint: disable=translation-of-non-string
+            field_help = _(field.help)  # pylint: disable=translation-of-non-string
             help_args = field.runtime_options.get('help_format_args')
             if help_args is not None:
                 field_help = field_help.format(**help_args)
 
             result[field.name] = {
-                'value': field.read_json(descriptor),
-                'display_name': _(field.display_name),  # lint-amnesty, pylint: disable=translation-of-non-string
+                'value': field.read_json(block),
+                'display_name': _(field.display_name),  # pylint: disable=translation-of-non-string
                 'help': field_help,
                 'deprecated': field.runtime_options.get('deprecated', False),
                 'hide_on_enabled_publisher': field.runtime_options.get('hide_on_enabled_publisher', False)
@@ -195,13 +206,13 @@ class CourseMetadata:
         return result
 
     @classmethod
-    def update_from_json(cls, descriptor, jsondict, user, filter_tabs=True):
+    def update_from_json(cls, block, jsondict, user, filter_tabs=True):
         """
         Decode the json into CourseMetadata and save any changed attrs to the db.
 
         Ensures none of the fields are in the exclude list.
         """
-        exclude_list_of_fields = cls.get_exclude_list_of_fields(descriptor.id)
+        exclude_list_of_fields = cls.get_exclude_list_of_fields(block.id)
         # Don't filter on the tab attribute if filter_tabs is False.
         if not filter_tabs:
             exclude_list_of_fields.remove("tabs")
@@ -215,16 +226,19 @@ class CourseMetadata:
                 continue
             try:
                 val = model['value']
-                if hasattr(descriptor, key) and getattr(descriptor, key) != val:
-                    key_values[key] = descriptor.fields[key].from_json(val)
+                if hasattr(block, key) and getattr(block, key) != val:
+                    if key == 'proctoring_provider':
+                        key_values[key] = block.fields[key].from_json(val, validate_providers=True)
+                    else:
+                        key_values[key] = block.fields[key].from_json(val)
             except (TypeError, ValueError) as err:
-                raise ValueError(_("Incorrect format for field '{name}'. {detailed_message}").format(  # lint-amnesty, pylint: disable=raise-missing-from
+                raise ValueError(_("Incorrect format for field '{name}'. {detailed_message}").format(  # pylint: disable=raise-missing-from  # noqa: B904
                     name=model['display_name'], detailed_message=str(err)))
 
-        return cls.update_from_dict(key_values, descriptor, user)
+        return cls.update_from_dict(key_values, block, user)
 
     @classmethod
-    def validate_and_update_from_json(cls, descriptor, jsondict, user, filter_tabs=True):
+    def validate_and_update_from_json(cls, block, jsondict, user, filter_tabs=True):
         """
         Validate the values in the json dict (validated by xblock fields from_json method)
 
@@ -237,7 +251,7 @@ class CourseMetadata:
             errors: list of error objects
             result: the updated course metadata or None if error
         """
-        exclude_list_of_fields = cls.get_exclude_list_of_fields(descriptor.id)
+        exclude_list_of_fields = cls.get_exclude_list_of_fields(block.id)
 
         if not filter_tabs:
             exclude_list_of_fields.remove("tabs")
@@ -251,40 +265,96 @@ class CourseMetadata:
         for key, model in filtered_dict.items():
             try:
                 val = model['value']
-                if hasattr(descriptor, key) and getattr(descriptor, key) != val:
-                    key_values[key] = descriptor.fields[key].from_json(val)
-            except (InvalidProctoringProvider, TypeError, ValueError, ValidationError) as err:
+                if hasattr(block, key) and getattr(block, key) != val:
+                    if key == 'proctoring_provider':
+                        key_values[key] = block.fields[key].from_json(val, validate_providers=True)
+                    else:
+                        key_values[key] = block.fields[key].from_json(val)
+            except (TypeError, ValueError, ValidationError) as err:
                 did_validate = False
                 errors.append({'key': key, 'message': str(err), 'model': model})
+            except InvalidProctoringProvider as err:
+                # LTI is automatically considered a proctoring provider, so it will be included in the error message
+                # Because we cannot pass course context to the exception, we need to check if the LTI provider
+                # should actually be available to the course
+                err_message = str(err)
+                if not exams_ida_enabled(block.id):
+                    available_providers = get_available_providers()
+                    available_providers.remove('lti_external')
+                    err_message = str(InvalidProctoringProvider(val, available_providers))
+
+                did_validate = False
+                errors.append({'key': key, 'message': err_message, 'model': model})
+
+        teams_config = key_values.get('teams_configuration')
+        if teams_config:
+            key_values['teams_configuration'] = cls.fill_teams_user_partitions_ids(block, teams_config)
 
         team_setting_errors = cls.validate_team_settings(filtered_dict)
         if team_setting_errors:
             errors = errors + team_setting_errors
             did_validate = False
 
-        proctoring_errors = cls.validate_proctoring_settings(descriptor, filtered_dict, user)
+        proctoring_errors = cls.validate_proctoring_settings(block, filtered_dict, user)
         if proctoring_errors:
             errors = errors + proctoring_errors
             did_validate = False
 
         # If did validate, go ahead and update the metadata
         if did_validate:
-            updated_data = cls.update_from_dict(key_values, descriptor, user, save=False)
+            updated_data = cls.update_from_dict(key_values, block, user, save=False)
 
         return did_validate, errors, updated_data
 
-    @classmethod
-    def update_from_dict(cls, key_values, descriptor, user, save=True):
+    @staticmethod
+    def get_user_partition_id(block, min_partition_id, max_partition_id):
         """
-        Update metadata descriptor from key_values. Saves to modulestore if save is true.
+        Get a dynamic partition id that is not already in use.
+        """
+        used_partition_ids = {p.id for p in get_all_partitions_for_course(block)}
+        return generate_int_id(
+            min_partition_id,
+            max_partition_id,
+            used_partition_ids,
+        )
+
+    @classmethod
+    def fill_teams_user_partitions_ids(cls, block, teams_config):
+        """
+        Fill the `user_partition_id` in the team settings if it is not set.
+
+        This is used by the Dynamic Team Partition Generator to create the dynamic user partitions
+        based on the team-sets defined in the course.
+        """
+        if not CONTENT_GROUPS_FOR_TEAMS.is_enabled(block.id):
+            return teams_config
+
+        for team_set in teams_config.teamsets:
+            if not team_set.user_partition_id:
+                team_set.user_partition_id = cls.get_user_partition_id(
+                    block,
+                    MINIMUM_UNUSED_PARTITION_ID,
+                    MYSQL_MAX_INT,
+                )
+        return TeamsConfig(
+            {
+                **teams_config.cleaned_data,
+                "team_sets": [team_set.cleaned_data for team_set in teams_config.teamsets],
+            }
+        )
+
+    @classmethod
+    def update_from_dict(cls, key_values, block, user, save=True):
+        """
+        Update metadata from key_values. Saves to modulestore if save is true.
         """
         for key, value in key_values.items():
-            setattr(descriptor, key, value)
+            setattr(block, key, value)
 
         if save and key_values:
-            modulestore().update_item(descriptor, user.id)
+            modulestore().update_item(block, user.id)
 
-        return cls.fetch(descriptor)
+        return cls.fetch(block)
 
     @classmethod
     def validate_team_settings(cls, settings_dict):
@@ -348,8 +418,15 @@ class CourseMetadata:
         """
         error_list = []
         valid_teamset_types = [TeamsetType.open.value, TeamsetType.public_managed.value,
-                               TeamsetType.private_managed.value]
-        valid_keys = {'id', 'name', 'description', 'max_team_size', 'type'}
+                               TeamsetType.private_managed.value, TeamsetType.open_managed.value]
+        valid_keys = {
+            'id',
+            'name',
+            'description',
+            'max_team_size',
+            'type',
+            'user_partition_id',
+        }
         teamset_type = topic_settings.get('type', {})
         if teamset_type:
             if teamset_type not in valid_teamset_types:
@@ -382,7 +459,7 @@ class CourseMetadata:
         return None
 
     @classmethod
-    def validate_proctoring_settings(cls, descriptor, settings_dict, user):
+    def validate_proctoring_settings(cls, block, settings_dict, user):
         """
         Verify proctoring settings
 
@@ -397,9 +474,9 @@ class CourseMetadata:
         if (
             not user.is_staff and
             cls._has_requested_proctoring_provider_changed(
-                descriptor.proctoring_provider, proctoring_provider_model.get('value')
+                block.proctoring_provider, proctoring_provider_model.get('value')
             ) and
-            datetime.now(pytz.UTC) > descriptor.start
+            datetime.now(pytz.UTC) > block.start
         ):
             message = (
                 'The proctoring provider cannot be modified after a course has started.'
@@ -407,27 +484,49 @@ class CourseMetadata:
             ).format(support_email=settings.PARTNER_SUPPORT_EMAIL or 'support')
             errors.append({'key': 'proctoring_provider', 'message': message, 'model': proctoring_provider_model})
 
+        # check that a user should actually be able to update the provider to lti, which
+        # should only be allowed if the exams IDA is enabled for a course
+        available_providers = get_available_providers()
+        updated_provider = settings_dict.get('proctoring_provider', {}).get('value')
+        if updated_provider == 'lti_external' and not exams_ida_enabled(block.id):
+            available_providers.remove('lti_external')
+            error = InvalidProctoringProvider('lti_external', available_providers)
+            errors.append({'key': 'proctoring_provider', 'message': str(error), 'model': proctoring_provider_model})
+
         enable_proctoring_model = settings_dict.get('enable_proctored_exams')
         if enable_proctoring_model:
             enable_proctoring = enable_proctoring_model.get('value')
         else:
-            enable_proctoring = descriptor.enable_proctored_exams
+            enable_proctoring = block.enable_proctored_exams
 
         if enable_proctoring:
-            # Require a valid escalation email if Proctortrack is chosen as the proctoring provider
-            escalation_email_model = settings_dict.get('proctoring_escalation_email')
-            if escalation_email_model:
-                escalation_email = escalation_email_model.get('value')
-            else:
-                escalation_email = descriptor.proctoring_escalation_email
 
             if proctoring_provider_model:
                 proctoring_provider = proctoring_provider_model.get('value')
             else:
-                proctoring_provider = descriptor.proctoring_provider
+                proctoring_provider = block.proctoring_provider
+
+            # If the proctoring provider stored in the course block no longer
+            # matches the available providers for this instance, show an error
+            if proctoring_provider not in available_providers:
+                message = (
+                    f'The proctoring provider configured for this course, \'{proctoring_provider}\', is not valid.'
+                )
+                errors.append({
+                    'key': 'proctoring_provider',
+                    'message': message,
+                    'model': proctoring_provider_model
+                })
+
+            # Require a valid escalation email if 'requires_escalation_email' is set in the proctoring backend
+            escalation_email_model = settings_dict.get('proctoring_escalation_email')
+            if escalation_email_model:
+                escalation_email = escalation_email_model.get('value')
+            else:
+                escalation_email = block.proctoring_escalation_email
 
             missing_escalation_email_msg = 'Provider \'{provider}\' requires an exam escalation contact.'
-            if proctoring_provider_model and proctoring_provider == 'proctortrack':
+            if proctoring_provider_model and requires_escalation_email(proctoring_provider):
                 if not escalation_email:
                     message = missing_escalation_email_msg.format(provider=proctoring_provider)
                     errors.append({
@@ -438,7 +537,7 @@ class CourseMetadata:
 
             if (
                 escalation_email_model and not proctoring_provider_model and
-                proctoring_provider == 'proctortrack'
+                requires_escalation_email(proctoring_provider)
             ):
                 if not escalation_email:
                     message = missing_escalation_email_msg.format(provider=proctoring_provider)
@@ -453,19 +552,16 @@ class CourseMetadata:
             if zendesk_ticket_model:
                 create_zendesk_tickets = zendesk_ticket_model.get('value')
             else:
-                create_zendesk_tickets = descriptor.create_zendesk_tickets
+                create_zendesk_tickets = block.create_zendesk_tickets
 
-            if (
-                (proctoring_provider == 'proctortrack' and create_zendesk_tickets)
-                or (proctoring_provider == 'software_secure' and not create_zendesk_tickets)
-            ):
+            if proctoring_provider == 'software_secure' and not create_zendesk_tickets:
                 LOGGER.info(
-                    'create_zendesk_tickets set to {ticket_value} but proctoring '
+                    'create_zendesk_tickets set to {ticket_value} but proctoring '  # noqa: UP032
                     'provider is {provider} for course {course_id}. create_zendesk_tickets '
                     'should be updated for this course.'.format(
                         ticket_value=create_zendesk_tickets,
                         provider=proctoring_provider,
-                        course_id=descriptor.id
+                        course_id=block.id
                     )
                 )
 

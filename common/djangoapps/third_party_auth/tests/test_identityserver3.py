@@ -2,13 +2,16 @@
 Unit tests for the IdentityServer3 OAuth2 Backend
 """
 import json
+
 import ddt
+
 from common.djangoapps.third_party_auth.identityserver3 import IdentityServer3
 from common.djangoapps.third_party_auth.tests import testutil
-from common.djangoapps.third_party_auth.tests.utils import skip_unless_thirdpartyauth
+from common.test.utils import assert_dict_contains_subset
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 
-@skip_unless_thirdpartyauth()
+@skip_unless_lms
 @ddt.ddt
 class IdentityServer3Test(testutil.TestCase):
     """
@@ -97,7 +100,8 @@ class IdentityServer3Test(testutil.TestCase):
         Test user details fields are mapped to default keys
         """
         provider_config = self.configure_identityServer3_provider(enabled=True)
-        self.assertDictContainsSubset(
+        assert_dict_contains_subset(
+            self,
             {
                 "username": "Edx",
                 "email": "edxopenid@example.com",
@@ -105,5 +109,5 @@ class IdentityServer3Test(testutil.TestCase):
                 "last_name": "Openid",
                 "fullname": "Edx Openid"
             },
-            provider_config.backend_class().get_user_details(self.response)
+            provider_config.backend_class().get_user_details(self.response),
         )

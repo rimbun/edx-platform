@@ -1,11 +1,11 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 
 import json
 import logging
 
 from celery.states import FAILURE, READY_STATES, REVOKED
 from django.http import HttpResponse
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from lms.djangoapps.instructor_task.api_helper import get_status_from_instructor_task, get_updated_instructor_task
 from lms.djangoapps.instructor_task.models import PROGRESS
@@ -13,7 +13,7 @@ from lms.djangoapps.instructor_task.models import PROGRESS
 log = logging.getLogger(__name__)
 
 # return status for completed tasks and tasks in progress
-STATES_WITH_STATUS = [state for state in READY_STATES] + [PROGRESS]  # lint-amnesty, pylint: disable=unnecessary-comprehension
+STATES_WITH_STATUS = list(READY_STATES) + [PROGRESS]
 
 
 def _get_instructor_task_status(task_id):
@@ -84,10 +84,10 @@ def instructor_task_status(request):
             if task_output is not None:
                 output[task_id] = task_output
 
-    return HttpResponse(json.dumps(output, indent=4))  # lint-amnesty, pylint: disable=http-response-with-json-dumps
+    return HttpResponse(json.dumps(output, indent=4))  # pylint: disable=http-response-with-json-dumps
 
 
-def get_task_completion_info(instructor_task):  # lint-amnesty, pylint: disable=too-many-statements
+def get_task_completion_info(instructor_task):  # pylint: disable=too-many-statements
     """
     Construct progress message from progress information in InstructorTask entry.
 
@@ -125,7 +125,7 @@ def get_task_completion_info(instructor_task):  # lint-amnesty, pylint: disable=
         log.warning(fmt.format(instructor_task.task_id, instructor_task.task_output))
         return (succeeded, _("No progress status information available"))
 
-    action_name = _(task_output['action_name'])  # lint-amnesty, pylint: disable=translation-of-non-string
+    action_name = _(task_output['action_name'])  # pylint: disable=translation-of-non-string
     num_attempted = task_output['attempted']
     num_total = task_output['total']
 
@@ -152,19 +152,19 @@ def get_task_completion_info(instructor_task):  # lint-amnesty, pylint: disable=
 
     if instructor_task.task_state == PROGRESS:
         # special message for providing progress updates:
-        # Translators: {action} is a past-tense verb that is localized separately. {attempted} and {succeeded} are counts.  # lint-amnesty, pylint: disable=line-too-long
+        # Translators: {action} is a past-tense verb that is localized separately. {attempted} and {succeeded} are counts.  # pylint: disable=line-too-long
         msg_format = _("Progress: {action} {succeeded} of {attempted} so far")
     elif student is not None and problem_url is not None:
         # this reports on actions on problems for a particular student:
         if num_attempted == 0:
-            # Translators: {action} is a past-tense verb that is localized separately. {student} is a student identifier.  # lint-amnesty, pylint: disable=line-too-long
+            # Translators: {action} is a past-tense verb that is localized separately. {student} is a student identifier.  # pylint: disable=line-too-long
             msg_format = _("Unable to find submission to be {action} for student '{student}'")
         elif num_succeeded == 0:
-            # Translators: {action} is a past-tense verb that is localized separately. {student} is a student identifier.  # lint-amnesty, pylint: disable=line-too-long
+            # Translators: {action} is a past-tense verb that is localized separately. {student} is a student identifier.  # pylint: disable=line-too-long
             msg_format = _("Problem failed to be {action} for student '{student}'")
         else:
             succeeded = True
-            # Translators: {action} is a past-tense verb that is localized separately. {student} is a student identifier.  # lint-amnesty, pylint: disable=line-too-long
+            # Translators: {action} is a past-tense verb that is localized separately. {student} is a student identifier.  # pylint: disable=line-too-long
             msg_format = _("Problem successfully {action} for student '{student}'")
     elif student is not None and entrance_exam_url is not None:
         # this reports on actions on entrance exam for a particular student:
@@ -190,7 +190,7 @@ def get_task_completion_info(instructor_task):  # lint-amnesty, pylint: disable=
             # Translators: {action} is a past-tense verb that is localized separately. {attempted} is a count.
             msg_format = _("Problem successfully {action} for {attempted} students")
         else:  # num_succeeded < num_attempted
-            # Translators: {action} is a past-tense verb that is localized separately. {succeeded} and {attempted} are counts.  # lint-amnesty, pylint: disable=line-too-long
+            # Translators: {action} is a past-tense verb that is localized separately. {succeeded} and {attempted} are counts.  # pylint: disable=line-too-long
             msg_format = _("Problem {action} for {succeeded} of {attempted} students")
     elif email_id is not None:
         # this reports on actions on bulk emails
@@ -205,11 +205,11 @@ def get_task_completion_info(instructor_task):  # lint-amnesty, pylint: disable=
             # Translators: {action} is a past-tense verb that is localized separately. {attempted} is a count.
             msg_format = _("Message successfully {action} for {attempted} recipients")
         else:  # num_succeeded < num_attempted
-            # Translators: {action} is a past-tense verb that is localized separately. {succeeded} and {attempted} are counts.  # lint-amnesty, pylint: disable=line-too-long
+            # Translators: {action} is a past-tense verb that is localized separately. {succeeded} and {attempted} are counts.  # pylint: disable=line-too-long
             msg_format = _("Message {action} for {succeeded} of {attempted} recipients")
     else:
         # provide a default:
-        # Translators: {action} is a past-tense verb that is localized separately. {succeeded} and {attempted} are counts.  # lint-amnesty, pylint: disable=line-too-long
+        # Translators: {action} is a past-tense verb that is localized separately. {succeeded} and {attempted} are counts.  # pylint: disable=line-too-long
         msg_format = _("Status: {action} {succeeded} of {attempted}")
 
     if num_skipped > 0:

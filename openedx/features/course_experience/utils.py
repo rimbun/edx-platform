@@ -5,17 +5,17 @@ Common utilities for the course experience, including course outline.
 from django.utils import timezone
 from opaque_keys.edx.keys import CourseKey
 
+from common.djangoapps.student.models import CourseEnrollment
 from lms.djangoapps.course_api.blocks.api import get_blocks
 from lms.djangoapps.course_blocks.api import get_course_blocks
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.lib.cache_utils import request_cached
-from openedx.features.course_experience import RELATIVE_DATES_FLAG
-from common.djangoapps.student.models import CourseEnrollment
-from xmodule.modulestore.django import modulestore
+from openedx.features.course_experience import RELATIVE_DATES_DISABLE_RESET_FLAG, RELATIVE_DATES_FLAG
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 
 @request_cached()
-def get_course_outline_block_tree(request, course_id, user=None, allow_start_dates_in_future=False):  # lint-amnesty, pylint: disable=too-many-statements
+def get_course_outline_block_tree(request, course_id, user=None, allow_start_dates_in_future=False):  # pylint: disable=too-many-statements
     """
     Returns the root block of the course outline, with children as blocks.
 
@@ -51,7 +51,7 @@ def get_course_outline_block_tree(request, course_id, user=None, allow_start_dat
         is_scored = block.get('has_score', False) and block.get('weight', 1) > 0
         # Use a list comprehension to force the recursion over all children, rather than just stopping
         # at the first child that is scored.
-        children_scored = any(recurse_mark_scored(child) for child in block.get('children', []))
+        children_scored = any(tuple(recurse_mark_scored(child) for child in block.get('children', [])))
         if is_scored or children_scored:
             block['scored'] = True
             return True
@@ -115,6 +115,8 @@ def get_course_outline_block_tree(request, course_id, user=None, allow_start_dat
             'completion',
             'complete',
             'resume_block',
+            'hide_from_toc',
+            'icon_class',
         ],
         allow_start_dates_in_future=allow_start_dates_in_future,
     )
@@ -126,23 +128,6 @@ def get_course_outline_block_tree(request, course_id, user=None, allow_start_dat
         recurse_num_graded_problems(course_outline_root_block)
         recurse_mark_auth_denial(course_outline_root_block)
     return course_outline_root_block
-
-
-def get_resume_block(block):
-    """
-    Gets the deepest block marked as 'resume_block'.
-
-    """
-    if block.get('authorization_denial_reason') or not block.get('resume_block'):
-        return None
-    if not block.get('children'):
-        return block
-
-    for child in block['children']:
-        resume_block = get_resume_block(child)
-        if resume_block:
-            return resume_block
-    return block
 
 
 def get_start_block(block):
@@ -157,12 +142,18 @@ def get_start_block(block):
     return get_start_block(first_child)
 
 
-def dates_banner_should_display(course_key, user):
+def dates_banner_should_display(course_key, user, allow_warning=False):
     """
     Return whether or not the reset banner should display,
     determined by whether or not a course has any past-due,
     incomplete sequentials and which enrollment mode is being
     dealt with for the current user and course.
+
+    Args:
+        course_key (CourseKey)
+        user (User)
+        allow_warning (bool): whether to ignore relative_dates_disable_reset_flag, in order to render
+            warnings for past-due incomplete units.
 
     Returns:
         (missed_deadlines, missed_gated_content):
@@ -171,6 +162,14 @@ def dates_banner_should_display(course_key, user):
     """
     if not RELATIVE_DATES_FLAG.is_enabled(course_key):
         return False, False
+
+    if RELATIVE_DATES_DISABLE_RESET_FLAG.is_enabled(course_key) and not allow_warning:
+        # The `missed_deadlines` value is ignored by `reset_course_deadlines` views. Instead, they check the value of
+        # `missed_gated_content` to determine if learners can reset the deadlines by themselves.
+        # We could have added this logic directly to `reset_self_paced_schedule`, but this function is used in other
+        # places (e.g., when an enrollment mode is changed). We want this flag to affect only the use case when
+        # learners try to reset their deadlines.
+        return False, True
 
     course_overview = CourseOverview.objects.get(id=str(course_key))
 
@@ -183,7 +182,7 @@ def dates_banner_should_display(course_key, user):
         return False, False
 
     # Don't display the banner if the course has ended
-    if course_overview.end and course_overview.end < timezone.now():
+    if course_overview.has_ended():
         return False, False
 
     store = modulestore()

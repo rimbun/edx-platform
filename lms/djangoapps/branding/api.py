@@ -14,12 +14,15 @@ the marketing site and blog).
 """
 
 import logging
+from typing import TypedDict
 
 import six
 from django.conf import settings
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.urls import reverse
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
+from edx_django_utils.plugins import pluggable_override
 from six.moves.urllib.parse import urljoin
 
 from common.djangoapps.edxmako.shortcuts import marketing_link
@@ -167,7 +170,7 @@ def _footer_social_links():
             {
                 "name": social_name,
                 "title": str(display.get("title", "")),
-                "url": settings.SOCIAL_MEDIA_FOOTER_URLS.get(social_name, "#"),
+                "url": settings.SOCIAL_MEDIA_FOOTER_ACE_URLS.get(social_name, "#"),
                 "icon-class": display.get("icon", ""),
                 "action": str(display.get("action", "")).format(platform_name=platform_name),
             }
@@ -241,12 +244,20 @@ def _build_help_center_url(language):
     return support_url
 
 
+def _security_url():
+    """
+    Return the security policy page URL.
+    """
+    return settings.SECURITY_PAGE_URL
+
+
 def _footer_connect_links(language=settings.LANGUAGE_CODE):
     """Return the connect links to display in the footer. """
     links = [
         ("blog", (marketing_link("BLOG"), _("Blog"))),
         ("contact", (_build_support_form_url(full_path=True), _("Contact Us"))),
         ("help-center", (_build_help_center_url(language), _("Help Center"))),
+        ("security", (_security_url(), _("Security"))),
     ]
 
     if language == settings.LANGUAGE_CODE:
@@ -340,7 +351,7 @@ def _add_enterprise_marketing_footer_query_params(url):
     """Add query params to url if they exist in the settings"""
     params = settings.ENTERPRISE_MARKETING_FOOTER_QUERY_PARAMS
     if params:
-        return "{url}/?{params}".format(
+        return "{url}/?{params}".format(  # noqa: UP032
             url=url,
             params=six.moves.urllib.parse.urlencode(params),
         )
@@ -382,7 +393,9 @@ def _footer_more_info_links(language=settings.LANGUAGE_CODE):
     links = [
         ("terms_of_service_and_honor_code", (marketing_link("TOS_AND_HONOR"), _("Terms of Service & Honor Code"))),
         ("privacy_policy", (marketing_link("PRIVACY"), _("Privacy Policy"))),
+        ("cookie_policy_link", (marketing_link("COOKIE"), _("Cookie Policy"))),
         ("accessibility_policy", (marketing_link("ACCESSIBILITY"), _("Accessibility Policy"))),
+        ("ccpa_link", (marketing_link("CCPA"), _("Your Privacy Choices")))
     ]
 
     # Backwards compatibility: If a combined "terms of service and honor code"
@@ -421,14 +434,14 @@ def _footer_mobile_links(is_secure):
     platform_name = configuration_helpers.get_value('platform_name', settings.PLATFORM_NAME)
 
     mobile_links = []
-    if settings.FEATURES.get('ENABLE_FOOTER_MOBILE_APP_LINKS'):
+    if settings.ENABLE_FOOTER_MOBILE_APP_LINKS:
         mobile_links = [
             {
                 "name": "apple",
                 "title": _(
                     "Download the {platform_name} mobile app from the Apple App Store"
                 ).format(platform_name=platform_name),
-                "url": settings.MOBILE_STORE_URLS.get('apple', '#'),
+                "url": settings.MOBILE_STORE_ACE_URLS.get('apple', '#'),
                 "image": _absolute_url_staticfile(is_secure, 'images/app/app_store_badge_135x40.svg'),
             },
             {
@@ -436,7 +449,7 @@ def _footer_mobile_links(is_secure):
                 "title": _(
                     "Download the {platform_name} mobile app from Google Play"
                 ).format(platform_name=platform_name),
-                "url": settings.MOBILE_STORE_URLS.get('google', '#'),
+                "url": settings.MOBILE_STORE_ACE_URLS.get('google', '#'),
                 "image": _absolute_url_staticfile(is_secure, 'images/app/google_play_badge_45.png'),
             }
         ]
@@ -455,29 +468,18 @@ def _footer_logo_img(is_secure):
     """
     default_local_path = 'images/logo.png'
     brand_footer_logo_url = settings.LOGO_TRADEMARK_URL
-    footer_url_from_site_config = configuration_helpers.get_value(
-        'FOOTER_ORGANIZATION_IMAGE',
-        settings.FOOTER_ORGANIZATION_IMAGE
-    )
-
     # `logo_name` is looked up from the configuration,
     # which falls back on the Django settings, which loads it from
     # `lms.yml`, which is created and managed by Ansible. Because of
     # this runaround, we lose a lot of the flexibility that Django's
     # staticfiles system provides, and we end up having to hardcode the path
     # to the footer logo rather than use the comprehensive theming system.
-    # EdX needs the FOOTER_ORGANIZATION_IMAGE value to point to edX's
     # logo by default, so that it can display properly on edx.org -- both
     # within the LMS, and on the Drupal marketing site, which uses this API.
-    if footer_url_from_site_config:
-        return _absolute_url_staticfile(is_secure, footer_url_from_site_config)
-
     if brand_footer_logo_url:
         return brand_footer_logo_url
 
     log.info(
-        "Failed to find footer logo at '%s', using '%s' instead",
-        footer_url_from_site_config,
         default_local_path,
     )
 
@@ -646,9 +648,114 @@ def get_home_url():
     return reverse('dashboard')
 
 
+@pluggable_override('OVERRIDE_GET_LEARNER_DISPLAY_USERNAME')
+def get_learner_display_name_override(user: AbstractBaseUser) -> str | None:
+    """
+    Return a name to display for ``user`` in place of their own, or None.
+
+    One possible use case of this override: render an obfuscated name when the
+    learner's real one contains sensitive information fed by SSO.
+    """
+    return None
+
+
+def get_learner_display_username(user: AbstractBaseUser) -> str:
+    """
+    Return the username to display for ``user``.
+
+    This is the learner's own username, unless a display name override supplies
+    a name in its place.
+    """
+    display_name = user.username
+    override = get_learner_display_name_override(user=user)
+    if override is not None:
+        display_name = override
+    return display_name
+
+
+class EnterpriseLearnerPortalLink(TypedDict):
+    """Contract for the OVERRIDE_GET_ENTERPRISE_LEARNER_PORTAL_LINK return value."""
+    url: str  # Absolute URL of the portal home page.
+    logo: str  # URL of the logo image to render in place of the site logo.
+    name: str  # Display name of the portal, used in link alternative text.
+
+
+@pluggable_override('OVERRIDE_GET_ENTERPRISE_LEARNER_PORTAL_LINK')
+def get_enterprise_learner_portal_link() -> EnterpriseLearnerPortalLink | None:
+    """
+    Return a link to the enterprise learner portal that stands in for the platform
+    dashboard for the current viewer.
+
+
+    Enterprise plugins should override this function.
+    """
+    return None
+
+
+class HeaderLogo(TypedDict):
+    """Contract for the site header's logo block, as ``get_header_logo`` returns it."""
+    url: str  # Destination the logo links to.
+    image: str  # URL of the logo image.
+    alt: str  # Alternative text, already formatted and translated.
+
+
+def get_header_logo(is_secure: bool = True) -> HeaderLogo:
+    """
+    Return the logo block for the site header.
+
+    If the learner is associated with an enterprise customer, the logo will come
+    from that customer's configuration.
+
+    Arguments:
+        is_secure (bool): If true, use HTTPS as the protocol for the site logo.
+    """
+    portal_link = get_enterprise_learner_portal_link()
+    if portal_link:
+        return HeaderLogo(
+            url=portal_link['url'],
+            image=portal_link['logo'],
+            alt=_('{name} Dashboard').format(name=portal_link['name']),
+        )
+
+    platform_name = configuration_helpers.get_value('platform_name', settings.PLATFORM_NAME)
+    return HeaderLogo(
+        url=get_home_url(),
+        image=get_logo_url(is_secure),
+        alt=_('{platform_name} Home Page').format(platform_name=platform_name),
+    )
+
+
+def get_learner_dashboard_url() -> str:
+    """
+    Return the URL of the current viewer's dashboard.
+
+    If the learner is associated with an enterprise customer, the url will come
+    from that customer's configured portal.
+    """
+    portal_link = get_enterprise_learner_portal_link()
+    if portal_link:
+        return portal_link['url']
+    return get_home_url()
+
+
+def should_show_order_history() -> bool:
+    """
+    Return whether the order history link applies to the current viewer.
+    """
+    if not settings.ORDER_HISTORY_MICROFRONTEND_URL:
+        # There is no order history microfrontend to send anyone to.
+        return False
+    # Learners associated with an enterprise customer obtain content through that
+    # customer's portal rather than by purchasing it directly, so order history
+    # does not apply to them.
+    return not get_enterprise_learner_portal_link()
+
+
 def get_logo_url_for_email():
     """
     Returns the url for the branded logo image for embedding in email templates.
     """
     default_logo_url = getattr(settings, 'DEFAULT_EMAIL_LOGO_URL', None)
-    return getattr(settings, 'LOGO_URL_PNG', None) or default_logo_url
+    # The LOGO_URL_PNG might be reused in the future for other things, so including an email specific png logo
+    return (getattr(settings, 'LOGO_URL_PNG_FOR_EMAIL', None) or
+            getattr(settings, 'LOGO_URL_PNG', None) or default_logo_url)

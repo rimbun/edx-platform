@@ -9,7 +9,10 @@ import random
 from eventtracking import tracker
 
 import openedx.core.djangoapps.user_api.course_tag.api as course_tag_api
-from xmodule.partitions.partitions import NoSuchUserPartitionGroupError, UserPartitionError
+from xmodule.partitions.partitions import (  # pylint: disable=wrong-import-order
+    NoSuchUserPartitionGroupError,
+    UserPartitionError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ class ReturnGroup1PartitionScheme:
     def get_group_for_user(cls, course_key, user, user_partition, assign=True):  # pylint: disable=unused-argument
         """
         The previous "allow" definition for verification was defined as 1, so return that.
-        Details at https://github.com/edx/edx-platform/pull/14913/files#diff-feff1466ec4d1b8c38894310d8342a80
+        Details at https://github.com/openedx/edx-platform/pull/14913/files#diff-feff1466ec4d1b8c38894310d8342a80
         """
         return user_partition.get_group(1)
 

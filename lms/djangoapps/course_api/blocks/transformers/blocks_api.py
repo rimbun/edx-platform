@@ -10,6 +10,7 @@ from .block_depth import BlockDepthTransformer
 from .extra_fields import ExtraFieldsTransformer
 from .navigation import BlockNavigationTransformer
 from .student_view import StudentViewTransformer
+from .video_stream_priority import VideoBlockStreamPriorityTransformer
 from .video_urls import VideoBlockURLTransformer
 
 
@@ -23,6 +24,7 @@ class BlocksAPITransformer(BlockStructureTransformer):
         BlockCountsTransformer
         BlockDepthTransformer
         BlockNavigationTransformer
+        VideoBlockStreamPriorityTransformer
         ExtraFieldsTransformer
 
     Note:
@@ -52,7 +54,15 @@ class BlocksAPITransformer(BlockStructureTransformer):
         transform method.
         """
         # collect basic xblock fields
-        block_structure.request_xblock_fields('graded', 'format', 'display_name', 'category', 'due', 'show_correctness')
+        block_structure.request_xblock_fields(
+            'graded',
+            'format',
+            'display_name',
+            'category',
+            'due',
+            'show_correctness',
+            'icon_class',
+        )
 
         # collect data from containing transformers
         StudentViewTransformer.collect(block_structure)
@@ -72,4 +82,5 @@ class BlocksAPITransformer(BlockStructureTransformer):
         BlockDepthTransformer(self.depth).transform(usage_info, block_structure)
         BlockNavigationTransformer(self.nav_depth).transform(usage_info, block_structure)
         VideoBlockURLTransformer().transform(usage_info, block_structure)
+        VideoBlockStreamPriorityTransformer().transform(usage_info, block_structure)
         ExtraFieldsTransformer().transform(usage_info, block_structure)

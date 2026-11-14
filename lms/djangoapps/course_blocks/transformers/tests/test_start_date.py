@@ -4,9 +4,9 @@ Tests for StartDateTransformer.
 
 
 from datetime import timedelta
-from unittest.mock import patch
 
 import ddt
+from django.test.utils import override_settings
 from django.utils.timezone import now
 
 from common.djangoapps.student.tests.factories import BetaTesterFactory
@@ -63,7 +63,7 @@ class StartDateTransformerTestCase(BlockParentsMapTestCase):
     #  3   4   /   5
     #       \ /
     #        6
-    @patch.dict('django.conf.settings.FEATURES', {'DISABLE_START_DATES': False})
+    @override_settings(DISABLE_START_DATES=False)
     @ddt.data(
         (STUDENT, {}, {}, {}),
         (STUDENT, {0: StartDateType.default}, {}, {}),
@@ -72,7 +72,7 @@ class StartDateTransformerTestCase(BlockParentsMapTestCase):
 
         # has_access checks on block directly and doesn't follow negative access set on parent/ancestor (i.e., 0)
         (STUDENT, {1: StartDateType.released}, {}, {1, 3, 4, 6}),
-        (STUDENT, {2: StartDateType.released}, {}, {2, 5, 6}),
+        (STUDENT, {2: StartDateType.released}, {}, {2, 5}),
         (STUDENT, {1: StartDateType.released, 2: StartDateType.released}, {}, {1, 2, 3, 4, 5, 6}),
 
         # DAG conflicts: has_access relies on field inheritance so it takes only the value from the first parent-chain

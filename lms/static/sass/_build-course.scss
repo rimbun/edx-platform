@@ -26,7 +26,6 @@
 @import 'course/base/mixins';
 @import 'course/base/base';
 @import 'course/base/extends';
-@import 'xmodule/modules/css/module-styles.scss';
 @import 'course/courseware/courseware';
 @import 'course/courseware/sidebar';
 @import 'course/courseware/amplifier';
@@ -45,7 +44,6 @@
 @import "course/wiki/table";
 
 // course - views
-@import "course/info";
 @import "course/syllabus"; // TODO arjun replace w/ custom tabs, see courseware/courses.py
 @import "course/textbook";
 @import "course/profile";
@@ -58,7 +56,6 @@
 @import "course/gradebook";
 @import "course/instructor/instructor_2";
 @import "course/instructor/email";
-@import "xmodule/descriptors/css/module-styles.scss";
 
 // course - ccx_coach
 @import "course/ccx_coach/dashboard";
@@ -69,6 +66,3 @@
 // responsive
 @import 'base/layouts'; // temporary spot for responsive course
 @import 'header';
-
-// features
-@import 'features/course-sock';

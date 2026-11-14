@@ -3,149 +3,154 @@
  */
 define(['underscore', 'jquery', 'common/js/components/views/feedback_notification', 'common/js/components/views/feedback_prompt',
     'edx-ui-toolkit/js/utils/spec-helpers/ajax-helpers'],
-    function(_, $, NotificationView, Prompt, AjaxHelpers) {
-        'use strict';
-        var installViewTemplates, createFeedbackSpy, verifyFeedbackShowing,
-            verifyFeedbackHidden, createNotificationSpy, verifyNotificationShowing,
-            verifyNotificationHidden, createPromptSpy, confirmPrompt, inlineEdit, verifyInlineEditChange,
-            installMockAnalytics, removeMockAnalytics, verifyPromptShowing, verifyPromptHidden,
-            clickDeleteItem, patchAndVerifyRequest, submitAndVerifyFormSuccess, submitAndVerifyFormError;
+function(_, $, NotificationView, Prompt, AjaxHelpers) {
+    'use strict';
 
-        installViewTemplates = function() {
-            appendSetFixtures('<div id="page-notification"></div>');
-        };
+    var installViewTemplates, createFeedbackSpy, verifyFeedbackShowing,
+        verifyFeedbackHidden, createNotificationSpy, verifyNotificationShowing,
+        verifyNotificationHidden, createPromptSpy, confirmPrompt, inlineEdit, verifyInlineEditChange,
+        installMockAnalytics, removeMockAnalytics, verifyPromptShowing, verifyPromptHidden,
+        clickDeleteItem, patchAndVerifyRequest, submitAndVerifyFormSuccess, submitAndVerifyFormError;
 
-        createFeedbackSpy = function(type, intent) {
-            var feedbackSpy = jasmine.stealth.spyOnConstructor(type, intent, ['show', 'hide']);
-            feedbackSpy.show.and.returnValue(feedbackSpy);
-            if (afterEach) {
-                afterEach(jasmine.stealth.clearSpies);
-            }
-            return feedbackSpy;
-        };
+    // Register a single global afterEach to clean up jasmine.stealth constructor spies.
+    // Jasmine 2.99.x prohibits calling afterEach() from inside it()/beforeEach() callbacks,
+    // so we cannot register this inside createFeedbackSpy (which is called from it() blocks).
+    // Calling afterEach() at module scope (outside any describe/it) registers a global hook
+    // that runs after every spec. AMD caches this module, so the hook is registered exactly once.
+    afterEach(jasmine.stealth.clearSpies);
 
-        verifyFeedbackShowing = function(feedbackSpy, text) {
-            var options;
-            expect(feedbackSpy.constructor).toHaveBeenCalled();
-            expect(feedbackSpy.show).toHaveBeenCalled();
-            expect(feedbackSpy.hide).not.toHaveBeenCalled();
-            options = feedbackSpy.constructor.calls.mostRecent().args[0];
-            expect(options.title).toMatch(text);
-        };
+    installViewTemplates = function() {
+        appendSetFixtures('<div id="page-notification"></div>');
+    };
 
-        verifyFeedbackHidden = function(feedbackSpy) {
-            expect(feedbackSpy.hide).toHaveBeenCalled();
-        };
+    createFeedbackSpy = function(type, intent) {
+        var feedbackSpy = jasmine.stealth.spyOnConstructor(type, intent, ['show', 'hide']);
+        feedbackSpy.show.and.returnValue(feedbackSpy);
+        return feedbackSpy;
+    };
 
-        createNotificationSpy = function(type) {
-            return createFeedbackSpy(NotificationView, type || 'Mini');
-        };
+    verifyFeedbackShowing = function(feedbackSpy, text) {
+        var options;
+        expect(feedbackSpy.constructor).toHaveBeenCalled();
+        expect(feedbackSpy.show).toHaveBeenCalled();
+        expect(feedbackSpy.hide).not.toHaveBeenCalled();
+        options = feedbackSpy.constructor.calls.mostRecent().args[0];
+        expect(options.title).toMatch(text);
+    };
 
-        verifyNotificationShowing = function() {
-            verifyFeedbackShowing.apply(this, arguments);
-        };
+    verifyFeedbackHidden = function(feedbackSpy) {
+        expect(feedbackSpy.hide).toHaveBeenCalled();
+    };
 
-        verifyNotificationHidden = function() {
-            verifyFeedbackHidden.apply(this, arguments);
-        };
+    createNotificationSpy = function(type) {
+        return createFeedbackSpy(NotificationView, type || 'Mini');
+    };
 
-        createPromptSpy = function(type) {
-            return createFeedbackSpy(Prompt, type || 'Warning');
-        };
+    verifyNotificationShowing = function() {
+        verifyFeedbackShowing.apply(this, arguments);
+    };
 
-        confirmPrompt = function(promptSpy, pressSecondaryButton) {
-            expect(promptSpy.constructor).toHaveBeenCalled();
-            if (pressSecondaryButton) {
-                promptSpy.constructor.calls.mostRecent().args[0].actions.secondary.click(promptSpy);
-            } else {
-                promptSpy.constructor.calls.mostRecent().args[0].actions.primary.click(promptSpy);
-            }
-        };
+    verifyNotificationHidden = function() {
+        verifyFeedbackHidden.apply(this, arguments);
+    };
 
-        verifyPromptShowing = function() {
-            verifyFeedbackShowing.apply(this, arguments);
-        };
+    createPromptSpy = function(type) {
+        return createFeedbackSpy(Prompt, type || 'Warning');
+    };
 
-        verifyPromptHidden = function() {
-            verifyFeedbackHidden.apply(this, arguments);
-        };
+    confirmPrompt = function(promptSpy, pressSecondaryButton) {
+        expect(promptSpy.constructor).toHaveBeenCalled();
+        if (pressSecondaryButton) {
+            promptSpy.constructor.calls.mostRecent().args[0].actions.secondary.click(promptSpy);
+        } else {
+            promptSpy.constructor.calls.mostRecent().args[0].actions.primary.click(promptSpy);
+        }
+    };
 
-        installMockAnalytics = function() {
-            window.analytics = jasmine.createSpyObj('analytics', ['track']);
-            window.course_location_analytics = jasmine.createSpy();
-        };
+    verifyPromptShowing = function() {
+        verifyFeedbackShowing.apply(this, arguments);
+    };
 
-        removeMockAnalytics = function() {
-            delete window.analytics;
-            delete window.course_location_analytics;
-        };
+    verifyPromptHidden = function() {
+        verifyFeedbackHidden.apply(this, arguments);
+    };
 
-        inlineEdit = function(editorWrapper, newValue) {
-            var inputField = editorWrapper.find('.xblock-field-input'),
-                editButton = editorWrapper.find('.xblock-field-value-edit');
-            editButton.click();
+    installMockAnalytics = function() {
+        window.analytics = jasmine.createSpyObj('analytics', ['track']);
+        window.course_location_analytics = jasmine.createSpy();
+    };
+
+    removeMockAnalytics = function() {
+        delete window.analytics;
+        delete window.course_location_analytics;
+    };
+
+    inlineEdit = function(editorWrapper, newValue) {
+        var inputField = editorWrapper.find('.xblock-field-input'),
+            editButton = editorWrapper.find('.xblock-field-value-edit');
+        editButton.click();
+        expect(editorWrapper).toHaveClass('is-editing');
+        inputField.val(newValue);
+        return inputField;
+    };
+
+    verifyInlineEditChange = function(editorWrapper, expectedValue, failedValue) {
+        var displayName = editorWrapper.find('.xblock-field-value');
+        expect(displayName.text()).toBe(expectedValue);
+        if (failedValue) {
             expect(editorWrapper).toHaveClass('is-editing');
-            inputField.val(newValue);
-            return inputField;
-        };
+        } else {
+            expect(editorWrapper).not.toHaveClass('is-editing');
+        }
+    };
 
-        verifyInlineEditChange = function(editorWrapper, expectedValue, failedValue) {
-            var displayName = editorWrapper.find('.xblock-field-value');
-            expect(displayName.text()).toBe(expectedValue);
-            if (failedValue) {
-                expect(editorWrapper).toHaveClass('is-editing');
-            } else {
-                expect(editorWrapper).not.toHaveClass('is-editing');
-            }
-        };
+    clickDeleteItem = function(that, promptSpy, promptText) {
+        that.view.$('.delete').click();
+        verifyPromptShowing(promptSpy, promptText);
+        confirmPrompt(promptSpy);
+        verifyPromptHidden(promptSpy);
+    };
 
-        clickDeleteItem = function(that, promptSpy, promptText) {
-            that.view.$('.delete').click();
-            verifyPromptShowing(promptSpy, promptText);
-            confirmPrompt(promptSpy);
-            verifyPromptHidden(promptSpy);
-        };
+    patchAndVerifyRequest = function(requests, url, notificationSpy) {
+        // Backbone.emulateHTTP is enabled in our system, so setting this
+        // option  will fake PUT, PATCH and DELETE requests with a HTTP POST,
+        // setting the X-HTTP-Method-Override header with the true method.
+        AjaxHelpers.expectJsonRequest(requests, 'POST', url);
+        expect(_.last(requests).requestHeaders['X-HTTP-Method-Override']).toBe('DELETE');
+        verifyNotificationShowing(notificationSpy, /Deleting/);
+    };
 
-        patchAndVerifyRequest = function(requests, url, notificationSpy) {
-            // Backbone.emulateHTTP is enabled in our system, so setting this
-            // option  will fake PUT, PATCH and DELETE requests with a HTTP POST,
-            // setting the X-HTTP-Method-Override header with the true method.
-            AjaxHelpers.expectJsonRequest(requests, 'POST', url);
-            expect(_.last(requests).requestHeaders['X-HTTP-Method-Override']).toBe('DELETE');
-            verifyNotificationShowing(notificationSpy, /Deleting/);
-        };
+    submitAndVerifyFormSuccess = function(view, requests, notificationSpy) {
+        view.$('form').submit();
+        verifyNotificationShowing(notificationSpy, /Saving/);
+        AjaxHelpers.respondWithJson(requests, {});
+        verifyNotificationHidden(notificationSpy);
+    };
 
-        submitAndVerifyFormSuccess = function(view, requests, notificationSpy) {
-            view.$('form').submit();
-            verifyNotificationShowing(notificationSpy, /Saving/);
-            AjaxHelpers.respondWithJson(requests, {});
-            verifyNotificationHidden(notificationSpy);
-        };
+    submitAndVerifyFormError = function(view, requests, notificationSpy) {
+        view.$('form').submit();
+        verifyNotificationShowing(notificationSpy, /Saving/);
+        AjaxHelpers.respondWithError(requests);
+        verifyNotificationShowing(notificationSpy, /Saving/);
+    };
 
-        submitAndVerifyFormError = function(view, requests, notificationSpy) {
-            view.$('form').submit();
-            verifyNotificationShowing(notificationSpy, /Saving/);
-            AjaxHelpers.respondWithError(requests);
-            verifyNotificationShowing(notificationSpy, /Saving/);
-        };
-
-        return {
-            installViewTemplates: installViewTemplates,
-            createNotificationSpy: createNotificationSpy,
-            verifyNotificationShowing: verifyNotificationShowing,
-            verifyNotificationHidden: verifyNotificationHidden,
-            confirmPrompt: confirmPrompt,
-            createPromptSpy: createPromptSpy,
-            verifyPromptShowing: verifyPromptShowing,
-            verifyPromptHidden: verifyPromptHidden,
-            inlineEdit: inlineEdit,
-            verifyInlineEditChange: verifyInlineEditChange,
-            installMockAnalytics: installMockAnalytics,
-            removeMockAnalytics: removeMockAnalytics,
-            clickDeleteItem: clickDeleteItem,
-            patchAndVerifyRequest: patchAndVerifyRequest,
-            submitAndVerifyFormSuccess: submitAndVerifyFormSuccess,
-            submitAndVerifyFormError: submitAndVerifyFormError
-        };
-    }
+    return {
+        installViewTemplates: installViewTemplates,
+        createNotificationSpy: createNotificationSpy,
+        verifyNotificationShowing: verifyNotificationShowing,
+        verifyNotificationHidden: verifyNotificationHidden,
+        confirmPrompt: confirmPrompt,
+        createPromptSpy: createPromptSpy,
+        verifyPromptShowing: verifyPromptShowing,
+        verifyPromptHidden: verifyPromptHidden,
+        inlineEdit: inlineEdit,
+        verifyInlineEditChange: verifyInlineEditChange,
+        installMockAnalytics: installMockAnalytics,
+        removeMockAnalytics: removeMockAnalytics,
+        clickDeleteItem: clickDeleteItem,
+        patchAndVerifyRequest: patchAndVerifyRequest,
+        submitAndVerifyFormSuccess: submitAndVerifyFormSuccess,
+        submitAndVerifyFormError: submitAndVerifyFormError
+    };
+}
 );

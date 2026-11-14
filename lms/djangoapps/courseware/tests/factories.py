@@ -14,10 +14,11 @@ from opaque_keys.edx.locator import CourseLocator
 
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.courseware.models import (
+    FinancialAssistanceConfiguration,
     StudentModule,
     XModuleStudentInfoField,
     XModuleStudentPrefsField,
-    XModuleUserStateSummaryField
+    XModuleUserStateSummaryField,
 )
 
 COURSE_KEY = CourseKey.from_string('edX/test_course/test')
@@ -75,3 +76,12 @@ class StudentInfoFactory(DjangoModelFactory):
     field_name = 'existing_field'
     value = json.dumps('old_value')
     student = factory.SubFactory(UserFactory)
+
+
+class FinancialAssistanceConfigurationFactory(DjangoModelFactory):
+    """
+    Factory for FinancialAssistanceConfiguration model.
+    """
+
+    class Meta:
+        model = FinancialAssistanceConfiguration

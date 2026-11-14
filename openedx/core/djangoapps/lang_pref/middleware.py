@@ -1,16 +1,15 @@
 """
 Middleware for Language Preferences
 """
-
-
 from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
-from django.utils.translation import LANGUAGE_SESSION_KEY
 from django.utils.translation.trans_real import parse_accept_lang_header
 
 from openedx.core.djangoapps.dark_lang import DARK_LANGUAGE_KEY
 from openedx.core.djangoapps.dark_lang.models import DarkLangConfig
-from openedx.core.djangoapps.lang_pref import COOKIE_DURATION, LANGUAGE_HEADER, LANGUAGE_KEY
+from openedx.core.djangoapps.lang_pref import LANGUAGE_HEADER, LANGUAGE_KEY
+from openedx.core.djangoapps.lang_pref import helpers as lang_pref_helpers
+from openedx.core.djangoapps.site_configuration.helpers import get_value
 from openedx.core.djangoapps.user_api.errors import UserAPIInternalError, UserAPIRequestError
 from openedx.core.djangoapps.user_api.preferences.api import get_user_preference, set_user_preference
 from openedx.core.lib.mobile_utils import is_request_from_mobile_app
@@ -28,8 +27,11 @@ class LanguagePreferenceMiddleware(MiddlewareMixin):
         """
         If a user's UserPreference contains a language preference, use the user's preference.
         Save the current language preference cookie as the user's preferred language.
+
+        If you specify the LANGUAGE_CODE in SiteConfiguration, it will have a higher priority than the user's language
+        preference.
         """
-        cookie_lang = request.COOKIES.get(settings.LANGUAGE_COOKIE_NAME, None)
+        cookie_lang = lang_pref_helpers.get_language_cookie(request)
         if cookie_lang:
             if request.user.is_authenticated:
                 # DarkLangMiddleware will take care of this so don't change anything
@@ -37,7 +39,7 @@ class LanguagePreferenceMiddleware(MiddlewareMixin):
                     return
                 set_user_preference(request.user, LANGUAGE_KEY, cookie_lang)
             else:
-                request._anonymous_user_cookie_lang = cookie_lang  # lint-amnesty, pylint: disable=protected-access
+                request._anonymous_user_cookie_lang = cookie_lang  # pylint: disable=protected-access
 
             accept_header = request.META.get(LANGUAGE_HEADER, None)
             if accept_header:
@@ -50,11 +52,11 @@ class LanguagePreferenceMiddleware(MiddlewareMixin):
                 accept_header = cookie_lang
             request.META[LANGUAGE_HEADER] = accept_header
 
-            # Allow the new cookie setting to update the language in the user's session
-            if LANGUAGE_SESSION_KEY in request.session and request.session[LANGUAGE_SESSION_KEY] != cookie_lang:
-                del request.session[LANGUAGE_SESSION_KEY]
+        # Apply language specified in SiteConfiguration, ignoring user preferences.
+        if language := get_value('LANGUAGE_CODE'):
+            request.COOKIES[settings.LANGUAGE_COOKIE_NAME] = language
 
-    def process_response(self, request, response):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def process_response(self, request, response):  # pylint: disable=missing-function-docstring
         # If the user is logged in, check for their language preference. Also check for real user
         # if current user is a masquerading user,
         user_pref = None
@@ -82,17 +84,8 @@ class LanguagePreferenceMiddleware(MiddlewareMixin):
 
             # If set, set the user_pref in the LANGUAGE_COOKIE_NAME
             if user_pref and not is_request_from_mobile_app(request):
-                response.set_cookie(
-                    settings.LANGUAGE_COOKIE_NAME,
-                    value=user_pref,
-                    domain=settings.SHARED_COOKIE_DOMAIN,
-                    max_age=COOKIE_DURATION,
-                    secure=request.is_secure()
-                )
+                lang_pref_helpers.set_language_cookie(request, response, user_pref)
             else:
-                response.delete_cookie(
-                    settings.LANGUAGE_COOKIE_NAME,
-                    domain=settings.SHARED_COOKIE_DOMAIN
-                )
+                lang_pref_helpers.unset_language_cookie(response)
 
         return response

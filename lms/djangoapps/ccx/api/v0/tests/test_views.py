@@ -6,11 +6,12 @@ Tests for the CCX REST APIs.
 import json
 import math
 import string
+import urllib
 from datetime import timedelta
 from unittest import mock
-import urllib
-import pytest
+
 import ddt
+import pytest
 from ccx_keys.locator import CCXLocator
 from django.conf import settings
 from django.urls import Resolver404, resolve, reverse
@@ -33,7 +34,7 @@ from lms.djangoapps.instructor.access import allow_access, list_with_level
 from lms.djangoapps.instructor.enrollment import enroll_email, get_email_params
 from openedx.core.lib.courses import get_course_by_id
 
-USER_PASSWORD = 'test'
+USER_PASSWORD = 'Password1234'
 
 
 class CcxRestApiTest(CcxTestCase, APITestCase):
@@ -676,7 +677,7 @@ class CcxListTest(CcxRestApiTest):
         # Make sure the "Coach" on the parent course is "Staff" on the CCX
         assert self.coach in list_staff_ccx_course
         assert len(list_instructor_master_course) == len(list_instructor_ccx_course)
-        for course_user, ccx_user in zip(sorted(list_instructor_master_course), sorted(list_instructor_ccx_course)):
+        for course_user, ccx_user in zip(sorted(list_instructor_master_course), sorted(list_instructor_ccx_course)):  # noqa: B905  # pylint: disable=line-too-long
             assert course_user == ccx_user
 
 
@@ -730,8 +731,8 @@ class CcxDetailTest(CcxRestApiTest):
             course_id=ccx_course_key,
             student_email=self.coach.email,
             auto_enroll=True,
-            email_students=False,
-            email_params=email_params,
+            message_students=False,
+            message_params=email_params,
         )
         return ccx
 
@@ -760,7 +761,7 @@ class CcxDetailTest(CcxRestApiTest):
         """
         # create a staff user
         staff_user = UserFactory.create(
-            username='test_staff_user', email='test_staff_user@openedx.org', password='test',
+            username='test_staff_user', email='test_staff_user@openedx.org', password=USER_PASSWORD,
         )
         # add staff role to the staff user
         CourseStaffRole(self.master_course_key).add_users(staff_user)
@@ -779,7 +780,7 @@ class CcxDetailTest(CcxRestApiTest):
         """
         # create an instructor user
         instructor_user = UserFactory.create(
-            username='test_instructor_user', email='test_instructor_user@openedx.org', password='test',
+            username='test_instructor_user', email='test_instructor_user@openedx.org', password=USER_PASSWORD,
         )
         # add instructor role to the instructor user
         CourseInstructorRole(self.master_course_key).add_users(instructor_user)
@@ -798,7 +799,7 @@ class CcxDetailTest(CcxRestApiTest):
         """
         # create an coach user
         coach_user = UserFactory.create(
-            username='test_coach_user', email='test_coach_user@openedx.org', password='test',
+            username='test_coach_user', email='test_coach_user@openedx.org', password=USER_PASSWORD,
         )
         # add coach role to the coach user
         CourseCcxCoachRole(self.master_course_key).add_users(coach_user)
@@ -832,7 +833,7 @@ class CcxDetailTest(CcxRestApiTest):
         base_url = '{}/'.format(self.detail_url.rsplit('/', 1)[0])
         # this url should be the same of the ccx list view
         resolver = resolve(base_url)
-        assert views.CCXListView.__name__ == resolver.func.__name__
+        assert views.CCXListView.__name__ == resolver.func.view_class.__name__
         assert views.CCXListView.__module__ == resolver.func.__module__
         # invalid urls
         for invalid_ccx_id in ('foo', 'ccx-v1:org.0', 'ccx-v1:org.0+course_0'):
@@ -840,11 +841,11 @@ class CcxDetailTest(CcxRestApiTest):
                 resolve(f'{base_url}{invalid_ccx_id}')
         # the following course ID works even if it is not a CCX valid course id (the regex matches course ID strings)
         resolver = resolve('{}{}'.format(base_url, 'ccx-v1:org.0+course_0+Run_0'))
-        assert views.CCXDetailView.__name__ == resolver.func.__name__
+        assert views.CCXDetailView.__name__ == resolver.func.view_class.__name__
         assert views.CCXDetailView.__module__ == resolver.func.__module__
         # and of course a valid ccx course id
         resolver = resolve(f'{base_url}{self.ccx_key_str}')
-        assert views.CCXDetailView.__name__ == resolver.func.__name__
+        assert views.CCXDetailView.__name__ == resolver.func.view_class.__name__
         assert views.CCXDetailView.__module__ == resolver.func.__module__
 
     @ddt.data(

@@ -2,13 +2,18 @@
 Tests of the instructor dashboard spoc gradebook
 """
 from django.urls import reverse
+from xblock_problem.capa.testing.response_xml_factory import StringResponseXMLFactory
 
-from capa.tests.response_xml_factory import StringResponseXMLFactory
 from common.djangoapps.student.tests.factories import AdminFactory, CourseEnrollmentFactory, UserFactory
 from lms.djangoapps.courseware.tests.factories import StudentModuleFactory
 from lms.djangoapps.grades.api import task_compute_all_grades_for_course
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    BlockFactory,
+    CourseFactory,
+)
 
 USER_COUNT = 11
 
@@ -33,17 +38,17 @@ class TestGradebook(SharedModuleStoreTestCase):
 
         # Now give it some content
         with cls.store.bulk_operations(cls.course.id, emit_signals=False):
-            chapter = ItemFactory.create(
+            chapter = BlockFactory.create(
                 parent_location=cls.course.location,
                 category="sequential",
             )
-            section = ItemFactory.create(
+            section = BlockFactory.create(
                 parent_location=chapter.location,
                 category="sequential",
                 metadata={'graded': True, 'format': 'Homework'}
             )
             cls.items = [
-                ItemFactory.create(
+                BlockFactory.create(
                     parent_location=section.location,
                     category="problem",
                     data=StringResponseXMLFactory().build_xml(answer='foo'),
@@ -56,9 +61,8 @@ class TestGradebook(SharedModuleStoreTestCase):
         super().setUp()
 
         instructor = AdminFactory.create()
-        self.client.login(username=instructor.username, password='test')
+        self.client.login(username=instructor.username, password=self.TEST_PASSWORD)
         self.users = [UserFactory.create() for _ in range(USER_COUNT)]
-
         for user in self.users:
             CourseEnrollmentFactory.create(user=user, course_id=self.course.id)
 

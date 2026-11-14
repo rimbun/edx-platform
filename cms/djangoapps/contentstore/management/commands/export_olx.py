@@ -19,7 +19,7 @@ import os
 import re
 import shutil
 import tarfile
-from tempfile import mkdtemp, mktemp
+from tempfile import mkdtemp, mkstemp
 from textwrap import dedent
 
 from django.core.management.base import BaseCommand, CommandError
@@ -47,15 +47,17 @@ class Command(BaseCommand):
         try:
             course_key = CourseKey.from_string(course_id)
         except InvalidKeyError:
-            raise CommandError("Unparsable course_id")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise CommandError("Unparsable course_id")  # pylint: disable=raise-missing-from  # noqa: B904
         except IndexError:
-            raise CommandError("Insufficient arguments")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise CommandError("Insufficient arguments")  # pylint: disable=raise-missing-from  # noqa: B904
 
         filename = options['output']
         pipe_results = False
 
         if filename is None:
-            filename = mktemp()
+            fd, filename = mkstemp()
+            os.close(fd)
+            os.unlink(filename)
             pipe_results = True
 
         export_course_to_tarfile(course_key, filename)

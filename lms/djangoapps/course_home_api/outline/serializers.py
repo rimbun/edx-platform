@@ -16,10 +16,11 @@ class CourseBlockSerializer(serializers.Serializer):
     """
     blocks = serializers.SerializerMethodField()
 
-    def get_blocks(self, block):
+    def get_blocks(self, block):  # pylint: disable=missing-function-docstring
         block_key = block['id']
         block_type = block['type']
-        children = block.get('children', []) if block_type != 'sequential' else []  # Don't descend past sequential
+        last_parent_block_type = 'vertical' if self.context.get('include_vertical') else 'sequential'
+        children = block.get('children', []) if block_type != last_parent_block_type else []
         description = block.get('format')
         display_name = block['display_name']
         enable_links = self.context.get('enable_links')
@@ -35,9 +36,15 @@ class CourseBlockSerializer(serializers.Serializer):
         if graded and scored:
             icon = 'fa-pencil-square-o'
 
+        if block_type == 'vertical':
+            icon = self.get_vertical_icon_class(block)
+
         if 'special_exam_info' in block:
             description = block['special_exam_info'].get('short_description')
             icon = block['special_exam_info'].get('suggested_icon', 'fa-pencil-square-o')
+
+        if self.context.get('enable_prerequisite_block_type', False) and block.get('accessible') is False:
+            block_type = 'lock'
 
         serialized = {
             block_key: {
@@ -51,23 +58,48 @@ class CourseBlockSerializer(serializers.Serializer):
                 'icon': icon,
                 'id': block_key,
                 'lms_web_url': block['lms_web_url'] if enable_links else None,
-                'legacy_web_url': block['legacy_web_url'] if enable_links else None,
                 'resume_block': block.get('resume_block', False),
                 'type': block_type,
                 'has_scheduled_content': block.get('has_scheduled_content'),
+                'hide_from_toc': block.get('hide_from_toc'),
             },
         }
+        if 'special_exam_info' in self.context.get('extra_fields', []) and block.get('special_exam_info'):
+            serialized[block_key]['special_exam_info'] = block.get('special_exam_info').get('short_description')
+        if 'completion_stat' in self.context.get('extra_fields', []):
+            serialized[block_key]['completion_stat'] = block.get('completion_stat', {})
+
         for child in children:
             serialized.update(self.get_blocks(child))
         return serialized
+
+    @staticmethod
+    def get_vertical_icon_class(block):
+        """
+        Get the icon class for a vertical block based priority of child blocks types.
+        Currently, the priority for the icon is as follows:
+            problem
+            video
+        """
+        children = block.get('children', [])
+        child_classes = {
+            value
+            for child in children
+            for value in (child.get('type'), child.get('icon_class'))
+        }
+        if 'problem' in child_classes:
+            return 'problem'
+        if 'video' in child_classes:
+            return 'video'
+        return 'other'
 
 
 class CourseGoalsSerializer(serializers.Serializer):
     """
     Serializer for Course Goal data
     """
-    goal_options = serializers.ListField(default=[])
     selected_goal = serializers.DictField()
+    weekly_learning_goal_enabled = serializers.BooleanField(default=False)
 
 
 class CourseToolSerializer(serializers.Serializer):
@@ -110,6 +142,16 @@ class ResumeCourseSerializer(serializers.Serializer):
     url = serializers.URLField()
 
 
+class OutlineTabCourseAccessRedirectSerializer(serializers.Serializer):
+    """
+    Serializer for a Course Access Redirect response from the outline tab
+    """
+    url = serializers.URLField()
+    error_code = serializers.CharField(source='access_error.error_code')
+    developer_message = serializers.CharField(source='access_error.developer_message')
+    user_message = serializers.CharField(source='access_error.user_message')
+
+
 class OutlineTabSerializer(DatesBannerSerializer, VerifiedModeSerializer):
     """
     Serializer for the Outline Tab
@@ -122,6 +164,7 @@ class OutlineTabSerializer(DatesBannerSerializer, VerifiedModeSerializer):
     dates_widget = DatesWidgetSerializer()
     enroll_alert = EnrollAlertSerializer()
     enrollment_mode = serializers.CharField()
+    enable_proctored_exams = serializers.BooleanField()
     handouts_html = serializers.CharField()
     has_ended = serializers.BooleanField()
     offer = serializers.DictField()

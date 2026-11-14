@@ -19,15 +19,16 @@ import logging
 
 from config_models.models import ConfigurationModel
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.db import models
 from django.db.models.signals import post_save
-
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
+from edx_django_utils.cache.utils import RequestCache
 from model_utils.models import TimeStampedModel
 from opaque_keys.edx.django.models import BlockTypeKeyField, CourseKeyField, LearningContextKeyField, UsageKeyField
-from lms.djangoapps.courseware.fields import UnsignedBigIntAutoField
 
+from lms.djangoapps.courseware.fields import UnsignedBigIntAutoField
 from openedx.core.djangolib.markup import HTML
 
 log = logging.getLogger("edx.courseware")
@@ -87,7 +88,7 @@ class StudentModule(models.Model):
     id = UnsignedBigIntAutoField(primary_key=True)  # pylint: disable=invalid-name
 
     ## The XBlock/XModule type (e.g. "problem")
-    module_type = models.CharField(max_length=32, db_index=True)
+    module_type = models.CharField(max_length=32, db_index=True)  # noqa: DJ012
 
     # Key used to share state. This is the XBlock usage_id
     module_state_key = UsageKeyField(max_length=255, db_column='module_id')
@@ -104,7 +105,7 @@ class StudentModule(models.Model):
         ]
 
     # Internal state of the object
-    state = models.TextField(null=True, blank=True)
+    state = models.TextField(null=True, blank=True)  # noqa: DJ001, DJ012
 
     # Grade, and are we done?
     grade = models.FloatField(null=True, blank=True, db_index=True)
@@ -136,7 +137,7 @@ class StudentModule(models.Model):
         else:
             return queryset
 
-    def __repr__(self):
+    def __repr__(self):  # noqa: DJ012
         return 'StudentModule<{!r}>'.format(
             {
                 'course_id': self.course_id,
@@ -165,7 +166,7 @@ class StudentModule(models.Model):
         return module_states
 
     @classmethod
-    def save_state(cls, student, course_id, module_state_key, defaults):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def save_state(cls, student, course_id, module_state_key, defaults):  # pylint: disable=missing-function-docstring
         if not student.is_authenticated:
             return
         else:
@@ -189,11 +190,11 @@ class BaseStudentModuleHistory(models.Model):
     class Meta:
         abstract = True
 
-    version = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    version = models.CharField(max_length=255, null=True, blank=True, db_index=True)  # noqa: DJ001, DJ012
 
     # This should be populated from the modified field in StudentModule
     created = models.DateTimeField(db_index=True)
-    state = models.TextField(null=True, blank=True)
+    state = models.TextField(null=True, blank=True)  # noqa: DJ001
     grade = models.FloatField(null=True, blank=True)
     max_grade = models.FloatField(null=True, blank=True)
 
@@ -214,7 +215,7 @@ class BaseStudentModuleHistory(models.Model):
 
         history_entries = []
 
-        if settings.FEATURES.get('ENABLE_CSMH_EXTENDED'):
+        if settings.ENABLE_CSMH_EXTENDED:
             from lms.djangoapps.coursewarehistoryextended.models import StudentModuleHistoryExtended
             history_entries += StudentModuleHistoryExtended.objects.filter(
                 # Django will sometimes try to join to courseware_studentmodule
@@ -224,13 +225,54 @@ class BaseStudentModuleHistory(models.Model):
 
         # If we turn off reading from multiple history tables, then we don't want to read from
         # StudentModuleHistory anymore, we believe that all history is in the Extended table.
-        if settings.FEATURES.get('ENABLE_READING_FROM_MULTIPLE_HISTORY_TABLES'):
+        if settings.ENABLE_READING_FROM_MULTIPLE_HISTORY_TABLES:
             # we want to save later SQL queries on the model which allows us to prefetch
             history_entries += StudentModuleHistory.objects.prefetch_related('student_module').filter(
                 student_module__in=student_modules
             ).order_by('-id')
 
         return history_entries
+
+    @staticmethod
+    def save_history_entry(student_module, history_model_cls, request_cache_key):
+        """
+        When a StudentModule instance is updated, save the changes in the corresponding activity history table
+        """
+        if student_module.module_type in history_model_cls.HISTORY_SAVING_TYPES:
+            request_cache = RequestCache('studentmodulehistory')
+            history_entry = None
+            # To avoid duplicate history records within one request context, check if the student module instance
+            # has already been updated and generated a history record. If so, then update that history record rather
+            # than creating a new one
+            request_smh_cache = request_cache.get_cached_response(request_cache_key).get_value_or_default({})
+            if student_module.id in request_smh_cache:
+                smh_id = request_smh_cache[student_module.id]
+                try:
+                    history_entry = history_model_cls.objects.get(id=smh_id)
+                except history_model_cls.DoesNotExist:
+                    log.error(
+                        "Cached {} instance does not exist: {}({}) for StudentModule({})".format(  # noqa: UP032
+                            history_model_cls.__name__, history_model_cls.__name__, smh_id, student_module.id
+                        )
+                    )
+
+            # If no StudentModuleHistory has been created yet during this request, then create a new one
+            if not history_entry:
+                history_entry = history_model_cls(student_module=student_module, version=None)
+
+            # Regardless of whether this is a new or existing StudentModuleHistory, set its values to match the current
+            # state of the StudentModule record
+            history_entry.created = student_module.modified
+            history_entry.state = student_module.state
+            history_entry.grade = student_module.grade
+            history_entry.max_grade = student_module.max_grade
+            history_entry.save()
+
+            # Update the RequestCache to map this StudentModule to the StudentModuleHistory for this request cycle
+            # Only cache the id rather than the full object in order to be conscientious of space as the number of
+            # records modified in one request can get large
+            request_cache.setdefault(request_cache_key, {})
+            request_cache.data[request_cache_key][student_module.id] = history_entry.id
 
 
 class StudentModuleHistory(BaseStudentModuleHistory):
@@ -242,7 +284,17 @@ class StudentModuleHistory(BaseStudentModuleHistory):
         app_label = "courseware"
         get_latest_by = "created"
 
-    student_module = models.ForeignKey(StudentModule, db_index=True, db_constraint=False, on_delete=models.CASCADE)
+    student_module = models.ForeignKey(StudentModule, db_index=True, db_constraint=False, on_delete=models.CASCADE)  # noqa: DJ012  # pylint: disable=line-too-long
+
+    def __repr__(self):
+        student_dict = {
+            "course_id": str(self.student_module.course_id),
+            "module_type": self.student_module.module_type,
+            "student_id": self.student_module.student_id,
+            "grade": self.grade,
+        }
+
+        return f"StudentModuleHistory<{student_dict!r}>"
 
     def __str__(self):
         return str(repr(self))
@@ -250,22 +302,19 @@ class StudentModuleHistory(BaseStudentModuleHistory):
     def save_history(sender, instance, **kwargs):  # pylint: disable=no-self-argument, unused-argument
         """
         Checks the instance's module_type, and creates & saves a
-        StudentModuleHistoryExtended entry if the module_type is one that
+        StudentModuleHistory entry if the module_type is one that
         we save.
         """
-        if instance.module_type in StudentModuleHistory.HISTORY_SAVING_TYPES:
-            history_entry = StudentModuleHistory(student_module=instance,
-                                                 version=None,
-                                                 created=instance.modified,
-                                                 state=instance.state,
-                                                 grade=instance.grade,
-                                                 max_grade=instance.max_grade)
-            history_entry.save()
+        BaseStudentModuleHistory.save_history_entry(
+            instance,
+            StudentModuleHistory,
+            "lms.djangoapps.courseware.models.student_module_history_map"
+        )
 
     # When the extended studentmodulehistory table exists, don't save
     # duplicate history into courseware_studentmodulehistory, just retain
     # data for reading.
-    if not settings.FEATURES.get('ENABLE_CSMH_EXTENDED'):
+    if not settings.ENABLE_CSMH_EXTENDED:
         post_save.connect(save_history, sender=StudentModule)
 
 
@@ -282,7 +331,7 @@ class XBlockFieldBase(models.Model):
         abstract = True
 
     # The name of the field
-    field_name = models.CharField(max_length=64, db_index=True)
+    field_name = models.CharField(max_length=64, db_index=True)  # noqa: DJ012
 
     # The value of the field. Defaults to None dumped as json
     value = models.TextField(default='null')
@@ -290,7 +339,7 @@ class XBlockFieldBase(models.Model):
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True, db_index=True)
 
-    def __str__(self):  # lint-amnesty, pylint: disable=invalid-str-returned
+    def __str__(self):  # pylint: disable=invalid-str-returned
         keys = [field.name for field in self._meta.get_fields() if field.name not in ('created', 'modified')]
         return HTML('{}<{!r}').format(
             HTML(self.__class__.__name__),
@@ -298,20 +347,20 @@ class XBlockFieldBase(models.Model):
         )
 
 
-class XModuleUserStateSummaryField(XBlockFieldBase):  # lint-amnesty, pylint: disable=model-no-explicit-unicode
+class XModuleUserStateSummaryField(XBlockFieldBase):  # pylint: disable=model-no-explicit-unicode
     """
-    Stores data set in the Scope.user_state_summary scope by an xmodule field
+    Stores data set in the Scope.user_state_summary scope by an xblock field
     """
 
     class Meta:
         app_label = "courseware"
         unique_together = (('usage_id', 'field_name'),)
 
-    # The definition id for the module
+    # The definition id for the block
     usage_id = UsageKeyField(max_length=255, db_index=True)
 
 
-class XModuleStudentPrefsField(XBlockFieldBase):  # lint-amnesty, pylint: disable=model-no-explicit-unicode
+class XModuleStudentPrefsField(XBlockFieldBase):  # pylint: disable=model-no-explicit-unicode
     """
     Stores data set in the Scope.preferences scope by an xmodule field
     """
@@ -320,13 +369,13 @@ class XModuleStudentPrefsField(XBlockFieldBase):  # lint-amnesty, pylint: disabl
         app_label = "courseware"
         unique_together = (('student', 'module_type', 'field_name'),)
 
-    # The type of the module for these preferences
+    # The type of the block for these preferences
     module_type = BlockTypeKeyField(max_length=64, db_index=True)
 
-    student = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)
+    student = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)  # noqa: DJ012
 
 
-class XModuleStudentInfoField(XBlockFieldBase):  # lint-amnesty, pylint: disable=model-no-explicit-unicode
+class XModuleStudentInfoField(XBlockFieldBase):  # pylint: disable=model-no-explicit-unicode
     """
     Stores data set in the Scope.preferences scope by an xmodule field
     """
@@ -335,7 +384,7 @@ class XModuleStudentInfoField(XBlockFieldBase):  # lint-amnesty, pylint: disable
         app_label = "courseware"
         unique_together = (('student', 'field_name'),)
 
-    student = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)
+    student = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)  # noqa: DJ012
 
 
 class OfflineComputedGrade(models.Model):
@@ -350,7 +399,7 @@ class OfflineComputedGrade(models.Model):
     created = models.DateTimeField(auto_now_add=True, null=True, db_index=True)
     updated = models.DateTimeField(auto_now=True, db_index=True)
 
-    gradeset = models.TextField(null=True, blank=True)  # grades, stored as JSON
+    gradeset = models.TextField(null=True, blank=True)  # grades, stored as JSON  # noqa: DJ001
 
     class Meta:
         app_label = "courseware"
@@ -374,7 +423,7 @@ class OfflineComputedGradeLog(models.Model):
         get_latest_by = "created"
 
     course_id = CourseKeyField(max_length=255, db_index=True)
-    created = models.DateTimeField(auto_now_add=True, null=True, db_index=True)
+    created = models.DateTimeField(auto_now_add=True, null=True, db_index=True)  # noqa: DJ012
     seconds = models.IntegerField(default=0)  # seconds elapsed for computation
     nstudents = models.IntegerField(default=0)
 
@@ -485,3 +534,51 @@ class OrgDynamicUpgradeDeadlineConfiguration(OptOutDynamicUpgradeDeadlineMixin, 
         default=False,
         help_text=_('Disable the dynamic upgrade deadline for this organization.')
     )
+
+
+class LastSeenCoursewareTimezone(models.Model):  # noqa: DJ008
+    """
+    The timezone in the user's account is frequently not set.
+    This model stores a user's recent timezone that can be used as a fallback
+
+    .. no_pii:
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    last_seen_courseware_timezone = models.CharField(max_length=255, db_index=True)
+
+    class Meta:
+        app_label = "courseware"
+
+
+class FinancialAssistanceConfiguration(ConfigurationModel):
+    """
+    Manages configuration for connecting to Financial Assistance backend service and using its API.
+
+    .. no_pii:
+    """
+
+    api_base_url = models.URLField(
+        verbose_name=_('Internal API Base URL'),
+        help_text=_('Financial Assistance Backend API Base URL.')
+    )
+
+    # pylint: disable-next=pii-invalid-no-pii-annotation  # field does not store user PII data, safe under OEP-30
+    service_username = models.CharField(
+        max_length=100,
+        default='financial_assistance_service_user',
+        null=False,
+        blank=False,
+        help_text=_('Username created for Financial Assistance Backend, e.g. financial_assistance_service_user.')
+    )
+
+    fa_backend_enabled_courses_percentage = models.IntegerField(
+        default=0,
+        help_text=_('Percentage of courses allowed to use edx-financial-assistance')
+    )
+
+    def get_service_user(self):
+        """
+        Getter function to get service user for Financial Assistance backend.
+        """
+        return get_user_model().objects.get(username=self.service_username)

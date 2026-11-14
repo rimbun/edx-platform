@@ -5,7 +5,7 @@ like DISABLE_START_DATES.
 
 Note: The access control logic in this file does NOT check for enrollment in
   a course.  It is expected that higher layers check for enrollment so we
-  don't have to hit the enrollments table on every module load.
+  don't have to hit the enrollments table on every block load.
 
   If enrollment is to be checked, use get_course_with_access in courseware.courses.
   It is a wrapper around has_access that additionally checks for enrollment.
@@ -13,60 +13,72 @@ Note: The access control logic in this file does NOT check for enrollment in
 
 
 import logging
-from datetime import datetime
 
 from django.conf import settings  # pylint: disable=unused-import
 from django.contrib.auth.models import AnonymousUser
 from edx_django_utils.monitoring import function_trace
 from opaque_keys.edx.keys import CourseKey, UsageKey
-from pytz import UTC
+from openedx_authz.authz import COURSES_VIEW_COURSE
 from xblock.core import XBlock
 
-from lms.djangoapps.courseware.access_response import (
-    IncorrectPartitionGroupError,
-    MilestoneAccessError,
-    MobileAvailabilityError,
-    NoAllowedPartitionGroupsError,
-    VisibilityError
-)
-from lms.djangoapps.courseware.access_utils import (
-    ACCESS_DENIED,
-    ACCESS_GRANTED,
-    adjust_start_date,
-    check_course_open_for_learner,
-    check_start_date,
-    debug,
-    in_preview_mode
-)
-from lms.djangoapps.courseware.masquerade import get_masquerade_role, is_masquerading_as_student
-from lms.djangoapps.ccx.custom_exception import CCXLocatorValidationException
-from lms.djangoapps.ccx.models import CustomCourseForEdX
-from lms.djangoapps.mobile_api.models import IgnoreMobileAvailableFlagConfig
-from lms.djangoapps.courseware.toggles import is_courses_default_invite_only_enabled
-from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
-from openedx.features.course_duration_limits.access import check_course_expired
 from common.djangoapps.student import auth
 from common.djangoapps.student.models import CourseEnrollmentAllowed
 from common.djangoapps.student.roles import (
     CourseBetaTesterRole,
     CourseCcxCoachRole,
     CourseInstructorRole,
+    CourseLimitedStaffRole,
     CourseStaffRole,
     GlobalStaff,
     OrgInstructorRole,
     OrgStaffRole,
-    SupportStaffRole
+    SupportStaffRole,
+    enable_authz_course_authoring,
 )
-from common.djangoapps.util import milestones_helpers as milestones_helpers  # lint-amnesty, pylint: disable=useless-import-alias
+from common.djangoapps.util import (  # pylint: disable=useless-import-alias
+    milestones_helpers as milestones_helpers,
+)
 from common.djangoapps.util.milestones_helpers import (
     any_unfulfilled_milestones,
     get_pre_requisite_courses_not_completed,
-    is_prerequisite_courses_enabled
+    is_prerequisite_courses_enabled,
 )
-from xmodule.course_module import CATALOG_VISIBILITY_ABOUT, CATALOG_VISIBILITY_CATALOG_AND_ABOUT, CourseBlock
-from xmodule.error_module import ErrorBlock
-from xmodule.partitions.partitions import NoSuchUserPartitionError, NoSuchUserPartitionGroupError
-from xmodule.x_module import XModule
+from lms.djangoapps.ccx.custom_exception import CCXLocatorValidationException
+from lms.djangoapps.ccx.models import CustomCourseForEdX
+from lms.djangoapps.courseware.access_response import (
+    AccessResponse,
+    CatalogVisibilityError,
+    IncorrectPartitionGroupError,
+    MilestoneAccessError,
+    MobileAvailabilityError,
+    NoAllowedPartitionGroupsError,
+    OldMongoAccessError,
+    VisibilityError,
+)
+from lms.djangoapps.courseware.access_utils import (
+    ACCESS_DENIED,
+    ACCESS_GRANTED,
+    check_course_open_for_learner,
+    check_start_date,
+    debug,
+)
+from lms.djangoapps.courseware.masquerade import get_masquerade_role, is_masquerading_as_student
+from lms.djangoapps.courseware.toggles import course_is_invitation_only
+from lms.djangoapps.mobile_api.models import IgnoreMobileAvailableFlagConfig
+from openedx.core.djangoapps.authz.constants import LegacyAuthoringPermission
+from openedx.core.djangoapps.authz.decorators import user_has_course_permission
+from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
+from openedx.features.course_duration_limits.access import check_course_expired
+from xmodule.course_block import (  # pylint: disable=wrong-import-order
+    CATALOG_VISIBILITY_ABOUT,
+    CATALOG_VISIBILITY_CATALOG_AND_ABOUT,
+    CourseBlock,
+)
+from xmodule.error_block import ErrorBlock  # pylint: disable=wrong-import-order
+from xmodule.partitions.partitions import (  # pylint: disable=wrong-import-order
+    NoSuchUserPartitionError,
+    NoSuchUserPartitionGroupError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +88,7 @@ def has_ccx_coach_role(user, course_key):
     Check if user is a coach on this ccx.
 
     Arguments:
-        user (User): the user whose descriptor access we are checking.
+        user (User): the user whose course access we are checking.
         course_key (CCXLocator): Key to CCX.
 
     Returns:
@@ -100,6 +112,31 @@ def has_ccx_coach_role(user, course_key):
     return False
 
 
+def has_cms_access(user, course_key):
+    """
+    Check if user has access to the CMS. When requesting from the LMS, a user with the
+    limited staff access role needs access to the CMS APIs, but not the CMS site. This
+    function accounts for this edge case when determining if a user has access to the CMS
+    site.
+
+    Arguments:
+        user (User): the user whose course access we are checking.
+        course_key: Key to course.
+
+    Returns:
+        bool: whether user has access to the CMS site.
+    """
+    has_course_author_access = auth.has_course_author_access(user, course_key)
+    is_limited_staff = auth.user_has_role(
+        user, CourseLimitedStaffRole(course_key)
+    ) and not GlobalStaff().has_user(user)
+
+    if is_limited_staff and has_course_author_access:
+        return False
+
+    return has_course_author_access
+
+
 @function_trace('has_access')
 def has_access(user, action, obj, course_key=None):
     """
@@ -107,16 +144,16 @@ def has_access(user, action, obj, course_key=None):
     switching based on various settings.
 
     Things this module understands:
-    - start dates for modules
-    - visible_to_staff_only for modules
+    - start dates for blocks
+    - visible_to_staff_only for blocks
     - DISABLE_START_DATES
     - different access for instructor, staff, course staff, and students.
-    - mobile_available flag for course modules
+    - mobile_available flag for course blocks
 
     user: a Django user object. May be anonymous. If none is passed,
                     anonymous is assumed
 
-    obj: The object to check access for.  A module, descriptor, location, or
+    obj: The object to check access for.  A block, location, or
                     certain special strings (e.g. 'global')
 
     action: A string specifying the action that the client is trying to perform.
@@ -135,11 +172,6 @@ def has_access(user, action, obj, course_key=None):
     if not user:
         user = AnonymousUser()
 
-    # Preview mode is only accessible by staff.
-    if in_preview_mode() and course_key:
-        if not has_staff_access_to_preview_mode(user, course_key):
-            return ACCESS_DENIED
-
     # delegate the work to type-specific functions.
     # (start with more specific types, then get more general)
     if isinstance(obj, CourseBlock):
@@ -149,14 +181,11 @@ def has_access(user, action, obj, course_key=None):
         return _has_access_course(user, action, obj)
 
     if isinstance(obj, ErrorBlock):
-        return _has_access_error_desc(user, action, obj, course_key)
+        return _has_access_error_block(user, action, obj, course_key)
 
-    if isinstance(obj, XModule):
-        return _has_access_xmodule(user, action, obj, course_key)
-
-    # NOTE: any descriptor access checkers need to go above this
+    # NOTE: any block access checkers need to go above this
     if isinstance(obj, XBlock):
-        return _has_access_descriptor(user, action, obj, course_key)
+        return _has_access_to_block(user, action, obj, course_key)
 
     if isinstance(obj, CourseKey):
         return _has_access_course_key(user, action, obj)
@@ -169,7 +198,7 @@ def has_access(user, action, obj, course_key=None):
 
     # Passing an unknown object here is a coding error, so rather than
     # returning a default, complain.
-    raise TypeError("Unknown object type in has_access(): '{}'"
+    raise TypeError("Unknown object type in has_access(): '{}'"  # noqa: UP032
                     .format(type(obj)))
 
 
@@ -206,7 +235,7 @@ def _can_view_courseware_with_prerequisites(user, course):
 
     return (
         _is_prerequisites_disabled()
-        or _has_staff_access_to_descriptor(user, course, course.id)
+        or _has_staff_access_to_block(user, course, course.id)
         or user.is_anonymous
         or _has_fulfilled_prerequisites(user, [course.id])
     )
@@ -232,7 +261,7 @@ def _can_load_course_on_mobile(user, course):
     return (
         is_mobile_available_for_user(user, course) and
         (
-            _has_staff_access_to_descriptor(user, course, course.id) or
+            _has_staff_access_to_block(user, course, course.id) or
             _has_fulfilled_all_milestones(user, course.id)
         )
     )
@@ -250,9 +279,13 @@ def _can_enroll_courselike(user, courselike):
     Returns:
         AccessResponse, indicating whether the user can enroll.
     """
-    # Courselike objects (e.g., course descriptors and CourseOverviews) have an attribute named `id`
+    # Courselike objects (CourseBlock and CourseOverview) have an attribute named `id`
     # which actually points to a CourseKey. Sigh.
     course_key = courselike.id
+
+    course_enrollment_open = courselike.is_enrollment_open()
+
+    user_has_staff_access = _has_staff_access_to_block(user, courselike, course_key)
 
     # If the user appears in CourseEnrollmentAllowed paired with the given course key,
     # they may enroll, except if the CEA has already been used by a different user.
@@ -260,27 +293,33 @@ def _can_enroll_courselike(user, courselike):
     # a `course_id` kwarg which requires a CourseKey.
     if user is not None and user.is_authenticated:
         cea = CourseEnrollmentAllowed.objects.filter(email=user.email, course_id=course_key).first()
-        if cea and cea.valid_for_user(user):
-            return ACCESS_GRANTED
-        elif cea:
-            debug("Deny: CEA was already consumed by a different user {} and can't be used again by {}".format(
-                cea.user.id,
-                user.id,
-            ))
-            return ACCESS_DENIED
+        if cea:
+            # DISABLE_ALLOWED_ENROLLMENT_IF_ENROLLMENT_CLOSED flag is used to disable enrollment for user invited
+            # to a course if user is registering when the course enrollment is closed
+            if (
+                getattr(settings, 'DISABLE_ALLOWED_ENROLLMENT_IF_ENROLLMENT_CLOSED', False) and
+                not course_enrollment_open and
+                not user_has_staff_access
+            ):
+                return ACCESS_DENIED
+            elif cea.valid_for_user(user):
+                return ACCESS_GRANTED
+            else:
+                debug("Deny: CEA was already consumed by a different user {} and can't be used again by {}".format(  # noqa: UP032  # pylint: disable=line-too-long
+                    cea.user.id,
+                    user.id,
+                ))
+                return ACCESS_DENIED
 
-    if _has_staff_access_to_descriptor(user, courselike, course_key):
+    if user_has_staff_access:
         return ACCESS_GRANTED
 
-    # Access denied when default value of COURSES_INVITE_ONLY set to True
-    if is_courses_default_invite_only_enabled() or courselike.invitation_only:
+    # Access denied when the course requires an invitation
+    if course_is_invitation_only(courselike):
         debug("Deny: invitation only")
         return ACCESS_DENIED
 
-    now = datetime.now(UTC)
-    enrollment_start = courselike.enrollment_start or datetime.min.replace(tzinfo=UTC)
-    enrollment_end = courselike.enrollment_end or datetime.max.replace(tzinfo=UTC)
-    if enrollment_start < now < enrollment_end:
+    if course_enrollment_open:
         debug("Allow: in enrollment period")
         return ACCESS_GRANTED
 
@@ -327,11 +366,14 @@ def _has_access_course(user, action, courselike):
         #         _can_view_courseware_with_prerequisites, user, courselike
         #     )
         # ).or(
-        #     _has_staff_access_to_descriptor, user, courselike, courselike.id
+        #     _has_staff_access_to_block, user, courselike, courselike.id
         # )
+        if courselike.id.deprecated:  # we no longer support accessing Old Mongo courses
+            return OldMongoAccessError(courselike)
+
         visible_to_nonstaff = _visible_to_nonstaff_users(courselike)
         if not visible_to_nonstaff:
-            staff_access = _has_staff_access_to_descriptor(user, courselike, courselike.id)
+            staff_access = _has_staff_access_to_block(user, courselike, courselike.id)
             if staff_access:
                 return staff_access
             else:
@@ -339,7 +381,7 @@ def _has_access_course(user, action, courselike):
 
         open_for_learner = check_course_open_for_learner(user, courselike)
         if not open_for_learner:
-            staff_access = _has_staff_access_to_descriptor(user, courselike, courselike.id)
+            staff_access = _has_staff_access_to_block(user, courselike, courselike.id)
             if staff_access:
                 return staff_access
             else:
@@ -347,7 +389,7 @@ def _has_access_course(user, action, courselike):
 
         view_with_prereqs = _can_view_courseware_with_prerequisites(user, courselike)
         if not view_with_prereqs:
-            staff_access = _has_staff_access_to_descriptor(user, courselike, courselike.id)
+            staff_access = _has_staff_access_to_block(user, courselike, courselike.id)
             if staff_access:
                 return staff_access
             else:
@@ -355,7 +397,7 @@ def _has_access_course(user, action, courselike):
 
         has_not_expired = check_course_expired(user, courselike)
         if not has_not_expired:
-            staff_access = _has_staff_access_to_descriptor(user, courselike, courselike.id)
+            staff_access = _has_staff_access_to_block(user, courselike, courselike.id)
             if staff_access:
                 return staff_access
             else:
@@ -382,34 +424,82 @@ def _has_access_course(user, action, courselike):
     def can_see_in_catalog():
         """
         Implements the "can see course in catalog" logic if a course should be visible in the main course catalog
-        In this case we use the catalog_visibility property on the course descriptor
+        In this case we use the catalog_visibility property on the course block
         but also allow course staff to see this.
         """
-        return (
-            _has_catalog_visibility(courselike, CATALOG_VISIBILITY_CATALOG_AND_ABOUT)
-            or _has_staff_access_to_descriptor(user, courselike, courselike.id)
-        )
+        catalog_response = _has_catalog_visibility(courselike, CATALOG_VISIBILITY_CATALOG_AND_ABOUT)
+        if catalog_response:
+            return ACCESS_GRANTED
+        if _has_staff_access_to_block(user, courselike, courselike.id):
+            return ACCESS_GRANTED
+        # Return the typed CatalogVisibilityError so downstream handlers
+        # can provide a meaningful error message instead of a generic 404.
+        return catalog_response
 
-    @function_trace('can_see_about_page')
-    def can_see_about_page():
+    def _about_page_catalog_visibility_access() -> AccessResponse | None:
         """
-        Implements the "can see course about page" logic if a course about page should be visible
-        In this case we use the catalog_visibility property on the course descriptor
-        but also allow course staff to see this.
+        Shared catalog-visibility gate for about-page access.
+
+        Grants access when catalog_visibility is CATALOG_AND_ABOUT or ABOUT only.
+
+        Returns ACCESS_GRANTED when either applies, or None when catalog visibility
+        does not allow the about page (callers fall through to staff/AuthZ checks).
         """
-        return (
-            _has_catalog_visibility(courselike, CATALOG_VISIBILITY_CATALOG_AND_ABOUT)
-            or _has_catalog_visibility(courselike, CATALOG_VISIBILITY_ABOUT)
-            or _has_staff_access_to_descriptor(user, courselike, courselike.id)
-        )
+        both_response = _has_catalog_visibility(courselike, CATALOG_VISIBILITY_CATALOG_AND_ABOUT)
+        if both_response:
+            return ACCESS_GRANTED
+        about_response = _has_catalog_visibility(courselike, CATALOG_VISIBILITY_ABOUT)
+        if about_response:
+            return ACCESS_GRANTED
+        return None
+
+    @function_trace("can_see_about_page")
+    def can_see_about_page() -> AccessResponse | CatalogVisibilityError:
+        """
+        Entry point for about-page visibility checks.
+
+        Grants access when any of the following is true:
+          - the course catalog_visibility allows the about page, or
+          - the user has course staff access (including limited staff via role inheritance), or
+          - the user is authenticated, AuthZ course authoring is enabled for the course,
+            and the user has COURSES_VIEW_COURSE (including legacy Studio read access
+            as a fallback during RBAC migration).
+
+        Learners, beta testers, and other course-team roles without staff access rely on
+        catalog visibility only; they are not checked explicitly here.
+
+        AuthZ must not replace catalog visibility or staff bypass; those checks run
+        first so enrolled learners and beta testers are not blocked by authoring
+        permissions they do not hold.
+
+        Returns CatalogVisibilityError when all checks fail.
+        """
+        catalog_visibility_access = _about_page_catalog_visibility_access()
+        if catalog_visibility_access:
+            return catalog_visibility_access
+
+        if _has_staff_access_to_block(user, courselike, courselike.id):
+            return ACCESS_GRANTED
+
+        if (
+            user
+            and not user.is_anonymous
+            and enable_authz_course_authoring(courselike.id)
+            and user_has_course_permission(
+                user, COURSES_VIEW_COURSE.identifier, courselike.id, LegacyAuthoringPermission.READ
+            )
+        ):
+            return ACCESS_GRANTED
+
+        return CatalogVisibilityError()
 
     checkers = {
         'load': can_load,
         'load_mobile': lambda: can_load() and _can_load_course_on_mobile(user, courselike),
         'enroll': can_enroll,
         'see_exists': see_exists,
-        'staff': lambda: _has_staff_access_to_descriptor(user, courselike, courselike.id),
-        'instructor': lambda: _has_instructor_access_to_descriptor(user, courselike, courselike.id),
+        'staff': lambda: _has_staff_access_to_block(user, courselike, courselike.id),
+        'instructor': lambda: _has_instructor_access_to_block(user, courselike, courselike.id),
         'see_in_catalog': can_see_in_catalog,
         'see_about_page': can_see_about_page,
     }
@@ -417,30 +507,30 @@ def _has_access_course(user, action, courselike):
     return _dispatch(checkers, action, user, courselike)
 
 
-def _has_access_error_desc(user, action, descriptor, course_key):
+def _has_access_error_block(user, action, block, course_key):
     """
-    Only staff should see error descriptors.
+    Only staff should see error blocks.
 
     Valid actions:
-    'load' -- load this descriptor, showing it to the user.
-    'staff' -- staff access to descriptor.
+    'load' -- load this block, showing it to the user.
+    'staff' -- staff access to block.
     """
     def check_for_staff():
-        return _has_staff_access_to_descriptor(user, descriptor, course_key)
+        return _has_staff_access_to_block(user, block, course_key)
 
     checkers = {
         'load': check_for_staff,
         'staff': check_for_staff,
-        'instructor': lambda: _has_instructor_access_to_descriptor(user, descriptor, course_key)
+        'instructor': lambda: _has_instructor_access_to_block(user, block, course_key)
     }
 
-    return _dispatch(checkers, action, user, descriptor)
+    return _dispatch(checkers, action, user, block)
 
 
-def _has_group_access(descriptor, user, course_key):
+def _has_group_access(block, user, course_key):
     """
     This function returns a boolean indicating whether or not `user` has
-    sufficient group memberships to "load" a block (the `descriptor`)
+    sufficient group memberships to "load" a block
     """
     # Allow staff and instructors roles group access, as they are not masquerading as a student.
     if get_user_role(user, course_key) in ['staff', 'instructor']:
@@ -448,7 +538,7 @@ def _has_group_access(descriptor, user, course_key):
 
     # use merged_group_access which takes group access on the block's
     # parents / ancestors into account
-    merged_access = descriptor.merged_group_access
+    merged_access = block.merged_group_access
 
     # resolve the partition IDs in group_access to actual
     # partition objects, skipping those which contain empty group directives.
@@ -458,7 +548,7 @@ def _has_group_access(descriptor, user, course_key):
     partitions = []
     for partition_id, group_ids in merged_access.items():
         try:
-            partition = descriptor._get_user_partition(partition_id)  # pylint: disable=protected-access
+            partition = block._get_user_partition(partition_id)  # pylint: disable=protected-access
 
             # check for False in merged_access, which indicates that at least one
             # partition's group list excludes all students.
@@ -502,7 +592,7 @@ def _has_group_access(descriptor, user, course_key):
     # If missing_groups is empty, the user is granted access.
     # If missing_groups is NOT empty, we generate an error based on one of the particular groups they are missing.
     missing_groups = []
-    block_key = descriptor.scope_ids.usage_id
+    block_key = block.scope_ids.usage_id
     for partition, groups in partition_groups:
         user_group = partition.scheme.get_group_for_user(
             course_key,
@@ -515,7 +605,7 @@ def _has_group_access(descriptor, user, course_key):
                 user_group,
                 groups,
                 partition.access_denied_message(block_key, user, user_group, groups),
-                partition.access_denied_fragment(descriptor, user, user_group, groups),
+                partition.access_denied_fragment(block, user, user_group, groups),
             ))
 
     if missing_groups:
@@ -535,46 +625,46 @@ def _has_group_access(descriptor, user, course_key):
     return ACCESS_GRANTED
 
 
-def _has_access_descriptor(user, action, descriptor, course_key=None):
+def _has_access_to_block(user, action, block, course_key=None):
     """
-    Check if user has access to this descriptor.
+    Check if user has access to this block.
 
     Valid actions:
-    'load' -- load this descriptor, showing it to the user.
-    'staff' -- staff access to descriptor.
+    'load' -- load this block, showing it to the user.
+    'staff' -- staff access to block.
 
-    NOTE: This is the fallback logic for descriptors that don't have custom policy
+    NOTE: This is the fallback logic for blocks that don't have custom policy
     (e.g. courses).  If you call this method directly instead of going through
     has_access(), it will not do the right thing.
     """
     def can_load():
         """
         NOTE: This does not check that the student is enrolled in the course
-        that contains this module.  We may or may not want to allow non-enrolled
-        students to see modules.  If not, views should check the course, so we
-        don't have to hit the enrollments table on every module load.
+        that contains this block.  We may or may not want to allow non-enrolled
+        students to see blocks.  If not, views should check the course, so we
+        don't have to hit the enrollments table on every block load.
         """
         # If the user (or the role the user is currently masquerading as) does not have
-        # access to this content, then deny access. The problem with calling _has_staff_access_to_descriptor
-        # before this method is that _has_staff_access_to_descriptor short-circuits and returns True
+        # access to this content, then deny access. The problem with calling _has_staff_access_to_block
+        # before this method is that _has_staff_access_to_block short-circuits and returns True
         # for staff users in preview mode.
-        group_access_response = _has_group_access(descriptor, user, course_key)
+        group_access_response = _has_group_access(block, user, course_key)
         if not group_access_response:
             return group_access_response
 
-        # If the user has staff access, they can load the module and checks below are not needed.
-        staff_access_response = _has_staff_access_to_descriptor(user, descriptor, course_key)
+        # If the user has staff access, they can load the block and checks below are not needed.
+        staff_access_response = _has_staff_access_to_block(user, block, course_key)
         if staff_access_response:
             return staff_access_response
 
         return (
-            _visible_to_nonstaff_users(descriptor, display_error_to_user=False) and
+            _visible_to_nonstaff_users(block, display_error_to_user=False) and
             (
-                _has_detached_class_tag(descriptor) or
+                _has_detached_class_tag(block) or
                 check_start_date(
                     user,
-                    descriptor.days_early_for_beta,
-                    descriptor.start,
+                    block.days_early_for_beta,
+                    block.start,
                     course_key,
                     display_error_to_user=False
                 )
@@ -583,22 +673,11 @@ def _has_access_descriptor(user, action, descriptor, course_key=None):
 
     checkers = {
         'load': can_load,
-        'staff': lambda: _has_staff_access_to_descriptor(user, descriptor, course_key),
-        'instructor': lambda: _has_instructor_access_to_descriptor(user, descriptor, course_key)
+        'staff': lambda: _has_staff_access_to_block(user, block, course_key),
+        'instructor': lambda: _has_instructor_access_to_block(user, block, course_key)
     }
 
-    return _dispatch(checkers, action, user, descriptor)
-
-
-def _has_access_xmodule(user, action, xmodule, course_key):
-    """
-    Check if user has access to this xmodule.
-
-    Valid actions:
-      - same as the valid actions for xmodule.descriptor
-    """
-    # Delegate to the descriptor
-    return has_access(user, action, xmodule.descriptor, course_key)
+    return _dispatch(checkers, action, user, block)
 
 
 def _has_access_location(user, action, location, course_key):
@@ -692,31 +771,8 @@ def _dispatch(table, action, user, obj):
               action)
         return result
 
-    raise ValueError("Unknown action for object type '{}': '{}'".format(
+    raise ValueError("Unknown action for object type '{}': '{}'".format(  # noqa: UP032
         type(obj), action))
-
-
-def _adjust_start_date_for_beta_testers(user, descriptor, course_key):
-    """
-    If user is in a beta test group, adjust the start date by the appropriate number of
-    days.
-
-    Arguments:
-       user: A django user.  May be anonymous.
-       descriptor: the XModuleDescriptor the user is trying to get access to, with a
-       non-None start date.
-
-    Returns:
-        A datetime.  Either the same as start, or earlier for beta testers.
-
-    NOTE: number of days to adjust should be cached to avoid looking it up thousands of
-    times per query.
-
-    NOTE: For now, this function assumes that the descriptor's location is in the course
-    the user is looking at.  Once we have proper usages and definitions per the XBlock
-    design, this should use the course the usage is in.
-    """
-    return adjust_start_date(user, descriptor.days_early_for_beta, descriptor.start, course_key)
 
 
 def _has_instructor_access_to_location(user, location, course_key=None):
@@ -789,53 +845,53 @@ def administrative_accesses_to_course_for_user(user, course_key):
     return global_staff, staff_access, instructor_access
 
 
-@function_trace('_has_instructor_access_to_descriptor')
-def _has_instructor_access_to_descriptor(user, descriptor, course_key):
+@function_trace('_has_instructor_access_to_block')
+def _has_instructor_access_to_block(user, block, course_key):
     """Helper method that checks whether the user has staff access to
     the course of the location.
 
-    descriptor: something that has a location attribute
+    block: something that has a location attribute
     """
-    return _has_instructor_access_to_location(user, descriptor.location, course_key)
+    return _has_instructor_access_to_location(user, block.location, course_key)
 
 
-@function_trace('_has_staff_access_to_descriptor')
-def _has_staff_access_to_descriptor(user, descriptor, course_key):
+@function_trace('_has_staff_access_to_block')
+def _has_staff_access_to_block(user, block, course_key):
     """Helper method that checks whether the user has staff access to
     the course of the location.
 
-    descriptor: something that has a location attribute
+    block: something that has a location attribute
     """
-    return _has_staff_access_to_location(user, descriptor.location, course_key)
+    return _has_staff_access_to_location(user, block.location, course_key)
 
 
-def _visible_to_nonstaff_users(descriptor, display_error_to_user=True):
+def _visible_to_nonstaff_users(block, display_error_to_user=True):
     """
     Returns if the object is visible to nonstaff users.
 
     Arguments:
-        descriptor: object to check
+        block: object to check
         display_error_to_user: If True, show an error message to the user say the content was hidden. Otherwise,
             hide the content silently.
     """
-    if descriptor.visible_to_staff_only:
+    if block.visible_to_staff_only:
         return VisibilityError(display_error_to_user=display_error_to_user)
     else:
         return ACCESS_GRANTED
 
 
-def _can_access_descriptor_with_milestones(user, descriptor, course_key):
+def _can_access_block_with_milestones(user, block, course_key):
     """
     Returns if the object is blocked by an unfulfilled milestone.
 
     Args:
         user: the user trying to access this content
-        descriptor: the object being accessed
-        course_key: key for the course for this descriptor
+        block: the object being accessed
+        course_key: key for the course
     """
     if milestones_helpers.get_course_content_milestones(
         course_key,
-        str(descriptor.location),
+        str(block.location),
         'requires',
         user.id
     ):
@@ -845,14 +901,14 @@ def _can_access_descriptor_with_milestones(user, descriptor, course_key):
         return ACCESS_GRANTED
 
 
-def _has_detached_class_tag(descriptor):
+def _has_detached_class_tag(block):
     """
-    Returns if the given descriptor's type is marked as detached.
+    Returns if the given block's type is marked as detached.
 
     Arguments:
-        descriptor: object to check
+        block: object to check
     """
-    return ACCESS_GRANTED if 'detached' in descriptor._class_tags else ACCESS_DENIED  # pylint: disable=protected-access
+    return ACCESS_GRANTED if 'detached' in block._class_tags else ACCESS_DENIED  # pylint: disable=protected-access
 
 
 def _has_fulfilled_all_milestones(user, course_id):
@@ -883,32 +939,34 @@ def _has_catalog_visibility(course, visibility_type):
     """
     Returns whether the given course has the given visibility type
     """
-    return ACCESS_GRANTED if course.catalog_visibility == visibility_type else ACCESS_DENIED
+    if course.catalog_visibility == visibility_type:
+        return ACCESS_GRANTED
+    return CatalogVisibilityError()
 
 
-def _is_descriptor_mobile_available(descriptor):
+def _is_block_mobile_available(block):
     """
-    Returns if descriptor is available on mobile.
+    Returns if block is available on mobile.
     """
-    if IgnoreMobileAvailableFlagConfig.is_enabled() or descriptor.mobile_available:
+    if IgnoreMobileAvailableFlagConfig.is_enabled() or block.mobile_available:
         return ACCESS_GRANTED
     else:
         return MobileAvailabilityError()
 
 
-def is_mobile_available_for_user(user, descriptor):
+def is_mobile_available_for_user(user, block):
     """
     Returns whether the given course is mobile_available for the given user.
     Checks:
         mobile_available flag on the course
         Beta User and staff access overrides the mobile_available flag
     Arguments:
-        descriptor (CourseBlock|CourseOverview): course or overview of course in question
+        block (CourseBlock|CourseOverview): course or overview of course in question
     """
     return (
-        auth.user_has_role(user, CourseBetaTesterRole(descriptor.id))
-        or _has_staff_access_to_descriptor(user, descriptor, descriptor.id)
-        or _is_descriptor_mobile_available(descriptor)
+        auth.user_has_role(user, CourseBetaTesterRole(block.id))
+        or _has_staff_access_to_block(user, block, block.id)
+        or _is_block_mobile_available(block)
     )
 
 

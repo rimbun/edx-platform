@@ -1,14 +1,14 @@
 """
 This file contains all the classes used by has_access for error handling
 """
+from datetime import datetime
 
-
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from xmodule.course_metadata_utils import DEFAULT_START_DATE
 
 
-class AccessResponse:  # pylint: disable=eq-without-hash
+class AccessResponse:
     """Class that represents a response from a has_access permission check."""
     def __init__(self, has_access, error_code=None, developer_message=None, user_message=None,
                  additional_context_user_message=None, user_fragment=None):
@@ -70,7 +70,7 @@ class AccessResponse:  # pylint: disable=eq-without-hash
         }
 
     def __repr__(self):
-        return "AccessResponse({!r}, {!r}, {!r}, {!r}, {!r}, {!r})".format(
+        return "AccessResponse({!r}, {!r}, {!r}, {!r}, {!r}, {!r})".format(  # noqa: UP032
             self.has_access,
             self.error_code,
             self.developer_message,
@@ -124,19 +124,35 @@ class StartDateError(AccessError):
     Access denied because the course has not started yet and the user
     is not staff
     """
-    def __init__(self, start_date, display_error_to_user=True):
+    def __init__(
+        self,
+        start_date: datetime,
+        display_error_to_user=True,
+        error_code_override: str | None = None,
+        developer_message_override: str | None = None,
+        user_message_override: str | None = None,
+    ):
         """
         Arguments:
+            start_date: The future start date of the course, used for messaging.
             display_error_to_user: If True, display this error to users in the UI.
+            error_code_override: Optional override error_code.
+            developer_message_override: Optional override developer_message.
+            user_message_override: Optional override user_message.
         """
-        error_code = "course_not_started"
+        error_code = error_code_override or "course_not_started"
         if start_date == DEFAULT_START_DATE:
             developer_message = "Course has not started"
             user_message = _("Course has not started")
         else:
             developer_message = f"Course does not start until {start_date}"
-            user_message = _("Course does not start until {}"  # lint-amnesty, pylint: disable=translation-of-non-string
+            user_message = _("Course does not start until {}"  # pylint: disable=translation-of-non-string
                              .format(f"{start_date:%B %d, %Y}"))
+
+        # Use override message if available.
+        developer_message = developer_message_override or developer_message
+        user_message = user_message_override or user_message
+
         super().__init__(
             error_code,
             developer_message,
@@ -157,7 +173,7 @@ class MilestoneAccessError(AccessError):
 
 class VisibilityError(AccessError):
     """
-    Access denied because the user does have the correct role to view this
+    Access denied because the user does not have the correct role to view this
     course.
     """
     def __init__(self, display_error_to_user=True):
@@ -174,6 +190,22 @@ class VisibilityError(AccessError):
             developer_message,
             user_message if display_error_to_user else None
         )
+
+
+class CatalogVisibilityError(AccessError):
+    """
+    Access denied because the course's catalog_visibility setting prevents
+    the user from seeing this course.
+    """
+    def __init__(self):
+        error_code = "not_visible_in_catalog"
+        developer_message = "Course catalog visibility setting prevents access"
+        user_message = _(
+            "This course is not currently accessible. "
+            "The course team has restricted access to this content. "
+            "Please contact the course team for further assistance."
+        )
+        super().__init__(error_code, developer_message, user_message)
 
 
 class MobileAvailabilityError(AccessError):
@@ -227,6 +259,15 @@ class EnrollmentRequiredAccessError(AccessError):
         super().__init__(error_code, developer_message, user_message)
 
 
+class PriorityAccessFiltersError(AccessError):
+    """
+    Access denied by a plugin via the CoursewareAccessChecksRequested filter.
+
+    Priority — non-bypassable by staff. The error_code, developer_message,
+    and user_message are supplied by the pipeline step that denied access.
+    """
+
+
 class AuthenticationRequiredAccessError(AccessError):
     """
     Access denied because the user must be authenticated to see it
@@ -238,12 +279,14 @@ class AuthenticationRequiredAccessError(AccessError):
         super().__init__(error_code, developer_message, user_message)
 
 
-class CoursewareMicrofrontendDisabledAccessError(AccessError):
+class OldMongoAccessError(AccessError):
     """
-    Access denied because the courseware micro-frontend is disabled for this user.
+    Access denied because the course is in Old Mongo and we no longer support them. See DEPR-58.
     """
-    def __init__(self):
-        error_code = 'microfrontend_disabled'
-        developer_message = 'Micro-frontend is disabled for this user'
-        user_message = _('Please view your course in the existing experience')
+    def __init__(self, courselike):
+        error_code = 'old_mongo'
+        developer_message = 'Access to Old Mongo courses is unsupported'
+        user_message = _('{course_name} is no longer available.').format(
+            course_name=courselike.display_name_with_default,
+        )
         super().__init__(error_code, developer_message, user_message)

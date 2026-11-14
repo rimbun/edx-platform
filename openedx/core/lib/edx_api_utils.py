@@ -2,10 +2,15 @@
 
 
 import logging
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union  # noqa: UP035
+from urllib.parse import urljoin
 
 from django.core.cache import cache
 
 from openedx.core.lib.cache_utils import zpickle, zunpickle
+
+if TYPE_CHECKING:
+    from requests import session
 
 log = logging.getLogger(__name__)
 
@@ -18,18 +23,34 @@ def get_fields(fields, response):
     return results
 
 
-def get_edx_api_data(api_config, resource, api, resource_id=None, querystring=None, cache_key=None, many=True,
-                     traverse_pagination=True, fields=None, long_term_cache=False):
-    """GET data from an edX REST API.
+def get_api_data(
+    api_config: Any,
+    resource: str,
+    api_client: "session",
+    base_api_url: str,
+    resource_id: Optional[Union[int, str]] = None,  # noqa: UP007, UP045
+    querystring: Optional[Dict[Any, Any]] = None,  # noqa: UP006, UP045
+    cache_key: Optional[str] = None,  # noqa: UP045
+    many: bool = True,
+    traverse_pagination: bool = True,
+    fields: Optional[List[Any]] = None,  # noqa: UP006, UP045
+    long_term_cache: bool = False,
+    raise_on_error: bool = False,
+) -> Union[List[Any], Dict[Any, Any]]:  # noqa: UP006, UP007
+    """
+    GET data from an edX REST API endpoint using the API client.
 
     DRY utility for handling caching and pagination.
 
     Arguments:
         api_config (ConfigurationModel): The configuration model governing interaction with the API.
         resource (str): Name of the API resource being requested.
+        api_client (requests.Session): API client (either raw requests.Session or OAuthAPIClient) to use for
+            requesting data.
+        base_api_url (str): base API url, used to construct the full API URL across with resource and
+            resource_id (if any).
 
     Keyword Arguments:
-        api (APIClient): API client to use for requesting data.
         resource_id (int or str): Identifies a specific resource to be retrieved.
         querystring (dict): Optional query string parameters.
         cache_key (str): Where to cache retrieved data. The cache will be ignored if this is omitted
@@ -37,21 +58,26 @@ def get_edx_api_data(api_config, resource, api, resource_id=None, querystring=No
         many (bool): Whether the resource requested is a collection of objects, or a single object.
             If false, an empty dict will be returned in cases of failure rather than the default empty list.
         traverse_pagination (bool): Whether to traverse pagination or return paginated response..
+        fields (list):  Return only specific fields from the response
         long_term_cache (bool): Whether to use the long term cache ttl or the standard cache ttl
+        raise_on_error (bool): Reraise errors back to the caller, instead if returning empty results.
 
     Returns:
         Data returned by the API. When hitting a list endpoint, extracts "results" (list of dict)
-        returned by DRF-powered APIs.
+        returned by DRF-powered APIs. By default, returns an empty result if the called API
+        returns an error.
     """
     no_data = [] if many else {}
 
     if not api_config.enabled:
-        log.warning('%s configuration is disabled.', api_config.API_NAME)
+        log.warning("%s configuration is disabled.", api_config.API_NAME)
         return no_data
 
     if cache_key:
-        cache_key = f'{cache_key}.{resource_id}' if resource_id is not None else cache_key
-        cache_key += '.zpickled'
+        cache_key = (
+            f"{cache_key}.{resource_id}" if resource_id is not None else cache_key
+        )
+        cache_key += ".zpickled"
 
         cached = cache.get(cache_key)
         if cached:
@@ -68,17 +94,26 @@ def get_edx_api_data(api_config, resource, api, resource_id=None, querystring=No
                 return cached_response
 
     try:
-        endpoint = getattr(api, resource)
         querystring = querystring if querystring else {}
-        response = endpoint(resource_id).get(**querystring)
+        api_url = urljoin(
+            f"{base_api_url}/",
+            f"{resource}/{str(resource_id) + '/' if resource_id is not None else ''}",
+        )
+        response = api_client.get(api_url, params=querystring)
+        response.raise_for_status()
+        response = response.json()
 
         if resource_id is None and traverse_pagination:
-            results = _traverse_pagination(response, endpoint, querystring, no_data)
+            results = _traverse_pagination(
+                response, api_client, api_url, querystring, no_data
+            )
         else:
             results = response
 
     except:  # pylint: disable=bare-except
-        log.exception('Failed to retrieve data from the %s API.', api_config.API_NAME)
+        log.exception("Failed to retrieve data from the %s API.", api_config.API_NAME)
+        if raise_on_error:
+            raise
         return no_data
 
     if cache_key:
@@ -94,20 +129,23 @@ def get_edx_api_data(api_config, resource, api, resource_id=None, querystring=No
     return results
 
 
-def _traverse_pagination(response, endpoint, querystring, no_data):
-    """Traverse a paginated API response.
+def _traverse_pagination(response, api_client, api_url, querystring, no_data):
+    """
+    Traverse a paginated API response.
 
     Extracts and concatenates "results" (list of dict) returned by DRF-powered APIs.
     """
-    results = response.get('results', no_data)
+    results = response.get("results", no_data)
 
     page = 1
-    next_page = response.get('next')
+    next_page = response.get("next")
     while next_page:
         page += 1
-        querystring['page'] = page
-        response = endpoint.get(**querystring)
-        results += response.get('results', no_data)
-        next_page = response.get('next')
+        querystring["page"] = page
+        response = api_client.get(api_url, params=querystring)
+        response.raise_for_status()
+        response = response.json()
+        results += response.get("results", no_data)
+        next_page = response.get("next")
 
     return results

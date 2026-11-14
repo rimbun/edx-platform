@@ -4,13 +4,13 @@
 from datetime import datetime
 
 import pytz
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
 from rest_framework import serializers
 
 from common.djangoapps.course_modes.models import CourseMode
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 from .models import UNDEFINED, Course
 
@@ -34,7 +34,7 @@ class CourseModeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CourseMode
-        fields = ('name', 'currency', 'price', 'sku', 'bulk_sku', 'expires')
+        fields = ('name', 'currency', 'price', 'sku', 'bulk_sku', 'expires', 'android_sku', 'ios_sku')
         # For disambiguating within the drf-yasg swagger schema
         ref_name = 'commerce.CourseMode'
 
@@ -46,7 +46,7 @@ def validate_course_id(course_id):
     try:
         course_key = CourseKey.from_string(str(course_id))
     except InvalidKeyError:
-        raise serializers.ValidationError(  # lint-amnesty, pylint: disable=raise-missing-from
+        raise serializers.ValidationError(  # pylint: disable=raise-missing-from  # noqa: B904
             _("{course_id} is not a valid course key.").format(
                 course_id=course_id
             )

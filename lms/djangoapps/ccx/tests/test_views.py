@@ -15,12 +15,13 @@ from django.conf import settings
 from django.test import RequestFactory
 from django.test.utils import override_settings
 from django.urls import resolve, reverse
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from edx_django_utils.cache import RequestCache
+from edx_toggles.toggles.testutils import override_waffle_flag
 from opaque_keys.edx.keys import CourseKey
 from pytz import UTC
+from xblock_problem.capa.testing.response_xml_factory import StringResponseXMLFactory
 
-from capa.tests.response_xml_factory import StringResponseXMLFactory
 from common.djangoapps.edxmako.shortcuts import render_to_response
 from common.djangoapps.student.models import CourseEnrollment, CourseEnrollmentAllowed
 from common.djangoapps.student.roles import CourseCcxCoachRole, CourseInstructorRole, CourseStaffRole
@@ -29,8 +30,8 @@ from lms.djangoapps.ccx.models import CustomCourseForEdX
 from lms.djangoapps.ccx.overrides import get_override_for_ccx, override_field_for_ccx
 from lms.djangoapps.ccx.tests.factories import CcxFactory
 from lms.djangoapps.ccx.tests.utils import CcxTestCase, flatten
-from lms.djangoapps.ccx.utils import ccx_course, is_email
-from lms.djangoapps.ccx.views import get_date
+from lms.djangoapps.ccx.toggles import LEGACY_CCX_COACH_DASHBOARD
+from lms.djangoapps.ccx.utils import ccx_course, create_ccx_course, get_date, is_email
 from lms.djangoapps.courseware.tabs import get_course_tab_list
 from lms.djangoapps.courseware.tests.factories import StudentModuleFactory
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
@@ -44,12 +45,8 @@ from openedx.core.djangoapps.django_comment_common.utils import are_permissions_
 from openedx.core.lib.courses import get_course_by_id
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import (
-    TEST_DATA_SPLIT_MODULESTORE,
-    ModuleStoreTestCase,
-    SharedModuleStoreTestCase
-)
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory, SampleCourseFactory
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase, SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory, SampleCourseFactory
 from xmodule.x_module import XModuleMixin
 
 
@@ -124,25 +121,29 @@ def unhide(unit):
         unhide(child)
 
 
+# These exercise the legacy CCX Coach dashboard, which is no longer the default experience.
+# The flag is pinned on so they keep testing the legacy view rather than the MFE redirect.
+# When DEPR-38432 (remove the legacy instructor dashboard, which covers the legacy CCX
+# dashboard) is executed, these can be removed along with the flag.
+@override_waffle_flag(LEGACY_CCX_COACH_DASHBOARD, active=True)
 class TestAdminAccessCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
     """
     Tests for Custom Courses views.
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     def setUp(self):
         super().setUp()
         self.make_coach()
         ccx = self.make_ccx()
         ccx_key = CCXLocator.from_course_locator(self.course.id, ccx.id)
         self.url = reverse('ccx_coach_dashboard', kwargs={'course_id': ccx_key})
+        self.TEST_PASSWORD = 'Password1234'
 
     def test_staff_access_coach_dashboard(self):
         """
         User is staff, should access coach dashboard.
         """
         staff = self.make_staff()
-        self.client.login(username=staff.username, password="test")
+        self.client.login(username=staff.username, password=self.TEST_PASSWORD)
 
         response = self.client.get(self.url)
         assert response.status_code == 200
@@ -152,7 +153,7 @@ class TestAdminAccessCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         User is instructor, should access coach dashboard.
         """
         instructor = self.make_instructor()
-        self.client.login(username=instructor.username, password="test")
+        self.client.login(username=instructor.username, password=self.TEST_PASSWORD)
 
         # Now access URL
         response = self.client.get(self.url)
@@ -162,12 +163,17 @@ class TestAdminAccessCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         """
         Assert user with no access must not see dashboard.
         """
-        user = UserFactory.create(password="test")
-        self.client.login(username=user.username, password="test")
+        user = UserFactory.create(password=self.TEST_PASSWORD)
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         response = self.client.get(self.url)
         assert response.status_code == 403
 
 
+# These exercise the legacy CCX Coach dashboard, which is no longer the default experience.
+# The flag is pinned on so they keep testing the legacy view rather than the MFE redirect.
+# When DEPR-38432 (remove the legacy instructor dashboard, which covers the legacy CCX
+# dashboard) is executed, these can be removed along with the flag.
+@override_waffle_flag(LEGACY_CCX_COACH_DASHBOARD, active=True)
 @override_settings(
     XBLOCK_FIELD_DATA_WRAPPERS=['lms.djangoapps.courseware.field_overrides:OverrideModulestoreFieldData.wrap'],
     MODULESTORE_FIELD_OVERRIDE_PROVIDERS=['lms.djangoapps.ccx.overrides.CustomCoursesForEdxOverrideProvider'],
@@ -186,15 +192,15 @@ class TestCCXProgressChanges(CcxTestCase, LoginEnrollmentTestCase):
         due = datetime.datetime(2016, 7, 8, 0, 0, tzinfo=UTC)
 
         cls.course = course = CourseFactory.create(enable_ccx=True, start=start)
-        chapter = ItemFactory.create(start=start, parent=course, category='chapter')
-        sequential = ItemFactory.create(
+        chapter = BlockFactory.create(start=start, parent=course, category='chapter')
+        sequential = BlockFactory.create(
             parent=chapter,
             start=start,
             due=due,
             category='sequential',
             metadata={'graded': True, 'format': 'Homework'}
         )
-        vertical = ItemFactory.create(
+        vertical = BlockFactory.create(
             parent=sequential,
             start=start,
             due=due,
@@ -205,7 +211,7 @@ class TestCCXProgressChanges(CcxTestCase, LoginEnrollmentTestCase):
         # Trying to wrap the whole thing in a bulk operation fails because it
         # doesn't find the parents. But we can at least wrap this part...
         with cls.store.bulk_operations(course.id, emit_signals=False):
-            flatten([ItemFactory.create(
+            flatten([BlockFactory.create(
                 parent=vertical,
                 start=start,
                 due=due,
@@ -218,12 +224,12 @@ class TestCCXProgressChanges(CcxTestCase, LoginEnrollmentTestCase):
         """
         assert signal and schedule update.
         """
-        student = UserFactory.create(is_staff=False, password="test")
+        student = UserFactory.create(is_staff=False, password=self.TEST_PASSWORD)
         CourseEnrollment.enroll(student, ccx_course_key)
         assert CourseEnrollment.objects.filter(course_id=ccx_course_key, user=student).exists()
 
         # login as student
-        self.client.login(username=student.username, password="test")
+        self.client.login(username=student.username, password=self.TEST_PASSWORD)
         progress_page_response = self.client.get(
             reverse('progress', kwargs={'course_id': ccx_course_key})
         )
@@ -235,7 +241,7 @@ class TestCCXProgressChanges(CcxTestCase, LoginEnrollmentTestCase):
 
     @patch('lms.djangoapps.ccx.views.render_to_response', intercept_renderer)
     @patch('lms.djangoapps.courseware.views.views.render_to_response', intercept_renderer)
-    @patch.dict('django.conf.settings.FEATURES', {'CUSTOM_COURSES_EDX': True})
+    @override_settings(CUSTOM_COURSES_EDX=True)
     def test_edit_schedule(self):
         """
         Get CCX schedule, modify it, save it.
@@ -243,7 +249,7 @@ class TestCCXProgressChanges(CcxTestCase, LoginEnrollmentTestCase):
         self.make_coach()
         ccx = self.make_ccx()
         ccx_course_key = CCXLocator.from_course_locator(self.course.id, str(ccx.id))
-        self.client.login(username=self.coach.username, password="test")
+        self.client.login(username=self.coach.username, password=self.TEST_PASSWORD)
 
         url = reverse('ccx_coach_dashboard', kwargs={'course_id': ccx_course_key})
         response = self.client.get(url)
@@ -280,6 +286,11 @@ class TestCCXProgressChanges(CcxTestCase, LoginEnrollmentTestCase):
         self.assert_progress_summary(ccx_course_key, due)
 
 
+# These exercise the legacy CCX Coach dashboard, which is no longer the default experience.
+# The flag is pinned on so they keep testing the legacy view rather than the MFE redirect.
+# When DEPR-38432 (remove the legacy instructor dashboard, which covers the legacy CCX
+# dashboard) is executed, these can be removed along with the flag.
+@override_waffle_flag(LEGACY_CCX_COACH_DASHBOARD, active=True)
 @override_settings(
     XBLOCK_FIELD_DATA_WRAPPERS=['lms.djangoapps.courseware.field_overrides:OverrideModulestoreFieldData.wrap'],
     MODULESTORE_FIELD_OVERRIDE_PROVIDERS=['lms.djangoapps.ccx.overrides.CustomCoursesForEdxOverrideProvider'],
@@ -302,7 +313,7 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         """
         super().setUp()
         # Login with the instructor account
-        self.client.login(username=self.coach.username, password="test")
+        self.client.login(username=self.coach.username, password=self.TEST_PASSWORD)
 
         # adding staff to master course.
         staff = UserFactory()
@@ -322,8 +333,8 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         ccx = self.make_ccx()
 
         # create session of non-coach user
-        user = UserFactory.create(password="test")
-        self.client.login(username=user.username, password="test")
+        user = UserFactory.create(password=self.TEST_PASSWORD)
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
         url = reverse(
             'ccx_coach_dashboard',
             kwargs={'course_id': CCXLocator.from_course_locator(self.course.id, ccx.id)})
@@ -344,7 +355,7 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
 
     def test_create_ccx_with_ccx_connector_set(self):
         """
-        Assert that coach cannot create ccx when ``ccx_connector`` url is set.
+        Assert that coach cannot create ccx when `ccx_connector` url is set.
         """
         role = CourseCcxCoachRole(self.course_with_ccx_connect_set.id)
         role.add_users(self.coach)
@@ -361,7 +372,39 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         )
         assert re.search(error_message, response.content.decode('utf-8'))
 
-    def test_create_ccx(self, ccx_name='New CCX'):
+    def test_create_ccx_course_service(self):
+        """
+        The extracted `create_ccx_course` service performs the full CCX
+        creation side effects independently of the legacy view. This guards the
+        refactor that moved the creation logic out of `create_ccx` so the v2
+        API can reuse it.
+        """
+        ccx_name = 'Service CCX'
+        self.make_coach()
+
+        ccx = create_ccx_course(self.course, self.coach, ccx_name)
+
+        # A CCX row is created and owned by the coach with the given name.
+        assert isinstance(ccx, CustomCourseForEdX)
+        assert ccx.coach == self.coach
+        assert ccx.display_name == ccx_name
+
+        course_key = CCXLocator.from_course_locator(self.course.id, str(ccx.id))
+
+        # Field overrides are applied (max students + display name).
+        assert get_override_for_ccx(
+            ccx, self.course, 'max_student_enrollments_allowed'
+        ) == settings.CCX_MAX_STUDENTS_ALLOWED
+        assert get_override_for_ccx(ccx, self.course, 'display_name') == ccx_name
+
+        # Coach is enrolled and granted staff + forum admin roles on the CCX.
+        assert CourseEnrollment.is_enrolled(self.coach, course_key)
+        assert CourseStaffRole(course_key).has_user(self.coach)
+        assert are_permissions_roles_seeded(course_key)
+        assert has_forum_access(self.coach.username, course_key, FORUM_ROLE_ADMINISTRATOR)
+
+
+    def test_create_ccx(self, ccx_name='New CCX'):  # noqa: PT028
         """
         Create CCX. Follow redirect to coach dashboard, confirm we see
         the coach dashboard for the new CCX.
@@ -605,7 +648,7 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         enrollment = CourseEnrollmentFactory(course_id=self.course.id)
         student = enrollment.user
         outbox = self.get_outbox()
-        assert outbox == []
+        assert not outbox
 
         url = reverse(
             view_name,
@@ -687,7 +730,7 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         enrollment = CourseEnrollmentFactory(course_id=course_key)
         student = enrollment.user
         outbox = self.get_outbox()
-        assert outbox == []
+        assert not outbox
 
         url = reverse(
             view_name,
@@ -729,7 +772,7 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         ccx = self.make_ccx()
         course_key = CCXLocator.from_course_locator(self.course.id, ccx.id)
         outbox = self.get_outbox()
-        assert outbox == []
+        assert not outbox
 
         url = reverse(
             view_name,
@@ -777,7 +820,7 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         course_key = CCXLocator.from_course_locator(course.id, ccx.id)
         outbox = self.get_outbox()
         CourseEnrollmentAllowed(course_id=course_key, email=identifier)
-        assert outbox == []
+        assert not outbox
 
         url = reverse(
             view_name,
@@ -798,6 +841,11 @@ class TestCoachDashboard(CcxTestCase, LoginEnrollmentTestCase):
         assert not CourseEnrollmentAllowed.objects.filter(course_id=course_key, email=identifier).exists()
 
 
+# These exercise the legacy CCX Coach dashboard, which is no longer the default experience.
+# The flag is pinned on so they keep testing the legacy view rather than the MFE redirect.
+# When DEPR-38432 (remove the legacy instructor dashboard, which covers the legacy CCX
+# dashboard) is executed, these can be removed along with the flag.
+@override_waffle_flag(LEGACY_CCX_COACH_DASHBOARD, active=True)
 class TestCoachDashboardSchedule(CcxTestCase, LoginEnrollmentTestCase, ModuleStoreTestCase):
     """
     Tests of the CCX Coach Dashboard which need to modify the course content.
@@ -818,16 +866,16 @@ class TestCoachDashboardSchedule(CcxTestCase, LoginEnrollmentTestCase, ModuleSto
         )
 
         self.chapters = [
-            ItemFactory.create(start=start, parent=course) for _ in range(2)
+            BlockFactory.create(start=start, parent=course) for _ in range(2)
         ]
         self.sequentials = flatten([
             [
-                ItemFactory.create(parent=chapter) for _ in range(2)
+                BlockFactory.create(parent=chapter) for _ in range(2)
             ] for chapter in self.chapters
         ])
         self.verticals = flatten([
             [
-                ItemFactory.create(
+                BlockFactory.create(
                     start=start, due=due, parent=sequential, graded=True, format='Homework', category='vertical'
                 ) for _ in range(2)
             ] for sequential in self.sequentials
@@ -836,9 +884,9 @@ class TestCoachDashboardSchedule(CcxTestCase, LoginEnrollmentTestCase, ModuleSto
         # Trying to wrap the whole thing in a bulk operation fails because it
         # doesn't find the parents. But we can at least wrap this part...
         with self.store.bulk_operations(course.id, emit_signals=False):
-            blocks = flatten([  # pylint: disable=unused-variable
+            blocks = flatten([  # pylint: disable=unused-variable  # noqa: F841
                 [
-                    ItemFactory.create(parent=vertical) for _ in range(2)
+                    BlockFactory.create(parent=vertical) for _ in range(2)
                 ] for vertical in self.verticals
             ])
 
@@ -848,7 +896,7 @@ class TestCoachDashboardSchedule(CcxTestCase, LoginEnrollmentTestCase, ModuleSto
         self.mstore = modulestore()
 
         # Login with the instructor account
-        self.client.login(username=self.coach.username, password="test")
+        self.client.login(username=self.coach.username, password=self.TEST_PASSWORD)
 
         # adding staff to master course.
         staff = UserFactory()
@@ -948,8 +996,6 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
     """
     Tests for Custom Courses views.
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -960,11 +1006,11 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
         cls.mooc_start = start = datetime.datetime(
             2010, 5, 12, 2, 42, tzinfo=UTC
         )
-        chapter = ItemFactory.create(
+        chapter = BlockFactory.create(
             start=start, parent=course, category='sequential'
         )
         cls.sections = sections = [
-            ItemFactory.create(
+            BlockFactory.create(
                 parent=chapter,
                 category="sequential",
                 metadata={'graded': True, 'format': 'Homework'})
@@ -973,7 +1019,7 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
         # making problems available at class level for possible future use in tests
         cls.problems = [
             [
-                ItemFactory.create(
+                BlockFactory.create(
                     parent=section,
                     category="problem",
                     data=StringResponseXMLFactory().build_xml(answer='foo'),
@@ -990,7 +1036,7 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
 
         # Create instructor account
         self.coach = coach = AdminFactory.create()
-        self.client.login(username=coach.username, password="test")
+        self.client.login(username=coach.username, password=self.TEST_PASSWORD)
 
         # Create CCX
         role = CourseCcxCoachRole(self._course.id)
@@ -1018,7 +1064,7 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
         self.course = get_course_by_id(self.ccx_key, depth=None)
         CourseOverview.load_from_module_store(self.course.id)
         setup_students_and_grades(self)
-        self.client.login(username=coach.username, password="test")
+        self.client.login(username=coach.username, password=self.TEST_PASSWORD)
         self.addCleanup(RequestCache.clear_all_namespaces)
         from xmodule.modulestore.django import SignalHandler
 
@@ -1062,7 +1108,7 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
         rows = response.content.decode('utf-8').strip().split('\r')
         headers = rows[0]
         # picking first student records
-        data = dict(list(zip(headers.strip().split(','), rows[1].strip().split(','))))
+        data = dict(list(zip(headers.strip().split(','), rows[1].strip().split(','))))  # noqa: B905
         assert 'HW 04' not in data
         assert data['HW 01'] == '0.75'
         assert data['HW 02'] == '0.5'
@@ -1077,7 +1123,7 @@ class TestCCXGrades(FieldOverrideTestMixin, SharedModuleStoreTestCase, LoginEnro
         get_course.return_value = self.course
         self.addCleanup(patch_context.stop)
 
-        self.client.login(username=self.student.username, password="test")  # lint-amnesty, pylint: disable=no-member
+        self.client.login(username=self.student.username, password=self.TEST_PASSWORD)  # pylint: disable=no-member
         url = reverse(
             'progress',
             kwargs={'course_id': self.ccx_key}
@@ -1126,7 +1172,7 @@ class CCXCoachTabTestCase(CcxTestCase):
         """
         Test ccx coach tab state (visible or hidden) depending on the value of enable_ccx flag, ccx feature flag.
         """
-        with self.settings(FEATURES={'CUSTOM_COURSES_EDX': ccx_feature_flag}):
+        with override_settings(CUSTOM_COURSES_EDX=ccx_feature_flag):
             course = self.ccx_enabled_course if enable_ccx else self.ccx_disabled_course
             assert expected_result == self.check_ccx_tab(course, self.user)
 
@@ -1201,12 +1247,10 @@ class TestStudentViewsWithCCX(ModuleStoreTestCase):
         """
         super().setUp()
 
-        # Create a Draft Mongo and a Split Mongo course and enroll a student user in them.
+        # Create a Split Mongo course and enroll a student user in it.
         self.student_password = "foobar"
-        self.student = UserFactory.create(username="test", password=self.student_password, is_staff=False)
-        self.draft_course = SampleCourseFactory.create(default_store=ModuleStoreEnum.Type.mongo)
+        self.student = UserFactory.create(username=self.TEST_PASSWORD, password=self.student_password, is_staff=False)
         self.split_course = SampleCourseFactory.create(default_store=ModuleStoreEnum.Type.split)
-        CourseEnrollment.enroll(self.student, self.draft_course.id)
         CourseEnrollment.enroll(self.student, self.split_course.id)
 
         # Create a CCX coach.
@@ -1229,5 +1273,6 @@ class TestStudentViewsWithCCX(ModuleStoreTestCase):
 
     def test_load_courseware(self):
         self.client.login(username=self.student.username, password=self.student_password)
-        response = self.client.get(reverse('courseware', kwargs={'course_id': str(self.ccx_course_key)}))
+        sequence_key = self.ccx_course_key.make_usage_key('sequential', 'sequential_x1')
+        response = self.client.get(reverse('render_xblock', args=[str(sequence_key)]))
         assert response.status_code == 200

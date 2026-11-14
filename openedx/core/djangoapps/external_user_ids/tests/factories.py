@@ -10,15 +10,15 @@ from factory.fuzzy import FuzzyChoice, FuzzyText
 from openedx.core.djangoapps.external_user_ids.models import ExternalId, ExternalIdType
 
 
-class ExternalIDTypeFactory(factory.django.DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class ExternalIDTypeFactory(factory.django.DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = ExternalIdType
 
-    name = FuzzyChoice([ExternalIdType.MICROBACHELORS_COACHING])
+    name = FuzzyChoice([ExternalIdType.CALIPER])
     description = FuzzyText()
 
 
-class ExternalIdFactory(factory.django.DjangoModelFactory):  # lint-amnesty, pylint: disable=missing-class-docstring
+class ExternalIdFactory(factory.django.DjangoModelFactory):  # pylint: disable=missing-class-docstring
     class Meta:
         model = ExternalId
 

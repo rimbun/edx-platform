@@ -1,43 +1,25 @@
 """
     Tests for comprehensive them
 """
-
+from unittest.mock import patch
 
 from django.conf import settings
-from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sites.models import Site
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.urls import reverse
 
-from common.djangoapps.student.tests.factories import GlobalStaffFactory
-from openedx.core.djangoapps.theming.middleware import CurrentSiteThemeMiddleware
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import GlobalStaffFactory, UserFactory
+from openedx.core.djangoapps.theming.models import SiteTheme
 
 THEMING_ADMIN_URL = '/theming/admin'
 TEST_THEME_NAME = 'test-theme'
-TEST_PASSWORD = 'test'
+TEST_PASSWORD = 'Password1234'
 
 
 class TestThemingViews(TestCase):
     """
     Test theming views.
     """
-    def setUp(self):
-        """
-        Initialize middleware and related objects
-        """
-        super().setUp()
-
-        self.site_theme_middleware = CurrentSiteThemeMiddleware()
-        self.user = UserFactory.create()
-
-    def initialize_mock_request(self, request):
-        """
-        Initialize a test request.
-        """
-        request.user = self.user
-        request.site, __ = Site.objects.get_or_create(domain='test', name='test')
-        request.session = {}
-        MessageMiddleware().process_request(request)
 
     def test_preview_theme_access(self):
         """
@@ -49,7 +31,7 @@ class TestThemingViews(TestCase):
         expected_target_status_code = 200 if settings.ROOT_URLCONF == 'lms.urls' else 302
         self.assertRedirects(
             response,
-            '{login_url}?next={url}'.format(
+            '{login_url}?next={url}'.format(  # noqa: UP032
                 login_url=settings.LOGIN_URL,
                 url=THEMING_ADMIN_URL,
             ),
@@ -57,7 +39,8 @@ class TestThemingViews(TestCase):
         )
 
         # Logged in non-global staff get a 404
-        self.client.login(username=self.user.username, password=TEST_PASSWORD)
+        non_global_staff_user = UserFactory.create()
+        self.client.login(username=non_global_staff_user.username, password=TEST_PASSWORD)
         response = self.client.get(THEMING_ADMIN_URL)
         assert response.status_code == 404
 
@@ -108,3 +91,29 @@ class TestThemingViews(TestCase):
             response,
             f'<option value="{TEST_THEME_NAME}">'
         )
+
+    def test_asset_no_theme(self):
+        """
+        Fetch theme asset when no theme is set.
+        """
+        response = self.client.get(reverse("theming:openedx.theming.asset", kwargs={"path": "images/logo.png"}))
+        assert response.status_code == 302
+        assert response.url == "/static/images/logo.png"
+
+    @override_settings(
+        STORAGES={
+            'staticfiles': {
+                'BACKEND': 'openedx.core.storage.DevelopmentStorage'
+            }
+        }
+    )
+    def test_asset_with_theme(self):
+        """
+        Fetch theme asset when a theme is set.
+        """
+        SiteTheme.objects.create(site=Site.objects.get(), theme_dir_name="red-theme")
+        with patch("openedx.core.storage.DevelopmentStorage.themed") as mock_is_themed:
+            response = self.client.get(reverse("theming:openedx.theming.asset", kwargs={"path": "images/logo.png"}))
+            mock_is_themed.assert_called_once_with("images/logo.png", "red-theme")
+        assert response.status_code == 302
+        assert response.url == "/static/red-theme/images/logo.png"

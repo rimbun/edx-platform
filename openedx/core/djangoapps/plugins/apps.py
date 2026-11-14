@@ -7,9 +7,9 @@ Signal handlers are connected here.
 
 from django.apps import AppConfig
 from django.conf import settings
-from edx_django_utils.plugins import connect_plugin_receivers
+from edx_django_utils.plugins import PluginSettings, connect_plugin_receivers
 
-from openedx.core.djangoapps.plugins.constants import ProjectType
+from openedx.core.djangoapps.plugins.constants import ProjectType, SettingsType
 
 
 class PluginsConfig(AppConfig):
@@ -19,7 +19,16 @@ class PluginsConfig(AppConfig):
 
     name = 'openedx.core.djangoapps.plugins'
 
-    plugin_app = {}
+    plugin_app = {
+        PluginSettings.CONFIG: {
+            ProjectType.LMS: {
+                SettingsType.PRODUCTION: {PluginSettings.RELATIVE_PATH: 'settings.production'},
+            },
+            ProjectType.CMS: {
+                SettingsType.PRODUCTION: {PluginSettings.RELATIVE_PATH: 'settings.production'},
+            },
+        }
+    }
 
     def ready(self):
         """

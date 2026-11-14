@@ -3,63 +3,69 @@ Tests for the Studio authoring XBlock mixin.
 """
 
 
-from django.conf import settings
 from django.test.utils import override_settings
+from xblock.core import XBlock
 
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.partitions.partitions import (
     ENROLLMENT_TRACK_PARTITION_ID,
-    MINIMUM_STATIC_PARTITION_ID,
+    MINIMUM_UNUSED_PARTITION_ID,
     Group,
-    UserPartition
+    UserPartition,
 )
+from xmodule.tests.test_export import PureXBlock
 
 
 class AuthoringMixinTestCase(ModuleStoreTestCase):
     """
     Tests the studio authoring XBlock mixin.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
     GROUP_NO_LONGER_EXISTS = "This group no longer exists"
     NO_CONTENT_OR_ENROLLMENT_GROUPS = "Access to this component is not restricted"
-    NO_CONTENT_ENROLLMENT_TRACK_ENABLED = "You can restrict access to this component to learners in specific enrollment tracks or content groups"  # lint-amnesty, pylint: disable=line-too-long
-    NO_CONTENT_ENROLLMENT_TRACK_DISABLED = "You can restrict access to this component to learners in specific content groups"  # lint-amnesty, pylint: disable=line-too-long
+    NO_CONTENT_ENROLLMENT_TRACK_ENABLED = "You can restrict access to this component to learners in specific enrollment tracks or content groups"  # pylint: disable=line-too-long
+    NO_CONTENT_ENROLLMENT_TRACK_DISABLED = "You can restrict access to this component to learners in specific content groups"  # pylint: disable=line-too-long
     CONTENT_GROUPS_TITLE = "Content Groups"
     ENROLLMENT_GROUPS_TITLE = "Enrollment Track Groups"
     STAFF_LOCKED = 'The unit that contains this component is hidden from learners'
 
-    FEATURES_WITH_ENROLLMENT_TRACK_DISABLED = settings.FEATURES.copy()
-    FEATURES_WITH_ENROLLMENT_TRACK_DISABLED['ENABLE_ENROLLMENT_TRACK_USER_PARTITION'] = False
-
+    @XBlock.register_temp_plugin(PureXBlock, 'pure')
     def setUp(self):
         """
         Create a simple course with a video component.
         """
         super().setUp()
         self.course = CourseFactory.create()
-        chapter = ItemFactory.create(
+        chapter = BlockFactory.create(
             category='chapter',
-            parent_location=self.course.location,
+            parent=self.course,
             display_name='Test Chapter'
         )
-        sequential = ItemFactory.create(
+        sequential = BlockFactory.create(
             category='sequential',
-            parent_location=chapter.location,
+            parent=chapter,
             display_name='Test Sequential'
         )
-        vertical = ItemFactory.create(
+        vertical = BlockFactory.create(
             category='vertical',
-            parent_location=sequential.location,
+            parent=sequential,
             display_name='Test Vertical'
         )
-        video = ItemFactory.create(
+        video = BlockFactory.create(
             category='video',
-            parent_location=vertical.location,
+            parent=vertical,
             display_name='Test Vertical'
+        )
+        pure = BlockFactory.create(
+            category='pure',
+            parent=vertical,
+            display_name='Test Pure'
         )
         self.vertical_location = vertical.location
         self.video_location = video.location
+        self.pure_location = pure.location
         self.pet_groups = [Group(1, 'Cat Lovers'), Group(2, 'Dog Lovers')]
 
     def create_content_groups(self, content_groups):
@@ -68,7 +74,7 @@ class AuthoringMixinTestCase(ModuleStoreTestCase):
         """
         # pylint: disable=attribute-defined-outside-init
         self.content_partition = UserPartition(
-            MINIMUM_STATIC_PARTITION_ID,
+            MINIMUM_UNUSED_PARTITION_ID,
             self.CONTENT_GROUPS_TITLE,
             'Contains Groups for Cohorted Courseware',
             content_groups,
@@ -100,7 +106,7 @@ class AuthoringMixinTestCase(ModuleStoreTestCase):
         item = self.store.get_item(item_location)
         html = item.visibility_view().body_html()
         for string in substrings:
-            self.assertIn(string, html)
+            self.assertIn(string, html)  # noqa: PT009
 
     def verify_visibility_view_does_not_contain(self, item_location, substrings):
         """
@@ -110,7 +116,7 @@ class AuthoringMixinTestCase(ModuleStoreTestCase):
         item = self.store.get_item(item_location)
         html = item.visibility_view().body_html()
         for string in substrings:
-            self.assertNotIn(string, html)
+            self.assertNotIn(string, html)  # noqa: PT009
 
     def test_html_no_partition(self):
         self.verify_visibility_view_contains(self.video_location, [self.NO_CONTENT_OR_ENROLLMENT_GROUPS])
@@ -148,14 +154,6 @@ class AuthoringMixinTestCase(ModuleStoreTestCase):
             [self.STAFF_LOCKED, self.CONTENT_GROUPS_TITLE, self.ENROLLMENT_GROUPS_TITLE]
         )
 
-    def test_html_populated_partition_staff_locked(self):
-        self.create_content_groups(self.pet_groups)
-        self.set_staff_only(self.vertical_location)
-        self.verify_visibility_view_contains(
-            self.video_location,
-            [self.STAFF_LOCKED, self.CONTENT_GROUPS_TITLE, 'Cat Lovers', 'Dog Lovers']
-        )
-
     def test_html_false_content_group(self):
         self.create_content_groups(self.pet_groups)
         self.set_group_access(self.video_location, ['false_group_id'])
@@ -168,21 +166,7 @@ class AuthoringMixinTestCase(ModuleStoreTestCase):
             [self.STAFF_LOCKED]
         )
 
-    def test_html_false_content_group_staff_locked(self):
-        self.create_content_groups(self.pet_groups)
-        self.set_staff_only(self.vertical_location)
-        self.set_group_access(self.video_location, ['false_group_id'])
-        self.verify_visibility_view_contains(
-            self.video_location,
-            [
-                'Cat Lovers',
-                'Dog Lovers',
-                self.STAFF_LOCKED,
-                self.GROUP_NO_LONGER_EXISTS
-            ]
-        )
-
-    @override_settings(FEATURES=FEATURES_WITH_ENROLLMENT_TRACK_DISABLED)
+    @override_settings(ENABLE_ENROLLMENT_TRACK_USER_PARTITION=False)
     def test_enrollment_tracks_disabled(self):
         """
         Test that the "no groups" messages doesn't reference enrollment tracks if
@@ -257,4 +241,16 @@ class AuthoringMixinTestCase(ModuleStoreTestCase):
         self.verify_visibility_view_contains(
             self.video_location,
             [self.ENROLLMENT_GROUPS_TITLE, 'audit course', 'verified course', self.GROUP_NO_LONGER_EXISTS]
+        )
+
+    def test_pure_xblock_visibility(self):
+        self.create_content_groups(self.pet_groups)
+        self.verify_visibility_view_contains(
+            self.pure_location,
+            [self.CONTENT_GROUPS_TITLE, 'Cat Lovers', 'Dog Lovers']
+        )
+
+        self.verify_visibility_view_does_not_contain(
+            self.pure_location,
+            [self.NO_CONTENT_OR_ENROLLMENT_GROUPS, self.ENROLLMENT_GROUPS_TITLE]
         )

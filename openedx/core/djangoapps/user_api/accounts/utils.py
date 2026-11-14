@@ -2,27 +2,48 @@
 Utility methods for the account settings.
 """
 
-
+import logging
+import random
 import re
-from urllib.parse import urlparse  # pylint: disable=import-error
+import string
 
-import waffle  # lint-amnesty, pylint: disable=invalid-django-waffle-import
-from completion.waffle import ENABLE_COMPLETION_TRACKING_SWITCH
+import waffle  # pylint: disable=invalid-django-waffle-import
 from completion.models import BlockCompletion
+from completion.waffle import ENABLE_COMPLETION_TRACKING_SWITCH
 from django.conf import settings
-from django.utils.translation import ugettext as _
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.db import transaction
+from django.db.models import CharField, TextField, Value
+from django.db.models.functions import Cast, Concat
+from django.utils.translation import gettext as _
+from edx_django_utils.user import generate_password
 from social_django.models import UserSocialAuth
 
-from common.djangoapps.student.models import AccountRecovery, Registration, get_retired_email_by_email
-from openedx.core.djangolib.oauth2_retirement_utils import retire_dot_oauth2_models
+from common.djangoapps.student.models import (
+    AccountRecovery,
+    Registration,
+    get_retired_email_by_email,
+)
 from openedx.core.djangoapps.site_configuration.models import SiteConfiguration
 from openedx.core.djangoapps.theming.helpers import get_config_value_from_site_or_settings, get_current_site
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.exceptions import ItemNotFoundError
+from openedx.core.djangolib.oauth2_retirement_utils import retire_dot_oauth2_models
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
-from ..models import UserRetirementStatus
+from ..models import RetirementStateError, UserRetirementStatus
+
+# Prefix and suffix used to build a per-record redacted uid for UserSocialAuth.
+REDACTED_SOCIAL_AUTH_UID_PREFIX = 'redacted-before-delete-'
+REDACTED_SOCIAL_AUTH_UID_SUFFIX = '@safe.com'
+
+# Format for the placeholder email a learner's retired email is replaced with by
+# release_retired_learner_email(). Kept private to this feature - deliberately not shared
+# with the RETIRED_EMAIL_* settings/format used by the retirement pipeline itself. The
+# domain is filled in from settings.RETIRED_EMAIL_DOMAIN so it matches whatever domain
+# _is_retired_email_format() considers "retired" on this deployment.
+RELEASED_LEARNER_EMAIL_FORMAT = 'retired__uid_{}@{}'
 
 ENABLE_SECONDARY_EMAIL_FEATURE_SWITCH = 'enable_secondary_email_feature'
+LOGGER = logging.getLogger(__name__)
 
 
 def validate_social_link(platform_name, new_social_link):
@@ -49,11 +70,11 @@ def format_social_link(platform_name, new_social_link):
     """
     Given a user's social link, returns a safe absolute url for the social link.
 
-    Returns the following based on the provided new_social_link:
-    1) Given an empty string, returns ''
-    1) Given a valid username, return 'https://www.[platform_name_base][username]'
-    2) Given a valid URL, return 'https://www.[platform_name_base][username]'
-    3) Given anything unparseable, returns None
+    Returns:
+    - An empty string if `new_social_link` is empty.
+    - A formatted URL if `new_social_link` is a username.
+    - Returns `new_social_link` if it is a valid URL.
+    - None for unparseable inputs.
     """
     # Blank social links should return '' or None as was passed in.
     if not new_social_link:
@@ -82,11 +103,9 @@ def _get_username_from_social_link(platform_name, new_social_link):
     if not new_social_link:
         return new_social_link
 
-    # Parse the social link as if it were a URL.
-    parse_result = urlparse(new_social_link)
-    url_domain_and_path = parse_result[1] + parse_result[2]
     url_stub = re.escape(settings.SOCIAL_PLATFORMS[platform_name]['url_stub'])
-    username_match = re.search(r'(www\.)?' + url_stub + r'(?P<username>.*?)[/]?$', url_domain_and_path, re.IGNORECASE)
+    username_match = re.search(r'(www\.)?' + url_stub + r'(?P<username>.+?)(?:/)?$', new_social_link, re.IGNORECASE)
+
     if username_match:
         username = username_match.group('username')
     else:
@@ -169,13 +188,17 @@ def retrieve_last_sitewide_block_completed(user):
 
     try:
         item = modulestore().get_item(candidate_block_key, depth=1)
-    except ItemNotFoundError:
+    except Exception as err:  # pylint: disable=broad-except
+        LOGGER.exception(
+            '[PROD-2877] Error retrieving resume block for user %s with raw error %r',
+            user.username, err,
+        )
         item = None
 
     if not (lms_root and item):
         return
 
-    return "{lms_root}/courses/{course_key}/jump_to/{location}".format(
+    return "{lms_root}/courses/{course_key}/jump_to/{location}".format(  # noqa: UP032
         lms_root=lms_root,
         course_key=str(item.location.course_key),
         location=str(item.location),
@@ -192,26 +215,163 @@ def is_secondary_email_feature_enabled():
     return waffle.switch_is_active(ENABLE_SECONDARY_EMAIL_FEATURE_SWITCH)
 
 
+def redact_and_delete_social_auth(user_id, skip_delete=False):
+    """
+    Redact PII from all UserSocialAuth records for the given user, then delete them.
+
+    Downstream copies of data may use soft-deletes, and redacting before deleting
+    ensures PII for retired users (or future retirements) is not retained.
+
+    ``skip_delete`` should only be set to True when called from the pre_delete signal
+    handler, where deletion is already in progress.
+    """
+    social_auth_queryset = UserSocialAuth.objects.filter(user_id=user_id)
+    # Important: this redacted uid must match the format used by ``get_redacted_social_auth_uid()``.
+    social_auth_queryset.update(
+        uid=Concat(
+            Value(REDACTED_SOCIAL_AUTH_UID_PREFIX),
+            Cast('id', output_field=CharField()),
+            Value(REDACTED_SOCIAL_AUTH_UID_SUFFIX),
+        ),
+        extra_data={},
+    )
+    if not skip_delete:
+        social_auth_queryset.delete()
+
+
+def redact_and_delete_historical_social_auth(user_id):
+    """
+    Redact PII from all HistoricalUserSocialAuth records for the given user, then delete them.
+
+    Downstream copies of data may use soft-deletes, and redacting before deleting
+    ensures PII for retired users (or future retirements) is not retained.
+    """
+    historical_social_auth_model = UserSocialAuth.history.model
+    historical_queryset = historical_social_auth_model.objects.filter(user_id=user_id)
+    historical_queryset.update(
+        uid=Concat(
+            Value(REDACTED_SOCIAL_AUTH_UID_PREFIX),
+            Cast('history_id', output_field=TextField()),
+            Value(REDACTED_SOCIAL_AUTH_UID_SUFFIX),
+        ),
+        extra_data={},
+    )
+    historical_queryset.delete()
+
+
 def create_retirement_request_and_deactivate_account(user):
     """
-    Adds user to retirement queue, unlinks social auth accounts, changes user passwords
-    and delete tokens and activation keys
+    Adds user to retirement queue, changes user passwords
+    and delete tokens and activation keys.
     """
     # Add user to retirement queue.
     UserRetirementStatus.create_retirement(user)
-
-    # Unlink LMS social auth accounts
-    UserSocialAuth.objects.filter(user_id=user.id).delete()
 
     # Change LMS password & email
     user.email = get_retired_email_by_email(user.email)
     user.set_unusable_password()
     user.save()
 
-    # TODO: Unlink social accounts & change password on each IDA.
+    # Do not unlink/redact social accounts during the initial retirement request.
+    # If the user cancels retirement during the cool-off period, they must
+    # still be able to authenticate using their existing social account.
+    # Deleting the social account at this stage would permanently break that
+    # login path. Therefore, social account unlinking should only occur
+    # when retirement is finalized after the cool-off period has elapsed.
     # Remove the activation keys sent by email to the user for account activation.
     Registration.objects.filter(user=user).delete()
 
     # Delete OAuth tokens associated with the user.
     retire_dot_oauth2_models(user)
     AccountRecovery.retire_recovery_email(user.id)
+
+
+def username_suffix_generator(suffix_length=4):
+    """
+    Generates a random, alternating number and letter string for the purpose of
+    appending to non-unique usernames. Alternating is less likey to produce
+    a significant/meaningful substring like an offensive word.
+    Whether the suffix starts with a letter or number is also randomized.
+    """
+    # pick from letters, or numbers
+    choice_collections = [string.ascii_lowercase, string.digits]
+    # randomize which collection to pick from first
+    random.shuffle(choice_collections)
+    output = ''
+    for i in range(suffix_length):
+        if (i % 2) == 0:
+            output += random.choice(choice_collections[0])
+        else:
+            output += random.choice(choice_collections[1])
+    return output
+
+
+def handle_retirement_cancellation(retirement, email_address=None):
+    """
+    Do the following in order to cancel retirement for a given user:
+
+    1. Load the user record using the retired email address -and- change the email address back.
+    2. Reset users password so they can request a password reset and log in again.
+    3. No need to delete the accompanying "permanent" retirement request record - it gets done via Django signal.
+    """
+    retirement.user.email = email_address if email_address else retirement.original_email
+
+    retirement.user.set_password(generate_password(length=25))
+    retirement.user.save()
+
+    retirement.delete()
+
+
+def _is_retired_email_format(email):
+    """
+    Returns True if the given email address is in the retired-email domain
+    used by settings.RETIRED_EMAIL_DOMAIN.
+    """
+    return email.endswith(f'@{settings.RETIRED_EMAIL_DOMAIN}')
+
+
+def release_retired_learner_email(user):
+    """
+    Lets a fully-retired learner reuse their original email address by replacing
+    the retired-hash email currently on their auth_user row with a stable,
+    human-readable placeholder keyed on their user id (RELEASED_LEARNER_EMAIL_FORMAT,
+    e.g. "retired__uid_42@retired.invalid"). This only mutates that one column -
+    the row and its retirement history are kept for compliance, and
+    is_email_retired() will no longer match the new value.
+
+    Raises RetirementStateError if the user's retirement isn't in a state where
+    it's safe to release the email (still in progress, or doesn't look retired at all).
+
+    Locks the user row for the duration of the check, so this can't interleave with a
+    concurrent handle_retirement_cancellation() (which restores the original email on
+    the same row) or with another release_retired_learner_email() call for this user.
+    The check itself runs against a freshly re-fetched copy of the row rather than the
+    `user` passed in, but on success `user.email` is updated in place to match.
+    """
+    released_email = RELEASED_LEARNER_EMAIL_FORMAT.format(user.id, settings.RETIRED_EMAIL_DOMAIN)
+
+    with transaction.atomic():
+        locked_user = User.objects.select_for_update().get(pk=user.pk)
+
+        if locked_user.email == released_email:
+            LOGGER.info(f"Email for user {locked_user.id} was already released, nothing to do.")
+        else:
+            try:
+                retirement = UserRetirementStatus.objects.select_related('current_state').get(user=locked_user)
+                if retirement.current_state.state_name != 'COMPLETE':
+                    raise RetirementStateError(
+                        f"Cannot release email for user {locked_user.id}: retirement is in state "
+                        f"'{retirement.current_state.state_name}', not COMPLETE."
+                    )
+            except UserRetirementStatus.DoesNotExist as exc:
+                if not _is_retired_email_format(locked_user.email):
+                    raise RetirementStateError(f"User {locked_user.id} does not appear to be a retired user.") from exc
+
+            locked_user.email = released_email
+            locked_user.save(update_fields=['email'])
+            LOGGER.info(f"Released retired email for user {locked_user.id}.")
+
+    # Keep the caller's in-memory object in sync with what was actually persisted -
+    # we mutated a separately-fetched `locked_user`, not `user` itself. Runs on both
+    # the freshly-released and already-released paths (an early return here would skip it).
+    user.email = released_email

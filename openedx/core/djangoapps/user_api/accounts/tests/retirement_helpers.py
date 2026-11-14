@@ -4,16 +4,16 @@ Helpers for testing retirement functionality
 
 
 import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
-import pytz
 from django.test import TestCase
 from social_django.models import UserSocialAuth
 
-from openedx.core.djangoapps.enrollments import api
-from openedx.core.djangoapps.user_api.models import RetirementState, UserRetirementStatus
 from common.djangoapps.student.models import get_retired_email_by_email, get_retired_username_by_username
 from common.djangoapps.student.tests.factories import UserFactory
+from openedx.core.djangoapps.enrollments import api
+from openedx.core.djangoapps.user_api.models import RetirementState, UserRetirementStatus
 
 from ..views import AccountRetirementView
 
@@ -67,7 +67,7 @@ def create_retirement_status(user, state=None, create_datetime=None):
     Assumes that retirement states have been setup before calling.
     """
     if create_datetime is None:
-        create_datetime = datetime.datetime.now(pytz.UTC) - datetime.timedelta(days=8)
+        create_datetime = datetime.datetime.now(ZoneInfo("UTC")) - datetime.timedelta(days=8)
 
     retirement = UserRetirementStatus.create_retirement(user)
     if state:
@@ -152,10 +152,10 @@ class RetirementTestCase(TestCase):
         return [create_retirement_status(UserFactory(), state=state) for state in RetirementState.objects.all()]
 
     def _get_non_dead_end_states(self):
-        return [state for state in RetirementState.objects.filter(is_dead_end_state=False)]  # lint-amnesty, pylint: disable=unnecessary-comprehension
+        return RetirementState.objects.filter(is_dead_end_state=False)
 
     def _get_dead_end_states(self):
-        return [state for state in RetirementState.objects.filter(is_dead_end_state=True)]  # lint-amnesty, pylint: disable=unnecessary-comprehension
+        return RetirementState.objects.filter(is_dead_end_state=True)
 
 
 def fake_requested_retirement(user):

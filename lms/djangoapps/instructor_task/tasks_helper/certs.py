@@ -4,7 +4,6 @@ Instructor tasks related to certificates.
 
 
 import logging
-
 from time import time
 
 from django.contrib.auth import get_user_model
@@ -13,8 +12,8 @@ from django.db.models import Q
 from common.djangoapps.student.models import CourseEnrollment
 from lms.djangoapps.certificates.api import (
     generate_certificate_task,
+    get_enrolled_allowlisted_not_passing_users,
     get_enrolled_allowlisted_users,
-    get_enrolled_allowlisted_not_passing_users
 )
 from lms.djangoapps.certificates.data import CertificateStatuses
 
@@ -26,7 +25,7 @@ log = logging.getLogger(__name__)
 
 
 def generate_students_certificates(
-        _xmodule_instance_args, _entry_id, course_id, task_input, action_name):
+        _xblock_instance_args, _entry_id, course_id, task_input, action_name):
     """
     For a given `course_id`, generate certificates for only students present in 'students' key in task_input
     json column, otherwise generate certificates for all enrolled students.

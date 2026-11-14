@@ -1,4 +1,4 @@
-"""  # lint-amnesty, pylint: disable=cyclic-import
+"""  # pylint: disable=cyclic-import
 Test utils for CCX
 """
 
@@ -14,8 +14,8 @@ from lms.djangoapps.ccx.overrides import override_field_for_ccx
 from lms.djangoapps.ccx.tests.factories import CcxFactory
 from openedx.core.djangoapps.ace_common.tests.mixins import EmailTemplateTagMixin
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
@@ -24,8 +24,6 @@ class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
 
     It creates a course that can be used as master course for CCXs.
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -40,16 +38,16 @@ class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
         )
 
         cls.chapters = [
-            ItemFactory.create(start=start, parent=course) for _ in range(2)
+            BlockFactory.create(start=start, parent=course) for _ in range(2)
         ]
         cls.sequentials = flatten([
             [
-                ItemFactory.create(parent=chapter) for _ in range(2)
+                BlockFactory.create(parent=chapter) for _ in range(2)
             ] for chapter in cls.chapters
         ])
         cls.verticals = flatten([
             [
-                ItemFactory.create(
+                BlockFactory.create(
                     start=start, due=due, parent=sequential, graded=True, format='Homework', category='vertical'
                 ) for _ in range(2)
             ] for sequential in cls.sequentials
@@ -58,9 +56,9 @@ class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
         # Trying to wrap the whole thing in a bulk operation fails because it
         # doesn't find the parents. But we can at least wrap this part...
         with cls.store.bulk_operations(course.id, emit_signals=False):
-            blocks = flatten([  # pylint: disable=unused-variable
+            blocks = flatten([  # pylint: disable=unused-variable  # noqa: F841
                 [
-                    ItemFactory.create(parent=vertical) for _ in range(2)
+                    BlockFactory.create(parent=vertical) for _ in range(2)
                 ] for vertical in cls.verticals
             ])
 
@@ -70,7 +68,7 @@ class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
         """
         super().setUp()
         # Create instructor account
-        self.coach = UserFactory.create(password="test")
+        self.coach = UserFactory.create()
         # create an instance of modulestore
         self.mstore = modulestore()
 
@@ -78,7 +76,7 @@ class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
         """
         create staff user.
         """
-        staff = UserFactory.create(password="test")
+        staff = UserFactory.create()
         role = CourseStaffRole(self.course.id)
         role.add_users(staff)
 
@@ -88,7 +86,7 @@ class CcxTestCase(EmailTemplateTagMixin, SharedModuleStoreTestCase):
         """
         create instructor user.
         """
-        instructor = UserFactory.create(password="test")
+        instructor = UserFactory.create()
         role = CourseInstructorRole(self.course.id)
         role.add_users(instructor)
 

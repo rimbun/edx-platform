@@ -1,11 +1,8 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
 
-import unittest
 from tempfile import NamedTemporaryFile
 
 import pytest
-import six
-from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -15,8 +12,11 @@ from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from common.djangoapps.student.models import BulkChangeEnrollmentConfiguration, CourseEnrollment
 from common.djangoapps.student.tests.factories import UserFactory
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from openedx.core.djangolib.testing.utils import skip_unless_lms
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 LOGGER_NAME = 'common.djangoapps.student.management.commands.bulk_change_enrollment_csv'
 
@@ -51,11 +51,11 @@ class BulkChangeEnrollmentCSVTests(SharedModuleStoreTestCase):
         """Write a test csv file with the lines provided"""
         csv.write(b"course_id,user,mode,\n")
         for line in lines:
-            csv.write(six.b(line))
+            csv.write(line.encode())
         csv.seek(0)
         return csv
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     def test_user_not_exist(self):
         """Verify that warning is logged for non existing user."""
         with NamedTemporaryFile() as csv:
@@ -71,7 +71,7 @@ class BulkChangeEnrollmentCSVTests(SharedModuleStoreTestCase):
                     )
                 )
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     def test_invalid_course_key(self):
         """Verify in case of invalid course key warning is logged."""
         with NamedTemporaryFile() as csv:
@@ -87,7 +87,7 @@ class BulkChangeEnrollmentCSVTests(SharedModuleStoreTestCase):
                     )
                 )
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     def test_already_enrolled_student(self):
         """ Verify in case if a user is already enrolled warning is logged."""
         with NamedTemporaryFile() as csv:
@@ -107,7 +107,7 @@ class BulkChangeEnrollmentCSVTests(SharedModuleStoreTestCase):
                     )
                 )
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     def test_bulk_enrollment(self):
         """ Test all users are enrolled using the command."""
         lines = [
@@ -124,7 +124,7 @@ class BulkChangeEnrollmentCSVTests(SharedModuleStoreTestCase):
             assert new_enrollment.is_active is True
             assert new_enrollment.mode == CourseMode.VERIFIED
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     def test_bulk_enrollment_from_config_model(self):
         """ Test all users are enrolled using the config model."""
         lines = "course_id,user,mode\n"
@@ -140,7 +140,7 @@ class BulkChangeEnrollmentCSVTests(SharedModuleStoreTestCase):
             assert new_enrollment.is_active is True
             assert new_enrollment.mode == CourseMode.VERIFIED
 
-    @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+    @skip_unless_lms
     def test_command_error_for_config_model(self):
         """ Test command error raised if file_from_database is required and the config model is not enabled"""
 

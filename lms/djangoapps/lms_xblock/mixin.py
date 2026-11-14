@@ -2,7 +2,7 @@
 Namespace that defines fields common to all blocks used in the LMS
 """
 
-#from django.utils.translation import ugettext_noop as _
+#from django.utils.translation import gettext_noop as _
 
 
 from lazy import lazy
@@ -12,8 +12,11 @@ from xblock.fields import Boolean, Dict, Scope, String
 from xblock.validation import ValidationMessage
 
 from lms.lib.utils import is_unit
-from xmodule.modulestore.inheritance import UserPartitionList
-from xmodule.partitions.partitions import NoSuchUserPartitionError, NoSuchUserPartitionGroupError
+from xmodule.modulestore.inheritance import UserPartitionList  # pylint: disable=wrong-import-order
+from xmodule.partitions.partitions import (  # pylint: disable=wrong-import-order
+    NoSuchUserPartitionError,
+    NoSuchUserPartitionGroupError,
+)
 
 # Please do not remove, this is a workaround for Django 1.8.
 # more information can be found here: https://openedx.atlassian.net/browse/PLAT-902
@@ -53,13 +56,13 @@ class LmsBlockMixin(XBlockMixin):
     Mixin that defines fields common to all blocks used in the LMS
     """
     hide_from_toc = Boolean(
-        help=_("Whether to display this module in the table of contents"),
+        help=_("Whether to display this block in the table of contents"),
         default=False,
         scope=Scope.settings
     )
     format = String(
         # Translators: "TOC" stands for "Table of Contents"
-        help=_("What format this module is in (used for deciding which "
+        help=_("What format this block is in (used for deciding which "
                "grader to apply, and what to show in the TOC)"),
         scope=Scope.settings,
     )
@@ -196,13 +199,13 @@ class LmsBlockMixin(XBlockMixin):
         """
         Validates the state of this xblock instance.
         """
-        _ = self.runtime.service(self, "i18n").ugettext
+        _ = self.runtime.service(self, "i18n").gettext
         validation = super().validate()
         has_invalid_user_partitions = False
         has_invalid_groups = False
         block_is_unit = is_unit(self)
 
-        for user_partition_id, group_ids in self.group_access.items():  # lint-amnesty, pylint:disable=no-member
+        for user_partition_id, group_ids in self.group_access.items():  # pylint:disable=no-member
             try:
                 user_partition = self._get_user_partition(user_partition_id)
             except NoSuchUserPartitionError:
@@ -252,7 +255,7 @@ class LmsBlockMixin(XBlockMixin):
         Publish completion data from the front end.
         """
         completion_service = self.runtime.service(self, 'completion')
-        if completion_service is None:  # lint-amnesty, pylint: disable=no-else-raise
+        if completion_service is None:  # pylint: disable=no-else-raise
             raise JsonHandlerError(500, "No completion service found")
         elif not completion_service.completion_tracking_enabled():
             raise JsonHandlerError(404, "Completion tracking is not enabled and API calls are unexpected")

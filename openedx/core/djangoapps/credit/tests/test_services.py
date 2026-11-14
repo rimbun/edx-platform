@@ -3,15 +3,21 @@ Tests for the Credit xBlock service
 """
 
 
+from datetime import datetime
+from unittest.mock import patch
+
 import ddt
 
 from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.student.models import CourseEnrollment, UserProfile
+from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.credit.api.eligibility import set_credit_requirements
 from openedx.core.djangoapps.credit.models import CreditCourse
 from openedx.core.djangoapps.credit.services import CreditService
-from common.djangoapps.student.models import CourseEnrollment, UserProfile
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
@@ -202,7 +208,7 @@ class CreditServiceTests(ModuleStoreTestCase):
         )
 
         # mark the grade as satisfied
-        retval = self.service.set_credit_requirement_status(  # lint-amnesty, pylint: disable=assignment-from-none
+        retval = self.service.set_credit_requirement_status(  # pylint: disable=assignment-from-none
             self.user.id,
             self.course.id,
             'grade',
@@ -211,7 +217,7 @@ class CreditServiceTests(ModuleStoreTestCase):
         assert retval is None
 
         # remove the requirement status with the invalid user id
-        retval = self.service.remove_credit_requirement_status(  # lint-amnesty, pylint: disable=assignment-from-none
+        retval = self.service.remove_credit_requirement_status(  # pylint: disable=assignment-from-none
             0,
             self.course.id,
             'grade',
@@ -260,6 +266,26 @@ class CreditServiceTests(ModuleStoreTestCase):
         credit_state = self.service.get_credit_state(self.user.id, self.course.id, return_course_info=True)
         assert 'course_name' in credit_state
         assert credit_state['course_name'] == self.course.display_name
+
+    @patch("openedx.core.djangoapps.credit.services.log")
+    def test_get_info_from_non_existent_course(self, exception_log):
+        """
+        Make sure we catch the CourseOverview.DoesNotExist exception and log it instead of raising
+        """
+        with patch("openedx.core.djangoapps.content.course_overviews.models.CourseOverview.get_from_id",
+                   side_effect=CourseOverview.DoesNotExist):
+
+            self.enroll()
+            credit_state = self.service.get_credit_state(self.user.id, self.course.id, return_course_info=True)
+
+            assert credit_state is not None
+            # When exception is caught, the course_end_date should always be in past
+            assert credit_state["course_end_date"] < datetime.now()
+
+            exception_log.exception.assert_called_once_with(
+                "Could not get name and end_date for course %s, This happened because we were unable to "
+                "get/create CourseOverview object for the course. It's possible that the Course has been deleted.",
+                str(self.course.id))
 
     def test_set_status_non_credit(self):
         """
@@ -350,7 +376,7 @@ class CreditServiceTests(ModuleStoreTestCase):
         )
 
         # mark the grade as satisfied
-        retval = self.service.set_credit_requirement_status(  # lint-amnesty, pylint: disable=assignment-from-none
+        retval = self.service.set_credit_requirement_status(  # pylint: disable=assignment-from-none
             0,
             self.course.id,
             'grade',

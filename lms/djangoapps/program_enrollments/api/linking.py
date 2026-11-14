@@ -11,6 +11,7 @@ import logging
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from requests.structures import CaseInsensitiveDict
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.student.api import get_access_role_by_role_name
@@ -106,7 +107,7 @@ def link_program_enrollments(program_uuid, external_keys_to_usernames):
                 # the requested user, then we should sever the link to the existing edX user before
                 # linking the ProgramEnrollment to the new user.
                 if program_enrollment.user and program_enrollment.user != user:
-                    message = ('Unlinking user with username={old_username} from program enrollment with '
+                    message = ('Unlinking user with username={old_username} from program enrollment with '  # noqa: UP032  # pylint: disable=line-too-long
                                'program uuid={program_uuid} with external_student_key={external_user_key} '
                                'and linking user with username={new_username} '
                                'to program enrollment.').format(
@@ -122,7 +123,7 @@ def link_program_enrollments(program_uuid, external_keys_to_usernames):
 
                 link_program_enrollment_to_lms_user(program_enrollment, user)
         except (CourseEnrollmentException, IntegrityError) as e:
-            logger.exception("Rolling back all operations for {}:{}".format(
+            logger.exception("Rolling back all operations for {}:{}".format(  # noqa: UP032
                 external_user_key,
                 username,
             ))
@@ -158,10 +159,10 @@ def _get_program_enrollments_by_ext_key(program_uuid, external_user_keys):
     ).prefetch_related(
         'program_course_enrollments'
     ).select_related('user')
-    return {
+    return CaseInsensitiveDict({
         program_enrollment.external_user_key: program_enrollment
         for program_enrollment in program_enrollments
-    }
+    })
 
 
 def _get_lms_users(lms_usernames):
@@ -222,7 +223,7 @@ def link_program_enrollment_to_lms_user(program_enrollment, user):
             program course enrollment
             IntegrityError if we try to create invalid records.
     """
-    link_log_info = 'user id={} with external_user_key={} for program uuid={}'.format(
+    link_log_info = 'user id={} with external_user_key={} for program uuid={}'.format(  # noqa: UP032
         user.id,
         program_enrollment.external_user_key,
         program_enrollment.program_uuid,
@@ -243,7 +244,7 @@ def link_program_enrollment_to_lms_user(program_enrollment, user):
         raise
     except CourseEnrollmentException as e:
         logger.error(
-            "CourseEnrollmentException while linking {}: {}".format(
+            "CourseEnrollmentException while linking {}: {}".format(  # noqa: UP032
                 link_log_info, str(e)
             )
         )

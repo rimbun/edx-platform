@@ -7,7 +7,7 @@ define([
 ], function($, _, gettext, moment, PromptView, HtmlUtils) {
     'use strict';
 
-    /** ******** Private properties ****************************************/
+    /** ******** Private properties *************************************** */
 
     var COOKIE_NAME = 'lastexport';
 
@@ -28,7 +28,6 @@ define([
     var courselikeHomeUrl;
     var current = {stage: 0, state: STATE.READY, downloadUrl: null};
     var deferred = null;
-    var isLibrary = false;
     var statusUrl = null;
     var successUnixDate = null;
     var timeout = {id: null, delay: 1000};
@@ -39,7 +38,7 @@ define([
         wrapper: $('div.wrapper-status')
     };
 
-    /** ******** Private functions *****************************************/
+    /** ******** Private functions **************************************** */
 
     /**
      * Makes Export feedback status list visible
@@ -117,8 +116,8 @@ define([
             _.map($dom.stages, completeStage);
 
             $dom.successStage
-                    .find('.item-progresspoint-success-date')
-                    .text('(' + date + ' at ' + time + ' UTC)');
+                .find('.item-progresspoint-success-date')
+                .text('(' + date + ' at ' + time + ' UTC)');
 
             break;
 
@@ -181,7 +180,7 @@ define([
         }), {path: window.location.pathname});
     };
 
-    /** ******** Public functions ******************************************/
+    /** ******** Public functions ***************************************** */
 
     var CourseExport = {
         /**
@@ -191,7 +190,7 @@ define([
          * @return {JSON} the data of the previous export
          */
         storedExport: function(contentHomeUrl) {
-            var storedData = JSON.parse($.cookie(COOKIE_NAME));
+            var storedData = JSON.parse($.cookie(COOKIE_NAME) || null);
             if (storedData) {
                 successUnixDate = storedData.date;
             }
@@ -264,11 +263,10 @@ define([
          * Resets the Export internally and visually
          *
          */
-        reset: function(library) {
+        reset: function() {
             current.stage = STAGE.PREPARING;
             current.state = STATE.READY;
             current.downloadUrl = null;
-            isLibrary = library;
 
             clearTimeout(timeout.id);
             updateFeedbackList();
@@ -280,9 +278,8 @@ define([
          *
          * @return {jQuery promise}
          */
-        resume: function(library) {
+        resume: function() {
             deferred = $.Deferred();
-            isLibrary = library;
             statusUrl = this.storedExport().statusUrl;
 
             $.getJSON(statusUrl, function(data) {
@@ -310,10 +307,10 @@ define([
             if (editUnitUrl) {
                 dialog = new PromptView({
                     title: gettext('There has been an error while exporting.'),
-                    message: gettext('There has been a failure to export to XML at least one component. ' +
-                        'It is recommended that you go to the edit page and repair the error before attempting ' +
-                        'another export. Please check that all components on the page are valid and do not display ' +
-                        'any error messages.'),
+                    message: gettext('There has been a failure to export to XML at least one component. '
+                        + 'It is recommended that you go to the edit page and repair the error before attempting '
+                        + 'another export. Please check that all components on the page are valid and do not display '
+                        + 'any error messages.'),
                     intent: 'error',
                     actions: {
                         primary: {
@@ -332,17 +329,10 @@ define([
                     }
                 });
             } else {
-                if (isLibrary) {
-                    msg += gettext('Your library could not be exported to XML. There is not enough information to ' +
-                        'identify the failed component. Inspect your library to identify any problematic components ' +
-                        'and try again.');
-                    action = gettext('Take me to the main library page');
-                } else {
-                    msg += gettext('Your course could not be exported to XML. There is not enough information to ' +
-                        'identify the failed component. Inspect your course to identify any problematic components ' +
-                        'and try again.');
-                    action = gettext('Take me to the main course page');
-                }
+                msg += gettext('Your course could not be exported to XML. There is not enough information to '
+                    + 'identify the failed component. Inspect your course to identify any problematic components '
+                    + 'and try again.');
+                action = gettext('Take me to the main course page');
                 msg += ' ' + gettext('The raw error message is:') + ' ' + errMsg;
                 dialog = new PromptView({
                     title: gettext('There has been an error with your export.'),

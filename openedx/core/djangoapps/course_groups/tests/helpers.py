@@ -10,8 +10,8 @@ from factory.django import DjangoModelFactory
 from opaque_keys.edx.locator import CourseLocator
 
 from openedx.core.djangoapps.django_comment_common.models import CourseDiscussionSettings
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 from ..cohorts import set_course_cohorted
 from ..models import CohortMembership, CourseCohort, CourseCohortsSettings, CourseUserGroup
@@ -34,8 +34,8 @@ class CohortFactory(DjangoModelFactory):
         Returns the users associated with the cohort.
         """
         if extracted:
-            self.users.add(*extracted)  # lint-amnesty, pylint: disable=no-member
-            for user in self.users.all():  # lint-amnesty, pylint: disable=no-member
+            self.users.add(*extracted)  # pylint: disable=no-member
+            for user in self.users.all():  # pylint: disable=no-member
                 CohortMembership.objects.create(
                     user=user,
                     course_user_group=self,
@@ -70,7 +70,7 @@ def config_course_cohorts_legacy(
 ):
     """
     Given a course with no discussion set up, add the discussions and set
-    the cohort config on the course descriptor.
+    the cohort config on the course block.
 
     Since cohort settings are now stored in models.CourseCohortSettings,
     this is only used for testing data migration from the CourseBlock
@@ -105,8 +105,8 @@ def config_course_cohorts(
         course,
         is_cohorted,
         discussion_division_scheme=CourseDiscussionSettings.COHORT,
-        auto_cohorts=[],
-        manual_cohorts=[],
+        auto_cohorts=[],  # noqa: B006
+        manual_cohorts=[],  # noqa: B006
 ):
     """
     Set and configure cohorts for a course.

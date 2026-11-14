@@ -3,37 +3,45 @@ Objects and utilities used to construct registration forms.
 """
 
 import copy
-from importlib import import_module
+import logging
 import re
+from importlib import import_module
 
 from django import forms
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
-from django.core.exceptions import ImproperlyConfigured
-from django.core.validators import RegexValidator, ValidationError, slug_re
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.validators import RegexValidator, slug_re
+from django.db.models import Model
 from django.forms import widgets
 from django.urls import reverse
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from django_countries import countries
+from eventtracking import tracker
+from openedx_filters.authentication.filters import RegistrationFormGenerated
 
 from common.djangoapps import third_party_auth
 from common.djangoapps.edxmako.shortcuts import marketing_link
-from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
-from openedx.core.djangoapps.user_api import accounts
-from openedx.core.djangoapps.user_api.helpers import FormDescription
-from openedx.core.djangoapps.user_authn.utils import is_registration_api_v1 as is_api_v1
-from openedx.core.djangolib.markup import HTML, Text
-from openedx.features.enterprise_support.api import enterprise_customer_for_request
-from common.djangoapps.student.models import (
-    CourseEnrollmentAllowed,
-    UserProfile,
-    email_exists_or_retired,
-)
+from common.djangoapps.student.models import CourseEnrollmentAllowed, UserProfile, email_exists_or_retired
+from common.djangoapps.third_party_auth.models import SAMLProviderConfig
 from common.djangoapps.util.password_policy_validators import (
     password_validators_instruction_texts,
     password_validators_restrictions,
     validate_password,
 )
+from openedx.core.djangoapps.embargo.models import GlobalRestrictedCountry
+from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from openedx.core.djangoapps.user_api import accounts
+from openedx.core.djangoapps.user_api.helpers import FormDescription
+from openedx.core.djangoapps.user_authn.utils import check_pwned_password
+from openedx.core.djangoapps.user_authn.utils import is_registration_api_v1 as is_api_v1
+from openedx.core.djangoapps.user_authn.views.utils import (
+    get_running_third_party_auth_state,
+    remove_disabled_country_from_list,
+)
+from openedx.core.djangolib.markup import HTML, Text
+
+log = logging.getLogger(__name__)
 
 
 class TrueCheckbox(widgets.CheckboxInput):
@@ -66,7 +74,7 @@ def validate_username(username):
     flags = None
     message = accounts.USERNAME_INVALID_CHARS_ASCII
 
-    if settings.FEATURES.get("ENABLE_UNICODE_USERNAME"):
+    if getattr(settings, 'ENABLE_UNICODE_USERNAME', False):
         username_re = fr"^{settings.USERNAME_REGEX_PARTIAL}$"
         flags = re.UNICODE
         message = accounts.USERNAME_INVALID_CHARS_UNICODE
@@ -93,7 +101,7 @@ def contains_url(value):
     """
     Validator method to check whether full name contains url
     """
-    regex = re.findall(r'https|http?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', value)
+    regex = re.findall(r'://', value)
     return bool(regex)
 
 
@@ -116,7 +124,7 @@ class UsernameField(forms.CharField):
 
     default_validators = [validate_username]
 
-    def __init__(self, *args, **kwargs):  # lint-amnesty, pylint: disable=unused-argument
+    def __init__(self, *args, **kwargs):  # pylint: disable=unused-argument
         super().__init__(
             min_length=accounts.USERNAME_MIN_LENGTH,
             max_length=accounts.USERNAME_MAX_LENGTH,
@@ -146,6 +154,7 @@ class AccountCreationForm(forms.Form):
 
     _EMAIL_INVALID_MSG = _("A properly formatted e-mail is required")
     _NAME_TOO_SHORT_MSG = _("Your legal name must be a minimum of one character long")
+    _NAME_TOO_LONG_MSG = _("Your legal name is too long. It must not exceed %(max_length)s characters")
 
     # TODO: Resolve repetition
 
@@ -165,9 +174,11 @@ class AccountCreationForm(forms.Form):
 
     name = forms.CharField(
         min_length=accounts.NAME_MIN_LENGTH,
+        max_length=accounts.NAME_MAX_LENGTH,
         error_messages={
             "required": _NAME_TOO_SHORT_MSG,
             "min_length": _NAME_TOO_SHORT_MSG,
+            "max_length": _NAME_TOO_LONG_MSG % {"max_length": accounts.NAME_MAX_LENGTH},
         },
         validators=[validate_name]
     )
@@ -238,6 +249,18 @@ class AccountCreationForm(forms.Form):
             email = self.cleaned_data.get('email')
             temp_user = User(username=username, email=email) if username else None
             validate_password(password, temp_user)
+
+            if settings.ENABLE_AUTHN_REGISTER_HIBP_POLICY:
+                # Checks the Pwned Databases for password vulnerability.
+                pwned_properties = check_pwned_password(password)
+
+                if (
+                    pwned_properties.get('vulnerability', 'no') == 'yes' and
+                    pwned_properties.get('frequency', 0) >= settings.HIBP_REGISTRATION_PASSWORD_FREQUENCY_THRESHOLD
+                ):
+                    pwned_properties['user_request_page'] = 'registration'
+                    tracker.emit('edx.bi.user.pwned.password.status', pwned_properties)
+                    raise ValidationError(accounts.AUTHN_PASSWORD_COMPROMISED_MSG)
         return password
 
     def clean_email(self):
@@ -284,18 +307,79 @@ class AccountCreationForm(forms.Form):
             if key in self.extended_profile_fields and value is not None
         }
 
+    def clean_country(self):
+        """
+        Check if the user's country is in the embargoed countries list.
+        """
+        country = self.cleaned_data.get("country")
+        if (
+            settings.EMBARGO and
+            country in GlobalRestrictedCountry.get_countries()
+        ):
+            raise ValidationError(_("Registration from this country is not allowed due to restrictions."))
+        return self.cleaned_data.get("country")
 
-def get_registration_extension_form(*args, **kwargs):
-    """
-    Convenience function for getting the custom form set in settings.REGISTRATION_EXTENSION_FORM.
 
-    An example form app for this can be found at http://github.com/open-craft/custom-form-app
+def get_profile_extension_form(*args, **kwargs) -> forms.Form | None:
     """
-    if not getattr(settings, 'REGISTRATION_EXTENSION_FORM', None):
+    Get an instance of the custom profile extension form.
+
+    This form is configured via the `PROFILE_EXTENSION_FORM` Django setting
+
+    Args:
+        *args: Variable length argument list passed to the form's __init__ method.
+        **kwargs: Arbitrary keyword arguments passed to the form's __init__ method.
+
+    Returns:
+        forms.Form | None: An initialized form instance, or None if the setting
+        is not configured or the form fails to load.
+
+    References:
+        An example form app for this can be found at:
+        http://github.com/open-craft/custom-form-app
+    """
+    setting_value = getattr(settings, "PROFILE_EXTENSION_FORM", None)
+
+    if not setting_value:
         return None
-    module, klass = settings.REGISTRATION_EXTENSION_FORM.rsplit('.', 1)
-    module = import_module(module)
-    return getattr(module, klass)(*args, **kwargs)
+
+    try:
+        module, klass = setting_value.rsplit(".", 1)
+        module = import_module(module)
+        return getattr(module, klass)(*args, **kwargs)
+    except (ValueError, ImportError, AttributeError) as e:
+        log.error("Could not load form from PROFILE_EXTENSION_FORM='%s': %s", setting_value, str(e))
+        return None
+
+
+def get_profile_extension_model() -> type[Model] | None:
+    """
+    Get the model class associated with the custom profile extension form.
+
+    This extracts the model from the Meta class of the form specified in
+    the `PROFILE_EXTENSION_FORM` Django setting.
+
+    Returns:
+        type[Model] | None: The Django model class if the setting is configured
+        and valid, None otherwise.
+
+    Examples:
+        # In settings.py: PROFILE_EXTENSION_FORM = 'myapp.forms.ExtensionForm'
+        model_class = get_profile_extension_model()
+    """
+    setting_value = getattr(settings, "PROFILE_EXTENSION_FORM", None)
+
+    if not setting_value:
+        return None
+
+    try:
+        module_path, klass_name = setting_value.rsplit(".", 1)
+        module = import_module(module_path)
+        form_class = getattr(module, klass_name)
+        return getattr(form_class.Meta, "model", None)
+    except (ValueError, ImportError, AttributeError) as e:
+        log.warning("Could not load extended profile model from PROFILE_EXTENSION_FORM='%s': %s", setting_value, e)
+        return None
 
 
 class RegistrationFormFactory:
@@ -305,36 +389,57 @@ class RegistrationFormFactory:
 
     DEFAULT_FIELDS = ["email", "name", "username", "password"]
 
-    EXTRA_FIELDS = [
-        "confirm_email",
-        "first_name",
-        "last_name",
-        "city",
-        "state",
-        "country",
-        "gender",
-        "year_of_birth",
-        "level_of_education",
-        "company",
-        "job_title",
-        "title",
-        "mailing_address",
-        "goals",
-        "honor_code",
-        "terms_of_service",
-        "profession",
-        "specialty",
-    ]
-
     def _is_field_visible(self, field_name):
         """Check whether a field is visible based on Django settings. """
-        return self._extra_fields_setting.get(field_name) in ["required", "optional"]
+        is_visible = self._extra_fields_setting.get(field_name) in ["required", "optional", "optional-exposed"]
+
+        # If SAML provider config wants to skip optional checkboxes, hide marketing_emails_opt_in
+        if is_visible and field_name == 'marketing_emails_opt_in':
+            saml_config = self._get_saml_provider_config()
+            if saml_config and saml_config.skip_registration_optional_checkboxes:
+                log.info(
+                    "SAML provider %s has skip_registration_optional_checkboxes=True, "
+                    "hiding marketing_emails_opt_in field",
+                    saml_config.slug
+                )
+                return False
+
+        return is_visible
 
     def _is_field_required(self, field_name):
         """Check whether a field is required based on Django settings. """
         return self._extra_fields_setting.get(field_name) == "required"
 
+    def _is_field_exposed(self, field_name):
+        """Check whether a field is optional and should be toggled. """
+        return self._extra_fields_setting.get(field_name) in ["required", "optional-exposed"]
+
     def __init__(self):
+
+        self.EXTRA_FIELDS = [
+            "confirm_email",
+            "first_name",
+            "last_name",
+            "city",
+            "state",
+            "country",
+            "gender",
+            "year_of_birth",
+            "level_of_education",
+            "company",
+            "job_title",
+            "title",
+            "mailing_address",
+            "goals",
+            "honor_code",
+            "terms_of_service",
+            "profession",
+            "specialty",
+            "marketing_emails_opt_in",
+        ]
+
+        if settings.ENABLE_COPPA_COMPLIANCE and 'year_of_birth' in self.EXTRA_FIELDS:
+            self.EXTRA_FIELDS.remove('year_of_birth')
 
         # Backwards compatibility: Honor code is required by default, unless
         # explicitly set to "optional" in Django settings.
@@ -342,6 +447,9 @@ class RegistrationFormFactory:
         if not self._extra_fields_setting:
             self._extra_fields_setting = copy.deepcopy(settings.REGISTRATION_EXTRA_FIELDS)
         self._extra_fields_setting["honor_code"] = self._extra_fields_setting.get("honor_code", "required")
+
+        if settings.MARKETING_EMAILS_OPT_IN:
+            self._extra_fields_setting['marketing_emails_opt_in'] = 'optional'
 
         # Check that the setting is configured correctly
         for field_name in self.EXTRA_FIELDS:
@@ -356,7 +464,7 @@ class RegistrationFormFactory:
             handler = getattr(self, f"_add_{field_name}_field")
             self.field_handlers[field_name] = handler
 
-        custom_form = get_registration_extension_form()
+        custom_form = get_profile_extension_form()
         if custom_form:
             custom_form_field_names = [field_name for field_name, field in custom_form.fields.items()]
             valid_fields.extend(custom_form_field_names)
@@ -372,6 +480,62 @@ class RegistrationFormFactory:
             field_order.extend(sorted(difference))
 
         self.field_order = field_order
+        self.request = None  # Will be set by get_registration_form
+
+    def _get_saml_provider_config(self):
+        """
+        Get the SAML provider config for the current request's running pipeline.
+
+        Returns:
+            SAMLProviderConfig or None: The SAML provider config if found, None otherwise
+        """
+        if not self.request or not third_party_auth.is_enabled():
+            return None
+
+        running_pipeline = third_party_auth.pipeline.get(self.request)
+        if not running_pipeline:
+            return None
+
+        try:
+            # idp_name can be in kwargs directly, in kwargs['details'], or in kwargs['response']
+            saml_provider_name = running_pipeline.get('kwargs', {}).get('idp_name')
+            if not saml_provider_name:
+                saml_provider_name = (
+                    running_pipeline.get('kwargs', {})
+                    .get('details', {})
+                    .get('idp_name')
+                )
+            if not saml_provider_name:
+                saml_provider_name = (
+                    running_pipeline.get('kwargs', {})
+                    .get('response', {})
+                    .get('idp_name')
+                )
+
+            if not saml_provider_name:
+                return None
+
+            try:
+                # Try to find the SAML provider config
+                # First try with current_set(), then fall back to direct query
+                try:
+                    return SAMLProviderConfig.objects.current_set().get(
+                        slug=saml_provider_name
+                    )
+                except SAMLProviderConfig.DoesNotExist:
+                    # Fallback to direct query without current_set()
+                    return SAMLProviderConfig.objects.get(
+                        slug=saml_provider_name
+                    )
+            except SAMLProviderConfig.DoesNotExist:
+                log.debug(
+                    "SAML provider config not found for idp_name: %s",
+                    saml_provider_name
+                )
+                return None
+        except Exception as exc:  # pylint: disable=broad-except
+            log.debug("Error getting SAML provider config: %s", str(exc))
+            return None
 
     def get_registration_form(self, request):
         """Return a description of the registration form.
@@ -388,11 +552,26 @@ class RegistrationFormFactory:
         Returns:
             HttpResponse
         """
+        self.request = request
         form_desc = FormDescription("post", self._get_registration_submit_url(request))
-        self._apply_third_party_auth_overrides(request, form_desc)
 
-        # Custom form fields can be added via the form set in settings.REGISTRATION_EXTENSION_FORM
-        custom_form = get_registration_extension_form()
+        # Field property overrides applied below take effect when the fields are added in
+        # the loop, so they must be applied before the field loop. The platform's own
+        # third-party-auth overrides are applied first; the filter runs afterwards so its
+        # pipeline steps can further adjust the form description.
+        running_pipeline, current_provider = get_running_third_party_auth_state(request)
+        form_desc = self._apply_third_party_auth_overrides(form_desc, running_pipeline, current_provider)
+
+        # .. filter_implemented_name: RegistrationFormGenerated
+        # .. filter_type: org.openedx.authentication.registration.form.generated.v1
+        form_desc, running_pipeline, current_provider = RegistrationFormGenerated.run_filter(
+            form_desc=form_desc,
+            running_pipeline=running_pipeline,
+            current_provider=current_provider,
+        )
+
+        # Custom form fields can be added via the form set in settings.PROFILE_EXTENSION_FORM
+        custom_form = get_profile_extension_form()
         if custom_form:
             custom_form_field_names = [field_name for field_name, field in custom_form.fields.items()]
         else:
@@ -423,7 +602,7 @@ class RegistrationFormFactory:
                             FormDescription.FIELD_TYPE_MAP.get(field.__class__))
                         if not field_type:
                             raise ImproperlyConfigured(
-                                u"Field type '{}' not recognized for registration extension field '{}'.".format(
+                                "Field type '{}' not recognized for registration extension field '{}'.".format(  # noqa: UP032  # pylint: disable=line-too-long
                                     field_type,
                                     field_name
                                 )
@@ -438,6 +617,7 @@ class RegistrationFormFactory:
                                     FormDescription.FIELD_TYPE_MAP.get(field.__class__)),
                                 placeholder=field.initial,
                                 instructions=field.help_text,
+                                exposed=self._is_field_exposed(field_name),
                                 required=(self._is_field_required(field_name) or field.required),
                                 restrictions=restrictions,
                                 options=getattr(field, 'choices', None), error_messages=field.error_messages,
@@ -592,7 +772,10 @@ class RegistrationFormFactory:
 
         # The labels are marked for translation in UserProfile model definition.
         # pylint: disable=translation-of-non-string
+
         options = [(name, _(label)) for name, label in UserProfile.LEVEL_OF_EDUCATION_CHOICES]
+        if settings.ENABLE_COPPA_COMPLIANCE:
+            options = filter(lambda op: op[0] != 'el', options)
         form_desc.add_field(
             "level_of_education",
             label=education_level_label,
@@ -647,6 +830,50 @@ class RegistrationFormFactory:
             options=options,
             include_default_option=True,
             required=required
+        )
+
+    def _add_marketing_emails_opt_in_field(self, form_desc, required=False):
+        """Add a marketing email checkbox to form description.
+
+        If a SAML provider config has skip_registration_optional_checkboxes=True,
+        the field will default to False (opt-out) and not be required, overriding
+        the global settings.
+
+        Arguments:
+            form_desc: A form description
+        Keyword Arguments:
+            required (bool): Whether this field is required; defaults to False
+        """
+        opt_in_label = _(
+            'I agree that {platform_name} may send me marketing messages.').format(
+            platform_name=configuration_helpers.get_value('PLATFORM_NAME', settings.PLATFORM_NAME),
+        )
+
+        # Default: checkbox is checked, field requirement follows the passed parameter
+        default_value = True
+        field_required = required
+        field_exposed = True
+
+        # Check if SAML provider wants to skip optional checkboxes
+        # This overrides both global settings and provider field overrides
+        saml_config = self._get_saml_provider_config()
+        if saml_config and saml_config.skip_registration_optional_checkboxes:
+            log.info(
+                "SAML provider %s has skip_registration_optional_checkboxes=True, "
+                "hiding field and setting default to False",
+                saml_config.slug
+            )
+            default_value = False  # User opts out by default when field is skipped
+            field_required = False  # Make field optional
+            field_exposed = False  # Hide the field from the form
+
+        form_desc.add_field(
+            'marketing_emails_opt_in',
+            label=opt_in_label,
+            field_type="checkbox",
+            exposed=field_exposed,
+            default=default_value,
+            required=field_required,
         )
 
     def _add_field_with_configurable_select_options(self, field_name, field_label, form_desc, required=False):
@@ -919,13 +1146,12 @@ class RegistrationFormFactory:
                 'country',
                 default=default_country.upper()
             )
-
         form_desc.add_field(
             "country",
             label=country_label,
             instructions=country_instructions,
             field_type="select",
-            options=list(countries),
+            options=list(remove_disabled_country_from_list(dict(countries)).items()),
             include_default_option=True,
             required=required,
             error_messages={
@@ -1049,7 +1275,7 @@ class RegistrationFormFactory:
             },
         )
 
-    def _apply_third_party_auth_overrides(self, request, form_desc):
+    def _apply_third_party_auth_overrides(self, form_desc, running_pipeline, current_provider):
         """Modify the registration form if the user has authenticated with a third-party provider.
         If a user has successfully authenticated with a third-party provider,
         but does not yet have an account with EdX, we want to fill in
@@ -1059,77 +1285,87 @@ class RegistrationFormFactory:
         (random) password on the assumption that they will be using
         third-party auth to log in.
         Arguments:
-            request (HttpRequest): The request for the registration form, used
-                to determine if the user has successfully authenticated
-                with a third-party provider.
             form_desc (FormDescription): The registration form description
+            running_pipeline (dict): The third party auth pipeline running for the request,
+                or None if there is none.
+            current_provider (ProviderConfig): The provider of the running pipeline, or None
+                if there is no running pipeline or its provider could not be determined.
+        Returns:
+            FormDescription: the (possibly modified) registration form description
         """
-        # pylint: disable=too-many-nested-blocks
-        if third_party_auth.is_enabled():
-            running_pipeline = third_party_auth.pipeline.get(request)
-            if running_pipeline:
-                current_provider = third_party_auth.provider.Registry.get_from_pipeline(running_pipeline)
+        if current_provider:
+            # Override username / email / full name
+            field_overrides = current_provider.get_register_form_data(
+                running_pipeline.get('kwargs')
+            )
 
-                if current_provider:
-                    # Override username / email / full name
-                    field_overrides = current_provider.get_register_form_data(
-                        running_pipeline.get('kwargs')
-                    )
+            hide_registration_fields_except_tos = current_provider.sync_learner_profile_data
 
-                    # When the TPA Provider is configured to skip the registration form and we are in an
-                    # enterprise context, we need to hide all fields except for terms of service and
-                    # ensure that the user explicitly checks that field.
-                    # pylint: disable=consider-using-ternary
-                    hide_registration_fields_except_tos = (
-                        (
-                            current_provider.skip_registration_form and enterprise_customer_for_request(request)
-                        ) or current_provider.sync_learner_profile_data
-                    )
+            for field_name in self.DEFAULT_FIELDS + self.EXTRA_FIELDS:
+                if field_name not in field_overrides:
+                    continue
 
-                    for field_name in self.DEFAULT_FIELDS + self.EXTRA_FIELDS:
-                        if field_name in field_overrides:
-                            form_desc.override_field_properties(
-                                field_name, default=field_overrides[field_name]
-                            )
+                # Special handling for marketing_emails_opt_in:
+                # If SAML provider config has skip_registration_optional_checkboxes=True,
+                # don't let the provider's get_register_form_data override the default
+                skip_override = False
+                if field_name == 'marketing_emails_opt_in':
+                    saml_config = self._get_saml_provider_config()
+                    if saml_config and saml_config.skip_registration_optional_checkboxes:
+                        log.debug(
+                            "Skipping provider override for marketing_emails_opt_in "
+                            "due to SAML config for provider: %s",
+                            saml_config.slug
+                        )
+                        skip_override = True
 
-                            if (
-                                field_name not in ['terms_of_service', 'honor_code'] and
-                                field_overrides[field_name] and
-                                hide_registration_fields_except_tos
-                            ):
-                                form_desc.override_field_properties(
-                                    field_name,
-                                    field_type="hidden",
-                                    label="",
-                                    instructions="",
-                                )
-
-                    # Hide the confirm_email field
+                if not skip_override:
                     form_desc.override_field_properties(
-                        "confirm_email",
-                        default="",
-                        field_type="hidden",
-                        required=False,
-                        label="",
-                        instructions="",
-                        restrictions={}
+                        field_name, default=field_overrides[field_name]
                     )
 
-                    # Hide the password field
-                    form_desc.override_field_properties(
-                        "password",
-                        default="",
-                        field_type="hidden",
-                        required=False,
-                        label="",
-                        instructions="",
-                        restrictions={}
-                    )
-                    # used to identify that request is running third party social auth
-                    form_desc.add_field(
-                        "social_auth_provider",
-                        field_type="hidden",
-                        label="",
-                        default=current_provider.name if current_provider.name else "Third Party",
-                        required=False,
-                    )
+                    if (
+                        field_name not in ['terms_of_service', 'honor_code'] and
+                        field_overrides[field_name] and
+                        hide_registration_fields_except_tos
+                    ):
+                        field_default = field_overrides[field_name]
+                        form_desc.override_field_properties(
+                            field_name,
+                            field_type="hidden",
+                            default=field_default,
+                            label="",
+                            instructions="",
+                        )
+
+            # Hide the confirm_email field
+            form_desc.override_field_properties(
+                "confirm_email",
+                default="",
+                field_type="hidden",
+                required=False,
+                label="",
+                instructions="",
+                restrictions={}
+            )
+
+            # Hide the password field
+            form_desc.override_field_properties(
+                "password",
+                default="",
+                field_type="hidden",
+                required=False,
+                label="",
+                instructions="",
+                restrictions={}
+            )
+            # used to identify that request is running third party social auth
+            form_desc.add_field(
+                "social_auth_provider",
+                field_type="hidden",
+                label="",
+                default=current_provider.name if current_provider.name else "Third Party",
+                required=False,
+            )
+
+        return form_desc

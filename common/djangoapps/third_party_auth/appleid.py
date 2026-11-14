@@ -75,11 +75,14 @@ import json
 import time
 
 import jwt
+import social_django
+from django.apps import apps
 from jwt.algorithms import RSAAlgorithm
 from jwt.exceptions import PyJWTError
-
 from social_core.backends.oauth import BaseOAuth2
 from social_core.exceptions import AuthFailed
+
+from common.djangoapps.third_party_auth.toggles import is_apple_user_migration_enabled
 
 
 class AppleIdAuth(BaseOAuth2):
@@ -178,7 +181,7 @@ class AppleIdAuth(BaseOAuth2):
                 algorithms=['RS256'],
             )
         except PyJWTError:
-            raise AuthFailed(self, 'Token validation failed')
+            raise AuthFailed(self, 'Token validation failed')  # noqa: B904
 
         return decoded
 
@@ -205,6 +208,34 @@ class AppleIdAuth(BaseOAuth2):
 
         return user_details
 
+    def get_user_id(self, details, response):
+        """
+        If Apple team has been migrated, return the correct team_scoped apple_id that matches
+        existing UserSocialAuth instance. Else return apple_id as received in response.
+        """
+        apple_id = super().get_user_id(details, response)
+
+        if is_apple_user_migration_enabled():
+            if social_django.models.DjangoStorage.user.get_social_auth(provider=self.name, uid=apple_id):
+                return apple_id
+
+            transfer_sub = response.get('transfer_sub')
+            if transfer_sub:
+                # Apple will send a transfer_sub till 60 days after the Apple Team has been migrated.
+                # If the team has been migrated and UserSocialAuth entries have not yet been updated
+                # with the new team-scoped apple-ids', use the transfer_sub to match to old apple ids'
+                # belonging to already signed-in users.
+                AppleMigrationUserIdInfo = apps.get_model('third_party_auth', 'AppleMigrationUserIdInfo')
+                user_apple_id_info = AppleMigrationUserIdInfo.objects.filter(transfer_id=transfer_sub).first()
+                if user_apple_id_info:
+                    old_apple_id = user_apple_id_info.old_apple_id
+                    if social_django.models.DjangoStorage.user.get_social_auth(provider=self.name, uid=old_apple_id):
+                        user_apple_id_info.new_apple_id = response.get(self.ID_KEY)
+                        user_apple_id_info.save()
+                        return user_apple_id_info.old_apple_id
+
+        return apple_id
+
     def do_auth(self, access_token, *args, **kwargs):
         response = kwargs.pop('response', None) or {}
         jwt_string = response.get(self.TOKEN_KEY) or access_token
@@ -216,6 +247,6 @@ class AppleIdAuth(BaseOAuth2):
         return super().do_auth(
             access_token,
             response=decoded_data,
-            *args,
+            *args,  # noqa: B026
             **kwargs
         )

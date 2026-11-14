@@ -22,7 +22,7 @@ class IndividualStudentOverrideProvider(FieldOverrideProvider):
         return get_override_for_user(self.user, block, name, default)
 
     @classmethod
-    def enabled_for(cls, course):
+    def enabled_for(cls, course):  # pylint: disable=arguments-differ
         """This simple override provider is always enabled"""
         return True
 
@@ -57,7 +57,7 @@ def _get_overrides_for_user(user, block):
         location = block.location
 
     query = StudentFieldOverride.objects.filter(
-        course_id=block.runtime.course_id,
+        course_id=block.scope_ids.usage_id.context_key,
         location=location,
         student_id=user.id,
     )
@@ -76,7 +76,7 @@ def override_field_for_user(user, block, name, value):
     value to set for the given field.
     """
     override, _ = StudentFieldOverride.objects.get_or_create(
-        course_id=block.runtime.course_id,
+        course_id=block.scope_ids.usage_id.context_key,
         location=block.location,
         student_id=user.id,
         field=name)
@@ -94,7 +94,7 @@ def clear_override_for_user(user, block, name):
     """
     try:
         StudentFieldOverride.objects.get(
-            course_id=block.runtime.course_id,
+            course_id=block.scope_ids.usage_id.context_key,
             student_id=user.id,
             location=block.location,
             field=name).delete()

@@ -5,14 +5,14 @@ Asynchronous tasks for the LTI provider app.
 
 import logging
 
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from opaque_keys.edx.keys import CourseKey
 
 import lms.djangoapps.lti_provider.outcomes as outcomes
 from lms import CELERY_APP
 from lms.djangoapps.grades.api import CourseGradeFactory
 from lms.djangoapps.lti_provider.models import GradedAssignment
-from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def send_composite_outcome(user_id, course_id, assignment_id, version):
     user = User.objects.get(id=user_id)
     course = modulestore().get_course(course_key, depth=0)
     course_grade = CourseGradeFactory().read(user, course)
-    earned, possible = course_grade.score_for_module(mapped_usage_key)
+    earned, possible = course_grade.score_for_block(mapped_usage_key)
     if possible == 0:
         weighted_score = 0
     else:

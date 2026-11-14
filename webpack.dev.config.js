@@ -9,7 +9,7 @@ var _ = require('underscore');
 
 var commonConfig = require('./webpack.common.config.js');
 
-module.exports = _.values(Merge.smart(commonConfig, {
+module.exports = _.values(Merge.merge(commonConfig, {
     web: {
         output: {
             filename: '[name].js'
@@ -21,7 +21,9 @@ module.exports = _.values(Merge.smart(commonConfig, {
             }),
             new webpack.DefinePlugin({
                 'process.env.NODE_ENV': JSON.stringify('development'),
-                'process.env.JS_ENV_EXTRA_CONFIG': process.env.JS_ENV_EXTRA_CONFIG
+                'process.env.JS_ENV_EXTRA_CONFIG': process.env.JS_ENV_EXTRA_CONFIG || '{}',
+                'CAPTIONS_CONTENT_TO_REPLACE': JSON.stringify(process.env.CAPTIONS_CONTENT_TO_REPLACE || ''),
+                'CAPTIONS_CONTENT_REPLACEMENT': JSON.stringify(process.env.CAPTIONS_CONTENT_REPLACEMENT || '')
             })
         ],
         module: {
@@ -58,7 +60,7 @@ module.exports = _.values(Merge.smart(commonConfig, {
             ]
         },
         watchOptions: {
-            ignored: [/node_modules/, /\.git/]
+            ignored: ['/node_modules/', '/\.git/']
         }
     }
 }));

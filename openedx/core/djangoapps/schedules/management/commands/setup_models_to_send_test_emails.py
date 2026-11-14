@@ -5,9 +5,9 @@ A managment command that can be used to set up Schedules with various configurat
 
 import datetime
 from textwrap import dedent
+from zoneinfo import ZoneInfo
 
 import factory
-import pytz
 from django.contrib.sites.models import Site
 from django.core.management.base import BaseCommand
 
@@ -16,40 +16,43 @@ from openedx.core.djangoapps.schedules.models import ScheduleExperience
 from openedx.core.djangoapps.schedules.tests.factories import (
     ScheduleConfigFactory,
     ScheduleExperienceFactory,
-    ScheduleFactory
+    ScheduleFactory,
 )
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.factories import XMODULE_FACTORY_LOCK, CourseFactory
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    XMODULE_FACTORY_LOCK,
+    CourseFactory,
+)
 
 
 class ThreeDayNudgeSchedule(ScheduleFactory):
     """
     A ScheduleFactory that creates a Schedule set up for a 3-day nudge email.
     """
-    start_date = factory.Faker('date_time_between', start_date='-3d', end_date='-3d', tzinfo=pytz.UTC)
+    start_date = factory.Faker('date_time_between', start_date='-3d', end_date='-3d', tzinfo=ZoneInfo("UTC"))
 
 
 class TenDayNudgeSchedule(ScheduleFactory):
     """
     A ScheduleFactory that creates a Schedule set up for a 10-day nudge email.
     """
-    start_date = factory.Faker('date_time_between', start_date='-10d', end_date='-10d', tzinfo=pytz.UTC)
+    start_date = factory.Faker('date_time_between', start_date='-10d', end_date='-10d', tzinfo=ZoneInfo("UTC"))
 
 
 class UpgradeReminderSchedule(ScheduleFactory):
     """
     A ScheduleFactory that creates a Schedule set up for a 2-days-remaining upgrade reminder.
     """
-    start_date = factory.Faker('past_datetime', tzinfo=pytz.UTC)
-    upgrade_deadline = factory.Faker('date_time_between', start_date='+2d', end_date='+2d', tzinfo=pytz.UTC)
+    start_date = factory.Faker('past_datetime', tzinfo=ZoneInfo("UTC"))
+    upgrade_deadline = factory.Faker('date_time_between', start_date='+2d', end_date='+2d', tzinfo=ZoneInfo("UTC"))
 
 
 class ContentHighlightSchedule(ScheduleFactory):
     """
     A ScheduleFactory that creates a Schedule set up for a course highlights email.
     """
-    start_date = factory.Faker('date_time_between', start_date='-7d', end_date='-7d', tzinfo=pytz.UTC)
-    experience = factory.RelatedFactory(ScheduleExperienceFactory, 'schedule', experience_type=ScheduleExperience.EXPERIENCES.course_updates)  # lint-amnesty, pylint: disable=line-too-long
+    start_date = factory.Faker('date_time_between', start_date='-7d', end_date='-7d', tzinfo=ZoneInfo("UTC"))
+    experience = factory.RelatedFactory(ScheduleExperienceFactory, 'schedule', experience_type=ScheduleExperience.EXPERIENCES.course_updates)  # pylint: disable=line-too-long
 
 
 class Command(BaseCommand):

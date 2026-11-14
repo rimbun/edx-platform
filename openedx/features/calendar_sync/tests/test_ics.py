@@ -2,8 +2,8 @@
 
 from datetime import datetime, timedelta
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
-import pytz
 from django.test import RequestFactory, TestCase
 from freezegun import freeze_time
 
@@ -21,7 +21,7 @@ class TestIcsGeneration(TestCase):
     def setUp(self):
         super().setUp()
 
-        freezer = freeze_time(datetime(2013, 10, 3, 8, 24, 55, tzinfo=pytz.utc))
+        freezer = freeze_time(datetime(2013, 10, 3, 8, 24, 55, tzinfo=ZoneInfo("UTC")))
         self.addCleanup(freezer.stop)
         freezer.start()
 
@@ -65,9 +65,9 @@ PRODID:-//Open edX//calendar_sync//EN
 METHOD:REQUEST
 BEGIN:VEVENT
 SUMMARY:{summary}
-DTSTART;VALUE=DATE-TIME:{timedue}
+DTSTART:{timedue}
 DURATION:P0D
-DTSTAMP;VALUE=DATE-TIME:20131003T082455Z
+DTSTAMP:20131003T082455Z
 UID:{uid}
 SEQUENCE:{sequence}
 DESCRIPTION:{summary} is due for {course}.
@@ -99,11 +99,11 @@ END:VCALENDAR
             file.decode('utf8').replace('\r\n', '\n') for file in sorted(self.generate_ics(*assignments).values())
         ]
         assert len(generated) == len(assignments)
-        self.assertListEqual(generated, list(self.expected_ics(*assignments)))
+        self.assertListEqual(generated, list(self.expected_ics(*assignments)))  # noqa: PT009
 
     def test_generate_ics_for_user_course(self):
         """ Tests that a simple sample set of course assignments is generated correctly """
-        now = datetime.now(pytz.utc)
+        now = datetime.now(ZoneInfo("UTC"))
         day1 = now + timedelta(1)
         day2 = now + timedelta(1)
 

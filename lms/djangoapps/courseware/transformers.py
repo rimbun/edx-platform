@@ -12,14 +12,14 @@ class OpenAssessmentDateTransformer(FilteringTransformerMixin, BlockStructureTra
     """
     BlockTransformer to collect all fields related to dates for openassessment problems.
     """
-    WRITE_VERSION = 1
+    WRITE_VERSION = 2
     READ_VERSION = 1
 
     @classmethod
     def name(cls):
         """
-        Unique identifier for the transformer's class;
-        same identifier used in setup.py.
+        Unique identifier for the transformer's class.
+        This must match the entry point name in the package configuration.
         """
         return 'open_assessment_transformer'
 
@@ -37,6 +37,7 @@ class OpenAssessmentDateTransformer(FilteringTransformerMixin, BlockStructureTra
             'graded',
             'format',
             'has_score',
+            'date_config_type',
         )
 
     def transform_block_filters(self, usage_info, block_structure):

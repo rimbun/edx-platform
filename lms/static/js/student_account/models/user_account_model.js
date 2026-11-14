@@ -1,5 +1,7 @@
+// eslint-disable-next-line no-shadow-restricted-names
 (function(define, undefined) {
     'use strict';
+
     define([
         'gettext', 'underscore', 'backbone'
     ], function(gettext, _, Backbone) {
@@ -23,7 +25,6 @@
                 language_proficiencies: [],
                 requires_parental_consent: true,
                 profile_image: null,
-                accomplishments_shared: false,
                 default_public_account_fields: [],
                 extended_profile: [],
                 secondary_email: ''
@@ -56,8 +57,16 @@
             },
 
             isAboveMinimumAge: function() {
-                var yearOfBirth = this.get('year_of_birth');
-                var isBirthDefined = !(_.isUndefined(yearOfBirth) || _.isNull(yearOfBirth));
+                var yearOfBirth = this.get('year_of_birth'),
+                    isBirthDefined = !(_.isUndefined(yearOfBirth) || _.isNull(yearOfBirth)),
+                    minimumAllowedAge = this.get('parental_consent_age_limit'),
+                    enableCoppaCompliance = this.get('enable_coppa_compliance');
+
+                if (enableCoppaCompliance) {
+                    var currentYear = new Date().getFullYear(),
+                        isOlderThanMinimum = (currentYear - yearOfBirth) >= minimumAllowedAge;
+                    return isBirthDefined && isOlderThanMinimum && !(this.get('requires_parental_consent'));
+                }
                 return isBirthDefined && !(this.get('requires_parental_consent'));
             }
         });

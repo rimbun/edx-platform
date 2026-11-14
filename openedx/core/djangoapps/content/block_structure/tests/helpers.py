@@ -4,8 +4,8 @@ Common utilities for tests in block_structure module
 
 
 from contextlib import contextmanager
-from uuid import uuid4
 from unittest.mock import patch
+from uuid import uuid4
 
 from opaque_keys.edx.locator import BlockUsageLocator, CourseLocator
 
@@ -62,7 +62,7 @@ class MockXBlock:
         try:
             return self.field_map[attr]
         except KeyError:
-            raise AttributeError  # lint-amnesty, pylint: disable=raise-missing-from
+            raise AttributeError  # pylint: disable=raise-missing-from  # noqa: B904
 
     def get_children(self):
         """
@@ -107,6 +107,13 @@ class MockModulestore:
     def bulk_operations(self, ignore):  # pylint: disable=unused-argument
         """
         A context manager for notifying the store of bulk operations.
+        """
+        yield
+
+    @contextmanager
+    def branch_setting(self, branch_settings, course_id=None):  # pylint: disable=unused-argument
+        """
+        A context manager for temporarily setting a store's branch value on the current thread.
         """
         yield
 
@@ -210,7 +217,7 @@ def clear_registered_transformers_cache():
     """
     Test helper to clear out any cached values of registered transformers.
     """
-    TransformerRegistry.get_write_version_hash.cache.clear()  # lint-amnesty, pylint: disable=no-member
+    TransformerRegistry.get_write_version_hash.cache.clear()  # pylint: disable=no-member
 
 
 @contextmanager
@@ -223,7 +230,7 @@ def mock_registered_transformers(transformers):
         'openedx.core.djangoapps.content.block_structure.transformer_registry.'
         'TransformerRegistry.get_registered_transformers'
     ) as mock_available_transforms:
-        mock_available_transforms.return_value = {transformer for transformer in transformers}  # lint-amnesty, pylint: disable=unnecessary-comprehension
+        mock_available_transforms.return_value = set(transformers)
         yield
 
 
@@ -274,10 +281,14 @@ class ChildrenMapTestMixin:
         # create empty block structure
         block_structure = block_structure_cls(root_block_usage_key=self.block_key_factory(0))
 
-        # _add_relation
+        # _add_relation and blocks
         for parent, children in enumerate(children_map):
+            if isinstance(block_structure, BlockStructureBlockData):
+                block_structure._get_or_create_block(self.block_key_factory(parent))  # pylint: disable=protected-access
             for child in children:
                 block_structure._add_relation(self.block_key_factory(parent), self.block_key_factory(child))  # pylint: disable=protected-access
+                if isinstance(block_structure, BlockStructureBlockData):
+                    block_structure._get_or_create_block(self.block_key_factory(child))  # pylint: disable=protected-access
         return block_structure
 
     def get_parents_map(self, children_map):
@@ -305,7 +316,7 @@ class ChildrenMapTestMixin:
             # Verify presence
             assert (self.block_key_factory(block_key) in block_structure) == (block_key not in missing_blocks),\
                 'Expected presence in block_structure for block_key {} to match absence in missing_blocks.'\
-                .format(str(block_key))
+                .format(str(block_key))  # noqa: UP032
 
             # Verify children
             if block_key not in missing_blocks:

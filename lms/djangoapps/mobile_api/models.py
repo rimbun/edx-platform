@@ -5,7 +5,7 @@ ConfigurationModel for the mobile_api djangoapp.
 
 from config_models.models import ConfigurationModel
 from django.db import models
-
+from model_utils.models import TimeStampedModel
 
 from . import utils
 from .mobile_platform import PLATFORM_CLASSES
@@ -82,7 +82,7 @@ class AppVersionConfig(models.Model):
             if utils.parsed_version(config.version) >= parsed_version:
                 return config.expire_at
 
-    def save(self, *args, **kwargs):  # lint-amnesty, pylint: disable=signature-differs
+    def save(self, *args, **kwargs):  # pylint: disable=signature-differs  # noqa: DJ012
         """ parses version into major, minor and patch versions before saving """
         self.major_version, self.minor_version, self.patch_version = utils.parsed_version(self.version)
         super().save(*args, **kwargs)
@@ -93,7 +93,7 @@ class IgnoreMobileAvailableFlagConfig(ConfigurationModel):
     Configuration for the mobile_available flag. Default is false.
 
     Enabling this configuration will cause the mobile_available flag check in
-    access.py._is_descriptor_mobile_available to ignore the mobile_available
+    access.py._is_block_mobile_available to ignore the mobile_available
     flag.
 
     .. no_pii:
@@ -101,3 +101,39 @@ class IgnoreMobileAvailableFlagConfig(ConfigurationModel):
 
     class Meta:
         app_label = "mobile_api"
+
+
+class MobileConfig(TimeStampedModel):
+    """
+    Mobile configs to add through admin panel. Config values can be added dynamically.
+
+    .. no_pii:
+    """
+    name = models.CharField(max_length=255)
+    value = models.CharField(max_length=1000)
+
+    class Meta:
+        app_label = "mobile_api"
+
+    def __str__(self):
+        return self.name
+
+    @classmethod
+    def get_structured_configs(cls):
+        """
+        Add config values in the following manner:
+            - If flag name starts with `iap_`, add value to configs['iap_configs']
+            - Else add values to configs{}
+        """
+        configs = MobileConfig.objects.all().values('name', 'value')
+        structured_configs = {"iap_configs": {}}
+        for config in configs:
+            name = config.get('name')
+            value = config.get('value')
+
+            if name.startswith('iap_'):
+                structured_configs['iap_configs'][name] = value
+            else:
+                structured_configs[name] = value
+
+        return structured_configs

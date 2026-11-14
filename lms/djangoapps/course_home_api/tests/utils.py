@@ -2,32 +2,26 @@
 Base classes or util functions for use in Course Home API tests
 """
 
-import unittest
 from datetime import datetime
 
-from django.conf import settings
-
+from cms.djangoapps.contentstore.outlines import update_outline_from_modulestore
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
 from lms.djangoapps.courseware.tests.helpers import MasqueradeMixin
 from lms.djangoapps.verify_student.models import VerificationDeadline
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
-from xmodule.modulestore.tests.django_utils import (  # lint-amnesty, pylint: disable=unused-import
-    TEST_DATA_SPLIT_MODULESTORE,
-    ModuleStoreTestCase
-)
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from openedx.core.djangolib.testing.utils import skip_unless_lms
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 class BaseCourseHomeTests(ModuleStoreTestCase, MasqueradeMixin):
     """
     Base class for Course Home API tests.
 
     Creates a course to
     """
-    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
-
     def setUp(self):
         super().setUp()
 
@@ -39,8 +33,8 @@ class BaseCourseHomeTests(ModuleStoreTestCase, MasqueradeMixin):
             emit_signals=True,
             modulestore=self.store,
         )
-        chapter = ItemFactory(parent=self.course, category='chapter')
-        ItemFactory(parent=chapter, category='sequential')
+        chapter = BlockFactory(parent=self.course, category='chapter')
+        BlockFactory(parent=chapter, category='sequential')
 
         CourseModeFactory(course_id=self.course.id, mode_slug=CourseMode.AUDIT)
         CourseModeFactory(
@@ -53,6 +47,7 @@ class BaseCourseHomeTests(ModuleStoreTestCase, MasqueradeMixin):
         VerificationDeadline.objects.create(course_key=self.course.id, deadline=datetime(2028, 1, 1))
 
         CourseOverviewFactory.create(run='1T2020')
+        update_outline_from_modulestore(self.course.id)
 
         self.staff_user = self.user
         self.user, password = self.create_non_staff_user()

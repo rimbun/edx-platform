@@ -8,9 +8,9 @@ from django.contrib import staticfiles
 from django.test import TestCase
 from django.urls import reverse
 
-from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
-from openedx.core.djangolib.testing.utils import skip_unless_lms  # lint-amnesty, pylint: disable=unused-import
 from common.djangoapps.student.tests.factories import UserFactory
+from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
+from openedx.core.djangolib.testing.utils import skip_unless_lms  # pylint: disable=unused-import
 
 
 @skip_unless_lms
@@ -24,14 +24,15 @@ class TestComprehensiveThemeLMS(TestCase):
         Clear static file finders cache and register cleanup methods.
         """
         super().setUp()
-        self.user = UserFactory()
+        self.TEST_PASSWORD = 'Password1234'
+        self.user = UserFactory(password=self.TEST_PASSWORD)
 
         # Clear the internal staticfiles caches, to get test isolation.
         staticfiles.finders.get_finder.cache_clear()
 
     def _login(self):
         """ Log into LMS. """
-        self.client.login(username=self.user.username, password='test')
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
     @with_comprehensive_theme("test-theme")
     def test_footer(self):
@@ -42,21 +43,6 @@ class TestComprehensiveThemeLMS(TestCase):
         assert resp.status_code == 200
         # This string comes from header.html of test-theme
         self.assertContains(resp, "This is a footer for test-theme.")
-
-    @with_comprehensive_theme("edx.org")
-    def test_account_settings_hide_nav(self):
-        """
-        Test that theme header doesn't show marketing site links for Account Settings page.
-        """
-        self._login()
-
-        account_settings_url = reverse('account_settings')
-        response = self.client.get(account_settings_url)
-
-        # Verify that the header navigation links are hidden for the edx.org version
-        self.assertNotContains(response, "How it Works")
-        self.assertNotContains(response, "Find courses")
-        self.assertNotContains(response, "Schools & Partners")
 
     @with_comprehensive_theme("test-theme")
     def test_logo_image(self):
@@ -124,8 +110,8 @@ class TestComprehensiveThemeLMS(TestCase):
         courses_url = reverse('courses')
         resp = self.client.get(courses_url)
         assert resp.status_code == 200
-        # The courses.html template includes the info.html file, which is overriden in the theme.
-        self.assertContains(resp, "This overrides the courseware/info.html template.")
+        # The courses.html template includes the progress.html file, which is overriden in the theme.
+        self.assertContains(resp, "This overrides the courseware/progress.html template.")
 
     @with_comprehensive_theme("test-theme")
     def test_include_custom_template(self):

@@ -2,7 +2,7 @@
 Utilities for django models.
 """
 
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple  # noqa: UP035
 
 from django.conf import settings
 from django.dispatch import Signal
@@ -12,7 +12,8 @@ from eventtracking import tracker
 # The setting name used for events when "settings" (account settings, preferences, profile information) change.
 USER_SETTINGS_CHANGED_EVENT_NAME = 'edx.user.settings.changed'
 # Used to signal a field value change
-USER_FIELDS_CHANGED = Signal(providing_args=["user", "table", "changed_values"])
+# providing_args=["user", "table", "changed_values"]
+USER_FIELDS_CHANGED = Signal()
 
 
 def get_changed_fields_dict(instance, model_class):
@@ -129,7 +130,7 @@ def truncate_fields(old_value, new_value):
     return {'old': serialized_old_value, 'new': serialized_new_value, 'truncated': truncated_values}
 
 
-def emit_settings_changed_event(user, db_table, changed_fields: Dict[str, Tuple[Any, Any]]):
+def emit_settings_changed_event(user, db_table, changed_fields: Dict[str, Tuple[Any, Any]]):  # noqa: UP006
     """Emits an event for a change in a setting.
 
     Args:

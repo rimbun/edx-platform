@@ -3,48 +3,50 @@
 
 import itertools
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import ddt
 from crum import set_current_request
 from django.test import RequestFactory
 from django.utils import timezone
-from pytz import UTC
 
 from common.djangoapps.course_modes.models import CourseMode
 from common.djangoapps.course_modes.tests.factories import CourseModeFactory
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
+from common.djangoapps.util.date_utils import strftime_localized
 from lms.djangoapps.courseware.models import DynamicUpgradeDeadlineConfiguration
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangoapps.schedules.models import Schedule
 from openedx.core.djangoapps.user_api.preferences.api import set_user_preference
-from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
 from openedx.features.course_duration_limits.access import (
     generate_course_expired_message,
     get_access_expiration_data,
     get_user_course_duration,
-    get_user_course_expiration_date
+    get_user_course_expiration_date,
 )
 from openedx.features.course_duration_limits.models import CourseDurationLimitConfig
-from common.djangoapps.student.tests.factories import CourseEnrollmentFactory
-from common.djangoapps.util.date_utils import strftime_localized
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
 
 
 @ddt.ddt
-class TestAccess(CacheIsolationTestCase):
+class TestAccess(ModuleStoreTestCase):
     """Tests of openedx.features.course_duration_limits.access"""
     def setUp(self):
-        super().setUp()  # lint-amnesty, pylint: disable=super-with-arguments
+        super().setUp()  # pylint: disable=super-with-arguments
 
-        CourseDurationLimitConfig.objects.create(enabled=True, enabled_as_of=datetime(2018, 1, 1, tzinfo=UTC))
+        CourseDurationLimitConfig.objects.create(
+            enabled=True,
+            enabled_as_of=datetime(2018, 1, 1, tzinfo=ZoneInfo("UTC"))
+        )
         DynamicUpgradeDeadlineConfiguration.objects.create(enabled=True)
-        self.course = CourseOverviewFactory.create(start=datetime(2018, 1, 1, tzinfo=UTC), self_paced=True)
+        self.course = CourseOverviewFactory.create(start=datetime(2018, 1, 1, tzinfo=ZoneInfo("UTC")), self_paced=True)
 
-    def assertDateInMessage(self, date, message):  # lint-amnesty, pylint: disable=missing-function-docstring
+    def assertDateInMessage(self, date, message):  # pylint: disable=missing-function-docstring
         # First, check that the formatted version is in there
         assert strftime_localized(date, 'SHORT_DATE') in message
 
         # But also that the machine-readable version is in there
-        assert 'data-datetime="%s"' % date.isoformat() in message
+        assert 'data-datetime="%s"' % date.isoformat() in message  # noqa: UP031
 
     def test_get_access_expiration_data(self):
         enrollment = CourseEnrollmentFactory()
@@ -120,6 +122,7 @@ class TestAccess(CacheIsolationTestCase):
         message = generate_course_expired_message(enrollment.user, enrollment.course)
 
         self.assertDateInMessage(duration_limit_upgrade_deadline, message)
+
         assert 'data-timezone="Asia/Tokyo"' in message
 
         soft_upgradeable = schedule_upgrade_deadline is not None and now < schedule_upgrade_deadline
@@ -148,7 +151,7 @@ class TestAccess(CacheIsolationTestCase):
             course_id=enrollment.course.id,
             mode_slug=CourseMode.AUDIT,
         )
-        Schedule.objects.update(start_date=datetime(2017, 1, 1, tzinfo=UTC))
+        Schedule.objects.update(start_date=datetime(2017, 1, 1, tzinfo=ZoneInfo("UTC")))
 
         content_availability_date = max(enrollment.created, enrollment.course.start)
         access_duration = get_user_course_duration(enrollment.user, enrollment.course)

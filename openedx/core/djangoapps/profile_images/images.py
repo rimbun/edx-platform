@@ -11,7 +11,7 @@ from io import BytesIO
 import piexif
 from django.conf import settings
 from django.core.files.base import ContentFile
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 from PIL import Image
 
 from openedx.core.djangoapps.user_api.accounts.image_helpers import get_profile_image_storage
@@ -93,7 +93,7 @@ def validate_uploaded_image(uploaded_file):
     # adapted from https://github.com/pmitros/ProfileXBlock
     # see also: http://en.wikipedia.org/wiki/Magic_number_%28programming%29
 
-    if uploaded_file.size > settings.PROFILE_IMAGE_MAX_BYTES:  # lint-amnesty, pylint: disable=no-else-raise
+    if uploaded_file.size > settings.PROFILE_IMAGE_MAX_BYTES:  # pylint: disable=no-else-raise
         file_upload_too_large = _(
             'The file must be smaller than {image_max_size} in size.'
         ).format(
@@ -166,7 +166,7 @@ def _scale_image(image, side_length):
     Given a PIL.Image object, get a resized copy with each side being
     `side_length` pixels long.  The scaled image will always be square.
     """
-    return image.resize((side_length, side_length), Image.ANTIALIAS)
+    return image.resize((side_length, side_length), Image.LANCZOS)
 
 
 def _create_image_file(image, exif):
@@ -226,7 +226,7 @@ def _get_valid_file_types():
     """
     Return comma separated string of valid file types.
     """
-    return ', '.join([', '.join(IMAGE_TYPES[ft].extensions) for ft in IMAGE_TYPES.keys()])  # lint-amnesty, pylint: disable=consider-iterating-dictionary
+    return ', '.join([', '.join(IMAGE_TYPES[ft].extensions) for ft in IMAGE_TYPES.keys()])  # pylint: disable=consider-iterating-dictionary
 
 
 def _user_friendly_size(size):

@@ -5,33 +5,39 @@ Tests for schedules resolvers
 
 import datetime
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import crum
 import ddt
-import pytz
 from django.test import TestCase
 from django.test.client import RequestFactory
 from django.test.utils import override_settings
+from edx_toggles.toggles.testutils import override_waffle_switch
 from testfixtures import LogCapture
-from waffle.testutils import override_switch
 
 from common.djangoapps.student.models import CourseEnrollment
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
 from lms.djangoapps.experiments.testutils import override_experiment_waffle_flag
 from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
-from openedx.core.djangoapps.schedules.config import _EXTERNAL_COURSE_UPDATES_FLAG
+from openedx.core.djangoapps.schedules.config import (
+    _EXTERNAL_COURSE_UPDATES_FLAG,
+    COURSE_UPDATE_SHOW_UNSUBSCRIBE_WAFFLE_SWITCH,
+)
 from openedx.core.djangoapps.schedules.models import Schedule
 from openedx.core.djangoapps.schedules.resolvers import (
     LOG,
     BinnedSchedulesBaseResolver,
     CourseNextSectionUpdate,
-    CourseUpdateResolver
+    CourseUpdateResolver,
 )
 from openedx.core.djangoapps.schedules.tests.factories import ScheduleConfigFactory
 from openedx.core.djangoapps.site_configuration.tests.factories import SiteConfigurationFactory, SiteFactory
+from openedx.core.djangoapps.waffle_utils.testutils import WAFFLE_TABLES
 from openedx.core.djangolib.testing.utils import CacheIsolationMixin, skip_unless_lms
 from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
+
+QUERY_COUNT_TABLE_IGNORELIST = WAFFLE_TABLES
 
 
 class SchedulesResolverTestMixin(CacheIsolationMixin):
@@ -120,7 +126,7 @@ class TestBinnedSchedulesBaseResolver(SchedulesResolverTestMixin, TestCase):
         # experiment. Note that the experiment waffle is currently inactive, but they should still be excluded because
         # they were bucketed at enrollment time.
         bin_num = BinnedSchedulesBaseResolver.bin_num_for_user_id(user.id)
-        resolver = BinnedSchedulesBaseResolver(None, self.site, datetime.datetime.now(pytz.UTC), 0, bin_num)
+        resolver = BinnedSchedulesBaseResolver(None, self.site, datetime.datetime.now(ZoneInfo("UTC")), 0, bin_num)
         resolver.schedule_date_field = 'created'
         schedules = resolver.get_schedules_with_target_date_by_bin_and_orgs()
 
@@ -141,7 +147,7 @@ class TestCourseUpdateResolver(SchedulesResolverTestMixin, ModuleStoreTestCase):
         super().setUp()
         self.course = CourseFactory.create(highlights_enabled_for_messaging=True)
         with self.store.bulk_operations(self.course.id):
-            ItemFactory.create(parent=self.course, category='chapter', highlights=['good stuff'])
+            BlockFactory.create(parent=self.course, category='chapter', highlights=['good stuff'])
 
     def create_resolver(self):
         """
@@ -162,20 +168,42 @@ class TestCourseUpdateResolver(SchedulesResolverTestMixin, ModuleStoreTestCase):
     def test_schedule_context(self):
         resolver = self.create_resolver()
         schedules = list(resolver.schedules_for_bin())
+        apple_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/store_apple_229x78.jpg'
+        google_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/store_google_253x78.jpg'
+        apple_store_url = 'https://itunes.apple.com/us/app/edx/id945480667?mt=8'
+        google_store_url = 'https://play.google.com/store/apps/details?id=org.edx.mobile'
+        facebook_url = 'http://www.facebook.com/EdxOnline'
+        linkedin_url = 'http://www.linkedin.com/company/edx'
+        twitter_url = 'https://twitter.com/edXOnline'
+        reddit_url = 'http://www.reddit.com/r/edx'
+        facebook_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_1_fb.png'
+        linkedin_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_3_linkedin.png'
+        twitter_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_2_twitter.png'
+        reddit_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_5_reddit.png'
         expected_context = {
             'contact_email': 'info@example.com',
             'contact_mailing_address': '123 Sesame Street',
             'course_ids': [str(self.course.id)],
             'course_name': self.course.display_name,
-            'course_url': f'/courses/{self.course.id}/course/',
+            'course_url': f'http://learning-mfe/course/{self.course.id}/home',
             'dashboard_url': '/dashboard',
             'homepage_url': '/',
-            'mobile_store_urls': {},
+            'mobile_store_logo_urls': {'apple': apple_logo_url,
+                                       'google': google_logo_url},
+            'mobile_store_urls': {'apple': apple_store_url,
+                                  'google': google_store_url},
             'logo_url': 'https://www.logo.png',
             'platform_name': '\xe9dX',
             'show_upsell': False,
             'site_configuration_values': {},
-            'social_media_urls': {},
+            'social_media_logo_urls': {'facebook': facebook_logo_url,
+                                       'linkedin': linkedin_logo_url,
+                                       'reddit': reddit_logo_url,
+                                       'twitter': twitter_logo_url},
+            'social_media_urls': {'facebook': facebook_url,
+                                  'linkedin': linkedin_url,
+                                  'reddit': reddit_url,
+                                  'twitter': twitter_url},
             'template_revision': 'release',
             'unsubscribe_url': None,
             'week_highlights': ['good stuff'],
@@ -183,7 +211,7 @@ class TestCourseUpdateResolver(SchedulesResolverTestMixin, ModuleStoreTestCase):
         }
         assert schedules == [(self.user, None, expected_context)]
 
-    @override_switch('schedules.course_update_show_unsubscribe', True)
+    @override_waffle_switch(COURSE_UPDATE_SHOW_UNSUBSCRIBE_WAFFLE_SWITCH, True)
     def test_schedule_context_show_unsubscribe(self):
         resolver = self.create_resolver()
         schedules = list(resolver.schedules_for_bin())
@@ -206,9 +234,11 @@ class TestCourseNextSectionUpdateResolver(SchedulesResolverTestMixin, ModuleStor
     """
     Tests the TestCourseNextSectionUpdateResolver.
     """
+    ENABLED_SIGNALS = ['course_published']
+
     def setUp(self):
         super().setUp()
-        self.today = datetime.datetime.utcnow()
+        self.today = datetime.datetime.now(ZoneInfo("UTC"))
         self.yesterday = self.today - datetime.timedelta(days=1)
         self.course = CourseFactory.create(
             highlights_enabled_for_messaging=True, self_paced=True,
@@ -217,10 +247,10 @@ class TestCourseNextSectionUpdateResolver(SchedulesResolverTestMixin, ModuleStor
         )
 
         with self.store.bulk_operations(self.course.id):
-            ItemFactory.create(parent=self.course, category='chapter', highlights=['good stuff 1'])
-            ItemFactory.create(parent=self.course, category='chapter', highlights=['good stuff 2'])
-            ItemFactory.create(parent=self.course, category='chapter', highlights=['good stuff 3'])
-            ItemFactory.create(parent=self.course, category='chapter', highlights=['good stuff 4'])
+            BlockFactory.create(parent=self.course, category='chapter', highlights=['good stuff 1'])
+            BlockFactory.create(parent=self.course, category='chapter', highlights=['good stuff 2'])
+            BlockFactory.create(parent=self.course, category='chapter', highlights=['good stuff 3'])
+            BlockFactory.create(parent=self.course, category='chapter', highlights=['good stuff 4'])
 
     def create_resolver(self, user_start_date_offset=8):
         """
@@ -244,35 +274,61 @@ class TestCourseNextSectionUpdateResolver(SchedulesResolverTestMixin, ModuleStor
 
     @override_settings(CONTACT_MAILING_ADDRESS='123 Sesame Street')
     @override_settings(LOGO_URL_PNG='https://www.logo.png')
+    @override_settings(SELF_PACED_BANNER_URL='')
+    @override_settings(SELF_PACED_CLOUD_URL='')
     def test_schedule_context(self):
         resolver = self.create_resolver()
         # using this to make sure the select_related stays intact
-        with self.assertNumQueries(26):
+        with self.assertNumQueries(22, table_ignorelist=QUERY_COUNT_TABLE_IGNORELIST):
             sc = resolver.get_schedules()
             schedules = list(sc)
-
+        apple_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/store_apple_229x78.jpg'
+        google_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/store_google_253x78.jpg'
+        apple_store_url = 'https://itunes.apple.com/us/app/edx/id945480667?mt=8'
+        google_store_url = 'https://play.google.com/store/apps/details?id=org.edx.mobile'
+        facebook_url = 'http://www.facebook.com/EdxOnline'
+        linkedin_url = 'http://www.linkedin.com/company/edx'
+        twitter_url = 'https://twitter.com/edXOnline'
+        reddit_url = 'http://www.reddit.com/r/edx'
+        facebook_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_1_fb.png'
+        linkedin_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_3_linkedin.png'
+        twitter_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_2_twitter.png'
+        reddit_logo_url = 'http://email-media.s3.amazonaws.com/edX/2021/social_5_reddit.png'
         expected_context = {
             'contact_email': 'info@example.com',
             'contact_mailing_address': '123 Sesame Street',
             'course_ids': [str(self.course.id)],
+            'course_id': str(self.course.id),
             'course_name': self.course.display_name,
-            'course_url': f'/courses/{self.course.id}/course/',
+            'course_url': f'http://learning-mfe/course/{self.course.id}/home',
             'dashboard_url': '/dashboard',
             'homepage_url': '/',
-            'mobile_store_urls': {},
+            'mobile_store_logo_urls': {'apple': apple_logo_url,
+                                       'google': google_logo_url},
+            'mobile_store_urls': {'apple': apple_store_url,
+                                  'google': google_store_url},
             'logo_url': 'https://www.logo.png',
             'platform_name': '\xe9dX',
             'show_upsell': False,
             'site_configuration_values': {},
-            'social_media_urls': {},
+            'social_media_logo_urls': {'facebook': facebook_logo_url,
+                                       'linkedin': linkedin_logo_url,
+                                       'reddit': reddit_logo_url,
+                                       'twitter': twitter_logo_url},
+            'social_media_urls': {'facebook': facebook_url,
+                                  'linkedin': linkedin_url,
+                                  'reddit': reddit_url,
+                                  'twitter': twitter_url},
             'template_revision': 'release',
             'unsubscribe_url': None,
+            'self_paced_banner_url': '',
+            'self_paced_cloud_url': '',
             'week_highlights': ['good stuff 2'],
             'week_num': 2,
         }
         assert schedules == [(self.user, None, expected_context)]
 
-    @override_switch('schedules.course_update_show_unsubscribe', True)
+    @override_waffle_switch(COURSE_UPDATE_SHOW_UNSUBSCRIBE_WAFFLE_SWITCH, True)
     def test_schedule_context_show_unsubscribe(self):
         resolver = self.create_resolver()
         schedules = list(resolver.get_schedules())
@@ -282,7 +338,7 @@ class TestCourseNextSectionUpdateResolver(SchedulesResolverTestMixin, ModuleStor
         resolver = self.create_resolver(user_start_date_offset=29)
         with LogCapture(LOG.name) as log_capture:
             list(resolver.get_schedules())
-            log_message = ('Next Section Course Update: Last section was reached. '
+            log_message = ('Next Section Course Update: Last section was reached. '  # noqa: UP032
                            'There are no more highlights for {}'.format(self.course.id))
             log_capture.check_present((LOG.name, 'WARNING', log_message))
 
@@ -291,4 +347,4 @@ class TestCourseNextSectionUpdateResolver(SchedulesResolverTestMixin, ModuleStor
         self.course = self.update_course(self.course, self.user.id)
         resolver = self.create_resolver()
         schedules = list(resolver.get_schedules())
-        self.assertListEqual(schedules, [])
+        self.assertListEqual(schedules, [])  # noqa: PT009

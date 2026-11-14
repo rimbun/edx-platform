@@ -49,7 +49,7 @@ class ApiTestCase(TestCase):
         allow_header = resp.get("Allow")
         assert allow_header is not None
         allowed_methods = re.split('[^A-Z]+', allow_header)
-        self.assertCountEqual(allowed_methods, expected_methods)
+        self.assertCountEqual(allowed_methods, expected_methods)  # noqa: PT009
 
     def assertSelfReferential(self, obj):
         """Assert that accessing the "url" entry in the given object returns the same object"""
@@ -63,6 +63,10 @@ class ApiTestCase(TestCase):
     def assertHttpCreated(self, response):
         """Assert that the given response has the status code 201"""
         assert response.status_code == 201
+
+    def assertHttpNotAuthorized(self, response):
+        """Assert that the given response has the status code 401"""
+        assert response.status_code == 401
 
     def assertHttpForbidden(self, response):
         """Assert that the given response has the status code 403"""

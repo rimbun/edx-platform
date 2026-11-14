@@ -7,12 +7,11 @@ access control rules.
 import ddt
 from stevedore.extension import Extension, ExtensionManager
 
-from common.djangoapps.student.tests.factories import StaffFactory
-from common.djangoapps.student.tests.factories import UserFactory
 import lms.djangoapps.courseware.access as access
+from common.djangoapps.student.tests.factories import StaffFactory, UserFactory
 from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.partitions.partitions import USER_PARTITION_SCHEME_NAMESPACE, Group, UserPartition
 
 
@@ -57,6 +56,7 @@ class GroupAccessTestCase(ModuleStoreTestCase):
     Tests to ensure that has_access() correctly enforces the visibility
     restrictions specified in the `group_access` field of XBlocks.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     def set_user_group(self, user, partition, group):
         """
@@ -127,10 +127,10 @@ class GroupAccessTestCase(ModuleStoreTestCase):
             user_partitions=[self.animal_partition, self.color_partition],
         )
         with self.store.bulk_operations(self.course.id, emit_signals=False):
-            chapter = ItemFactory.create(category='chapter', parent=self.course)
-            section = ItemFactory.create(category='sequential', parent=chapter)
-            vertical = ItemFactory.create(category='vertical', parent=section)
-            component = ItemFactory.create(category='problem', parent=vertical)
+            chapter = BlockFactory.create(category='chapter', parent=self.course)
+            section = BlockFactory.create(category='sequential', parent=chapter)
+            vertical = BlockFactory.create(category='vertical', parent=section)
+            component = BlockFactory.create(category='problem', parent=vertical)
 
             self.chapter_location = chapter.location
             self.section_location = section.location

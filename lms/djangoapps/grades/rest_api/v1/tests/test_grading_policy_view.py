@@ -8,15 +8,13 @@ from datetime import datetime
 import ddt
 from django.urls import reverse
 from pytz import UTC
+from xblock_problem.capa.testing.response_xml_factory import MultipleChoiceResponseXMLFactory
 
-from capa.tests.response_xml_factory import MultipleChoiceResponseXMLFactory
-from common.djangoapps.student.tests.factories import GlobalStaffFactory
-from common.djangoapps.student.tests.factories import StaffFactory
-from common.djangoapps.student.tests.factories import UserFactory
+from common.djangoapps.student.tests.factories import GlobalStaffFactory, StaffFactory, UserFactory
 from openedx.core.djangoapps.oauth_dispatch.tests.factories import AccessTokenFactory, ApplicationFactory
 from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import TEST_DATA_SPLIT_MODULESTORE, SharedModuleStoreTestCase
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 @ddt.ddt
@@ -36,12 +34,14 @@ class GradingPolicyTestMixin:
         self.access_token = AccessTokenFactory.create(user=self.user, application=self.oauth_client).token
 
     @classmethod
-    def create_course_data(cls):  # lint-amnesty, pylint: disable=missing-function-docstring
-        cls.invalid_course_id = 'foo/bar/baz'
-        cls.course = CourseFactory.create(display_name='An Introduction to API Testing', raw_grader=cls.raw_grader)
+    def create_course_data(cls):  # pylint: disable=missing-function-docstring
+        cls.invalid_course_id = 'course-v1:foo+bar+baz'
+        cls.course = CourseFactory.create(
+            display_name='An Introduction to API Testing', grading_policy=cls.grading_policy
+        )
         cls.course_id = str(cls.course.id)
         with cls.store.bulk_operations(cls.course.id, emit_signals=False):
-            cls.sequential = ItemFactory.create(
+            cls.sequential = BlockFactory.create(
                 category="sequential",
                 parent_location=cls.course.location,
                 display_name="Lesson 1",
@@ -52,7 +52,7 @@ class GradingPolicyTestMixin:
             factory = MultipleChoiceResponseXMLFactory()
             args = {'choices': [False, True, False]}
             problem_xml = factory.build_xml(**args)
-            cls.problem = ItemFactory.create(
+            cls.problem = BlockFactory.create(
                 category="problem",
                 parent_location=cls.sequential.location,
                 display_name="Problem 1",
@@ -60,13 +60,13 @@ class GradingPolicyTestMixin:
                 data=problem_xml,
             )
 
-            cls.video = ItemFactory.create(
+            cls.video = BlockFactory.create(
                 category="video",
                 parent_location=cls.sequential.location,
                 display_name="Video 1",
             )
 
-            cls.html = ItemFactory.create(
+            cls.html = BlockFactory.create(
                 category="html",
                 parent_location=cls.sequential.location,
                 display_name="HTML 1",
@@ -142,7 +142,7 @@ class GradingPolicyTestMixin:
         auth_header = self.get_auth_header(user)
         self.assert_get_for_course(expected_status_code=403, HTTP_AUTHORIZATION=auth_header)
 
-    @ddt.data(ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split)
+    @ddt.data(ModuleStoreEnum.Type.split)
     def test_course_keys(self, modulestore_type):
         """
         The view should be addressable by course-keys from both module stores.
@@ -160,24 +160,27 @@ class CourseGradingPolicyTests(GradingPolicyTestMixin, SharedModuleStoreTestCase
     """
     Tests for CourseGradingPolicy view.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
     view_name = 'grades_api:v1:course_grading_policy'
 
-    raw_grader = [
-        {
-            "min_count": 24,
-            "weight": 0.2,
-            "type": "Homework",
-            "drop_count": 0,
-            "short_label": "HW"
-        },
-        {
-            "min_count": 4,
-            "weight": 0.8,
-            "type": "Exam",
-            "drop_count": 0,
-            "short_label": "Exam"
-        }
-    ]
+    grading_policy = {
+        'GRADER': [
+            {
+                "min_count": 24,
+                "weight": 0.2,
+                "type": "Homework",
+                "drop_count": 0,
+                "short_label": "HW"
+            },
+            {
+                "min_count": 4,
+                "weight": 0.8,
+                "type": "Exam",
+                "drop_count": 0,
+                "short_label": "Exam"
+            }
+        ]
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -204,32 +207,35 @@ class CourseGradingPolicyTests(GradingPolicyTestMixin, SharedModuleStoreTestCase
                 "dropped": 0
             }
         ]
-        self.assertListEqual(response.data, expected)
+        self.assertListEqual(response.data, expected)  # noqa: PT009
 
 
 class CourseGradingPolicyMissingFieldsTests(GradingPolicyTestMixin, SharedModuleStoreTestCase):
     """
     Tests for CourseGradingPolicy view when fields are missing.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
     view_name = 'grades_api:v1:course_grading_policy'
 
     # Raw grader with missing keys
-    raw_grader = [
-        {
-            "min_count": 24,
-            "weight": 0.2,
-            "type": "Homework",
-            "drop_count": 0,
-            "short_label": "HW"
-        },
-        {
-            # Deleted "min_count" key
-            "weight": 0.8,
-            "type": "Exam",
-            "drop_count": 0,
-            "short_label": "Exam"
-        }
-    ]
+    grading_policy = {
+        'GRADER': [
+            {
+                "min_count": 24,
+                "weight": 0.2,
+                "type": "Homework",
+                "drop_count": 0,
+                "short_label": "HW"
+            },
+            {
+                # Deleted "min_count" key
+                "weight": 0.8,
+                "type": "Exam",
+                "drop_count": 0,
+                "short_label": "Exam"
+            }
+        ]
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -256,4 +262,4 @@ class CourseGradingPolicyMissingFieldsTests(GradingPolicyTestMixin, SharedModule
                 "dropped": 0
             }
         ]
-        self.assertListEqual(response.data, expected)
+        self.assertListEqual(response.data, expected)  # noqa: PT009

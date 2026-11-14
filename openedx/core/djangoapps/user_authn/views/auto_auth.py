@@ -6,25 +6,22 @@ import uuid
 
 from django.conf import settings
 from django.contrib.auth import login as django_login
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.exceptions import PermissionDenied
 from django.core.validators import ValidationError
 from django.http import HttpResponseForbidden
 from django.shortcuts import redirect
 from django.template.context_processors import csrf
 from django.urls import NoReverseMatch, reverse
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
+from edx_django_utils.user import generate_password  # pylint: disable=wrong-import-order
 from opaque_keys.edx.locator import CourseLocator
 
-from lms.djangoapps.verify_student.models import ManualVerification
-from openedx.core.djangoapps.django_comment_common.models import assign_role
-from openedx.core.djangoapps.user_authn.views.registration_form import AccountCreationForm
-from openedx.features.course_experience import course_home_url_name
 from common.djangoapps.student.helpers import (
     AccountValidationError,
     authenticate_new_user,
     create_or_set_user_attribute_created_on_site,
-    do_create_account
+    do_create_account,
 )
 from common.djangoapps.student.models import (
     CourseAccessRole,
@@ -32,11 +29,13 @@ from common.djangoapps.student.models import (
     Registration,
     UserProfile,
     anonymous_id_for_user,
-    create_comments_service_user
+    create_comments_service_user,
 )
 from common.djangoapps.util.json_request import JsonResponse
-
-from edx_django_utils.user import generate_password
+from lms.djangoapps.verify_student.models import ManualVerification
+from openedx.core.djangoapps.django_comment_common.models import assign_role
+from openedx.core.djangoapps.user_authn.views.registration_form import AccountCreationForm
+from openedx.features.course_experience import course_home_url
 
 
 def auto_auth(request):  # pylint: disable=too-many-statements
@@ -44,7 +43,7 @@ def auto_auth(request):  # pylint: disable=too-many-statements
     Create or configure a user account, then log in as that user.
 
     Enabled only when
-    settings.FEATURES['AUTOMATIC_AUTH_FOR_TESTING'] is true.
+    settings.AUTOMATIC_AUTH_FOR_TESTING is true.
 
     Accepts the following querystring parameters:
     * `username`, `email`, and `password` for the user account
@@ -91,7 +90,7 @@ def auto_auth(request):  # pylint: disable=too-many-statements
     redirect_when_done = _str2bool(request.GET.get('redirect', '')) or redirect_to
     login_when_done = 'no_login' not in request.GET
 
-    restricted = settings.FEATURES.get('RESTRICT_AUTOMATIC_AUTH', True)
+    restricted = settings.RESTRICT_AUTOMATIC_AUTH
     if is_superuser and restricted:
         return HttpResponseForbidden(_('Superuser creation not allowed'))
 
@@ -170,9 +169,9 @@ def auto_auth(request):  # pylint: disable=too-many-statements
         elif course_id:
             # Redirect to the course homepage (in LMS) or outline page (in Studio)
             try:
-                redirect_url = reverse(course_home_url_name(course_key), kwargs={'course_id': course_id})
+                redirect_url = reverse('course_handler', kwargs={'course_key_string': course_id})  # Studio
             except NoReverseMatch:
-                redirect_url = reverse('course_handler', kwargs={'course_key_string': course_id})
+                redirect_url = course_home_url(course_key)  # LMS
         else:
             # Redirect to the learner dashboard (in LMS) or homepage (in Studio)
             try:

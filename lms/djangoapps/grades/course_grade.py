@@ -11,9 +11,8 @@ from django.conf import settings
 from lazy import lazy
 
 from openedx.core.lib.grade_utils import round_away_from_zero
-from xmodule import block_metadata_utils
+from xmodule import block_metadata_utils  # pylint: disable=wrong-import-order
 
-from .config import assume_zero_if_absent
 from .scores import compute_percent
 from .subsection_grade import ZeroSubsectionGrade
 from .subsection_grade_factory import SubsectionGradeFactory
@@ -23,7 +22,16 @@ class CourseGradeBase:
     """
     Base class for Course Grades.
     """
-    def __init__(self, user, course_data, percent=0.0, letter_grade=None, passed=False, force_update_subsections=False):
+    def __init__(
+        self,
+        user,
+        course_data,
+        percent=0.0,
+        letter_grade=None,
+        passed=False,
+        force_update_subsections=False,
+        last_updated=None
+    ):
         self.user = user
         self.course_data = course_data
 
@@ -34,12 +42,26 @@ class CourseGradeBase:
         self.letter_grade = letter_grade or None
         self.force_update_subsections = force_update_subsections
 
+        self.last_updated = last_updated
+
     def __str__(self):
-        return 'Course Grade: percent: {}, letter_grade: {}, passed: {}'.format(
+        return 'Course Grade: percent: {}, letter_grade: {}, passed: {}'.format(  # noqa: UP032
             str(self.percent),
             self.letter_grade,
             self.passed,
         )
+
+    def update(self, visible_grades_only=False, has_staff_access=False):
+        """
+        Recalculates the grade for the course, with the given parameters.
+
+        Also updates subsection grades if self.force_update_subsections is true.
+
+        Arguments:
+            visible_grades_only: Only considers grades the user can see (via show_correctness subsection field)
+            has_staff_access: Used to help determine which grades are visible (if visible_grades_only=True)
+        """
+        return self
 
     @property
     def attempted(self):
@@ -71,8 +93,7 @@ class CourseGradeBase:
         )
         return self._get_subsection_grade(subsection)
 
-    @lazy
-    def graded_subsections_by_format(self):
+    def graded_subsections_by_format(self, visible_grades_only=False, has_staff_access=False):
         """
         Returns grades for the subsections in the course in
         a dict keyed by subsection format types.
@@ -80,7 +101,8 @@ class CourseGradeBase:
         subsections_by_format = defaultdict(OrderedDict)
         for chapter in self.chapter_grades.values():
             for subsection_grade in chapter['sections']:
-                if subsection_grade.graded:
+                is_visible = not visible_grades_only or subsection_grade.show_grades(has_staff_access)
+                if subsection_grade.graded and is_visible:
                     graded_total = subsection_grade.graded_total
                     if graded_total.possible > 0:
                         subsections_by_format[subsection_grade.format][subsection_grade.location] = subsection_grade
@@ -136,13 +158,13 @@ class CourseGradeBase:
             possible += section.graded_total.possible
         return compute_percent(earned, possible)
 
-    def score_for_module(self, location):
+    def score_for_block(self, location):
         """
         Calculate the aggregate weighted score for any location in the course.
         This method returns a tuple containing (earned_score, possible_score).
         If the location is of 'problem' type, this method will return the
         possible and earned scores for that problem. If the location refers to a
-        composite module (a vertical or section ) the scores will be the sums of
+        composite block (a vertical or section ) the scores will be the sums of
         all scored problems that are children of the chosen location.
         """
         if location in self.problem_scores:
@@ -151,19 +173,19 @@ class CourseGradeBase:
         children = self.course_data.structure.get_children(location)
         earned, possible = 0.0, 0.0
         for child in children:
-            child_earned, child_possible = self.score_for_module(child)
+            child_earned, child_possible = self.score_for_block(child)
             earned += child_earned
             possible += child_possible
         return earned, possible
 
-    @lazy
-    def grader_result(self):
+    def grader_result(self, visible_grades_only=False, has_staff_access=False):
         """
         Returns the result from the course grader.
         """
         course = self._prep_course_for_grading(self.course_data.course)
         return course.grader.grade(
-            self.graded_subsections_by_format,
+            self.graded_subsections_by_format(visible_grades_only=visible_grades_only,
+                                              has_staff_access=has_staff_access),
             generate_random_scores=settings.GENERATE_PROFILE_SCORES,
         )
 
@@ -174,7 +196,7 @@ class CourseGradeBase:
         DEPRECATED: To be removed as part of TNL-5291.
         """
         # TODO(TNL-5291) Remove usages of this deprecated property.
-        grade_summary = self.grader_result
+        grade_summary = self.grader_result()
         grade_summary['percent'] = self.percent
         grade_summary['grade'] = self.letter_grade
         return grade_summary
@@ -220,7 +242,7 @@ class CourseGradeBase:
         chapter_subsection_grades = self._get_subsection_grades(course_structure, chapter.location)
         return {
             'display_name': block_metadata_utils.display_name_with_default(chapter),
-            'url_name': block_metadata_utils.url_name_for_block(chapter),
+            'url_name': chapter.usage_key.block_id,
             'sections': chapter_subsection_grades,
         }
 
@@ -259,11 +281,10 @@ class CourseGrade(CourseGradeBase):
         super().__init__(user, course_data, *args, **kwargs)
         self._subsection_grade_factory = SubsectionGradeFactory(user, course_data=course_data)
 
-    def update(self):
+    def update(self, visible_grades_only=False, has_staff_access=False):
         """
         Updates the grade for the course. Also updates subsection grades
-        if self.force_update_subsections is true, via the lazy call
-        to self.grader_result.
+        if self.force_update_subsections is true, via the call to self.grader_result.
         """
         # TODO update this code to be more functional and readable.
         # Currently, it is hard to follow since there are plenty of
@@ -271,25 +292,19 @@ class CourseGrade(CourseGradeBase):
         # can be passed through and not confusingly stored and used
         # at a later time.
         grade_cutoffs = self.course_data.course.grade_cutoffs
-        self.percent = self._compute_percent(self.grader_result)
+        grader_result = self.grader_result(visible_grades_only=visible_grades_only, has_staff_access=has_staff_access)
+        self.percent = self._compute_percent(grader_result)
         self.letter_grade = self._compute_letter_grade(grade_cutoffs, self.percent)
         self.passed = self._compute_passed(grade_cutoffs, self.percent)
         return self
 
     @lazy
-    def attempted(self):  # lint-amnesty, pylint: disable=invalid-overridden-method
+    def attempted(self):  # pylint: disable=invalid-overridden-method
         """
         Returns whether any of the subsections in this course
         have been attempted by the student.
         """
-        if assume_zero_if_absent(self.course_data.course_key):
-            return True
-
-        for chapter in self.chapter_grades.values():
-            for subsection_grade in chapter['sections']:
-                if subsection_grade.all_total.first_attempted:
-                    return True
-        return False
+        return True
 
     def _get_subsection_grade(self, subsection, force_update_subsections=False):
         if self.force_update_subsections:

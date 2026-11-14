@@ -4,16 +4,16 @@
 from datetime import datetime, timedelta
 from enum import Enum
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import ddt
-import pytz
 from django.conf import settings
 from oauth2_provider import models as dot_models
 from rest_framework import status
 
+from common.djangoapps.student.tests.factories import UserFactory
 from openedx.core.djangoapps.oauth_dispatch.adapters.dot import DOTAdapter
 from openedx.core.djangoapps.oauth_dispatch.jwt import _create_jwt
-from common.djangoapps.student.tests.factories import UserFactory
 
 
 class AuthType(Enum):
@@ -42,7 +42,7 @@ def utcnow():
     """
     Helper function to return the current UTC time localized to the UTC timezone.
     """
-    return datetime.now(pytz.UTC)
+    return datetime.now(ZoneInfo("UTC"))
 
 
 @ddt.ddt
@@ -58,7 +58,7 @@ class AuthAndScopesTestMixin:
             self.student.
     """
     default_scopes = None
-    user_password = 'test'
+    user_password = 'Password1234'
 
     def setUp(self):
         super().setUp()

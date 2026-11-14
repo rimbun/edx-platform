@@ -2,16 +2,14 @@
 
 
 import logging
-from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
 from urllib.parse import urljoin
 
-from requests.exceptions import ConnectionError, Timeout  # pylint: disable=redefined-builtin
-from slumber.exceptions import SlumberBaseException
+from django.conf import settings
+from django.utils.translation import gettext_lazy as _
+from requests.exceptions import RequestException
 
 from common.djangoapps.course_modes.models import CourseMode
-from common.djangoapps.student.helpers import VERIFY_STATUS_APPROVED, VERIFY_STATUS_NEED_TO_VERIFY, VERIFY_STATUS_SUBMITTED  # lint-amnesty, pylint: disable=line-too-long
-from openedx.core.djangoapps.commerce.utils import ecommerce_api_client
+from openedx.core.djangoapps.commerce.utils import get_ecommerce_api_base_url, get_ecommerce_api_client
 
 DISPLAY_VERIFIED = "verified"
 DISPLAY_HONOR = "honor"
@@ -21,7 +19,7 @@ DISPLAY_PROFESSIONAL = "professional"
 LOGGER = logging.getLogger(__name__)
 
 
-def enrollment_mode_display(mode, verification_status, course_id):
+def enrollment_mode_display(mode, course_id):
     """ Select appropriate display strings and CSS classes.
 
         Uses mode and verification status to select appropriate display strings and CSS classes
@@ -38,19 +36,13 @@ def enrollment_mode_display(mode, verification_status, course_id):
     image_alt = ''
     enrollment_title = ''
     enrollment_value = ''
-    display_mode = _enrollment_mode_display(mode, verification_status, course_id)
+    display_mode = _enrollment_mode_display(mode, course_id)
 
     if display_mode == DISPLAY_VERIFIED:
-        if verification_status in [VERIFY_STATUS_NEED_TO_VERIFY, VERIFY_STATUS_SUBMITTED]:
-            enrollment_title = _("Your verification is pending")
-            enrollment_value = _("Verified: Pending Verification")
-            show_image = True
-            image_alt = _("ID verification pending")
-        elif verification_status == VERIFY_STATUS_APPROVED:
-            enrollment_title = _("You're enrolled as a verified student")
-            enrollment_value = _("Verified")
-            show_image = True
-            image_alt = _("ID Verified Ribbon/Badge")
+        enrollment_title = _("You're enrolled as a verified student")
+        enrollment_value = _("Verified")
+        show_image = True
+        image_alt = _("ID Verified Ribbon/Badge")
     elif display_mode == DISPLAY_HONOR:
         enrollment_title = _("You're enrolled as an honor code student")
         enrollment_value = _("Honor Code")
@@ -63,11 +55,11 @@ def enrollment_mode_display(mode, verification_status, course_id):
         'enrollment_value': str(enrollment_value),
         'show_image': show_image,
         'image_alt': str(image_alt),
-        'display_mode': _enrollment_mode_display(mode, verification_status, course_id)
+        'display_mode': display_mode
     }
 
 
-def _enrollment_mode_display(enrollment_mode, verification_status, course_id):
+def _enrollment_mode_display(enrollment_mode, course_id):
     """Checking enrollment mode and status and returns the display mode
      Args:
         enrollment_mode (str): enrollment mode.
@@ -79,12 +71,9 @@ def _enrollment_mode_display(enrollment_mode, verification_status, course_id):
     course_mode_slugs = [mode.slug for mode in CourseMode.modes_for_course(course_id)]
 
     if enrollment_mode == CourseMode.VERIFIED:
-        if verification_status in [VERIFY_STATUS_NEED_TO_VERIFY, VERIFY_STATUS_SUBMITTED, VERIFY_STATUS_APPROVED]:
-            display_mode = DISPLAY_VERIFIED
-        elif DISPLAY_HONOR in course_mode_slugs:
+        display_mode = DISPLAY_VERIFIED
+        if DISPLAY_HONOR in course_mode_slugs:
             display_mode = DISPLAY_HONOR
-        else:
-            display_mode = DISPLAY_AUDIT
     elif enrollment_mode in [CourseMode.PROFESSIONAL, CourseMode.NO_ID_PROFESSIONAL_MODE]:
         display_mode = DISPLAY_PROFESSIONAL
     else:
@@ -95,15 +84,26 @@ def _enrollment_mode_display(enrollment_mode, verification_status, course_id):
 
 def get_course_final_price(user, sku, course_price):
     """
-    Return the course's discounted price for a user if user is eligible for any otherwise return course original price.
+    Return the course's discounted price for a user (if eligible), otherwise return course original price.
+
+    Note: this function is no longer called directly within edx-platform. It is called externally
+    via the openedx-filters pipeline, by edx-enterprise's CalculateEnterpriseDiscountedPrice
+    step (org.openedx.learning.course_mode.price.requested.v1). Do not delete this function even
+    though static analysis may flag it as unused here.
     """
     price_details = {}
     try:
-        price_details = ecommerce_api_client(user).baskets.calculate.get(
-            sku=[sku],
-            username=user.username,
+        api_url = urljoin(f"{get_ecommerce_api_base_url()}/", "baskets/calculate/")
+        response = get_ecommerce_api_client(user).get(
+            api_url,
+            params={
+                "sku": [sku],
+                "username": user.username,
+            }
         )
-    except (SlumberBaseException, ConnectionError, Timeout) as exc:
+        response.raise_for_status()
+        price_details = response.json()
+    except RequestException as exc:
         LOGGER.info(
             '[e-commerce calculate endpoint] Exception raise for sku [%s] - user [%s] and exception: %s',
             sku,

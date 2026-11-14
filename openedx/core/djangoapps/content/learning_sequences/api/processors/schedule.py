@@ -1,15 +1,16 @@
-# lint-amnesty, pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring
+from __future__ import annotations
+
 import logging
-from collections import defaultdict  # lint-amnesty, pylint: disable=unused-import
+from collections import defaultdict  # pylint: disable=unused-import
 from datetime import datetime, timedelta
-from typing import Dict
 
 from edx_when.api import get_dates_for_course
-from opaque_keys.edx.keys import CourseKey  # lint-amnesty, pylint: disable=unused-import
-from openedx.core import types
+from opaque_keys.edx.keys import CourseKey, UsageKey  # pylint: disable=unused-import
 
 from common.djangoapps.student.auth import user_has_role
 from common.djangoapps.student.roles import CourseBetaTesterRole
+from openedx.core import types
 
 from ...data import ScheduleData, ScheduleItemData, UserCourseOutlineData
 from .base import OutlineProcessor
@@ -37,7 +38,7 @@ class ScheduleOutlineProcessor(OutlineProcessor):
     def __init__(self, course_key: CourseKey, user: types.User, at_time: datetime):
         super().__init__(course_key, user, at_time)
         self.dates = None
-        self.keys_to_schedule_fields: Dict[str, Dict[str, datetime]] = defaultdict(dict)
+        self.keys_to_schedule_fields: dict[UsageKey, dict[str, datetime]] = defaultdict(dict)
         self._course_start = None
         self._course_end = None
         self._is_beta_tester = False
@@ -126,7 +127,7 @@ class ScheduleOutlineProcessor(OutlineProcessor):
             specified_dates = [date for date in dates if date is not None]
             return max(specified_dates) if specified_dates else None
 
-        pruned_section_keys = {section.usage_key for section in pruned_course_outline.sections}  # lint-amnesty, pylint: disable=unused-variable
+        pruned_section_keys = {section.usage_key for section in pruned_course_outline.sections}  # pylint: disable=unused-variable  # noqa: F841
         course_usage_key = self.course_key.make_usage_key('course', 'course')
         course_start = self.keys_to_schedule_fields[course_usage_key].get('start')
         course_end = self.keys_to_schedule_fields[course_usage_key].get('end')

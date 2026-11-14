@@ -5,9 +5,7 @@ import json
 from unittest import mock
 
 import pytest
-from completion.waffle import ENABLE_COMPLETION_TRACKING_SWITCH
 from django.core.exceptions import ObjectDoesNotExist
-from edx_toggles.toggles.testutils import override_waffle_switch
 from opaque_keys import InvalidKeyError
 
 from common.djangoapps.student.models import CourseEnrollment
@@ -15,10 +13,8 @@ from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.courseware.models import StudentModule
 from lms.djangoapps.instructor.access import allow_access
 from lms.djangoapps.instructor.services import InstructorService
-from lms.djangoapps.instructor.tests.test_tools import msk_from_problem_urlname
 from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
-from xmodule.partitions.partitions import Group, UserPartition
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 
 class InstructorServiceTests(SharedModuleStoreTestCase):
@@ -31,16 +27,12 @@ class InstructorServiceTests(SharedModuleStoreTestCase):
         super().setUpClass()
         cls.email = 'escalation@test.com'
         cls.course = CourseFactory.create(proctoring_escalation_email=cls.email)
-        cls.problem_location = msk_from_problem_urlname(
-            cls.course.id,
-            'robot-some-problem-urlname'
-        )
-        cls.other_problem_location = msk_from_problem_urlname(
-            cls.course.id,
-            'robot-some-other_problem-urlname'
-        )
-        cls.problem_urlname = str(cls.problem_location)
-        cls.other_problem_urlname = str(cls.other_problem_location)
+        cls.section = BlockFactory.create(parent=cls.course, category='chapter')
+        cls.subsection = BlockFactory.create(parent=cls.section, category='sequential')
+        cls.unit = BlockFactory.create(parent=cls.subsection, category='vertical')
+        cls.problem = BlockFactory.create(parent=cls.unit, category='problem')
+        cls.unit_2 = BlockFactory.create(parent=cls.subsection, category='vertical')
+        cls.problem_2 = BlockFactory.create(parent=cls.unit_2, category='problem')
         cls.complete_error_prefix = ('Error occurred while attempting to complete student attempt for '
                                      'user {user} for content_id {content_id}. ')
 
@@ -54,12 +46,13 @@ class InstructorServiceTests(SharedModuleStoreTestCase):
         self.module_to_reset = StudentModule.objects.create(
             student=self.student,
             course_id=self.course.id,
-            module_state_key=self.problem_location,
+            module_state_key=self.problem.location,
             state=json.dumps({'attempts': 2}),
         )
 
     @mock.patch('lms.djangoapps.grades.signals.handlers.PROBLEM_WEIGHTED_SCORE_CHANGED.send')
-    def test_reset_student_attempts_delete(self, _mock_signal):
+    @mock.patch('lms.djangoapps.instructor.tasks.update_exam_completion_task.apply_async', autospec=True)
+    def test_reset_student_attempts_delete(self, mock_completion_task, _mock_signal):  # noqa: PT019
         """
         Test delete student state.
         """
@@ -71,7 +64,7 @@ class InstructorServiceTests(SharedModuleStoreTestCase):
         self.service.delete_student_attempt(
             self.student.username,
             str(self.course.id),
-            self.problem_urlname,
+            str(self.subsection.location),
             requesting_user=self.student,
         )
 
@@ -79,12 +72,15 @@ class InstructorServiceTests(SharedModuleStoreTestCase):
         assert StudentModule.objects.filter(student=self.module_to_reset.student, course_id=self.course.id,
                                             module_state_key=self.module_to_reset.module_state_key).count() == 0
 
+        # Assert we send update completion with 0.0
+        mock_completion_task.assert_called_once_with((self.student.username, str(self.subsection.location), 0.0))
+
     def test_reset_bad_content_id(self):
         """
         Negative test of trying to reset attempts with bad content_id
         """
 
-        result = self.service.delete_student_attempt(  # lint-amnesty, pylint: disable=assignment-from-none
+        result = self.service.delete_student_attempt(  # pylint: disable=assignment-from-none
             self.student.username,
             str(self.course.id),
             'foo/bar/baz',
@@ -97,7 +93,7 @@ class InstructorServiceTests(SharedModuleStoreTestCase):
         Negative test of trying to reset attempts with bad user identifier
         """
 
-        result = self.service.delete_student_attempt(  # lint-amnesty, pylint: disable=assignment-from-none
+        result = self.service.delete_student_attempt(  # pylint: disable=assignment-from-none
             'bad_student',
             str(self.course.id),
             'foo/bar/baz',
@@ -110,135 +106,21 @@ class InstructorServiceTests(SharedModuleStoreTestCase):
         Negative test of trying to reset attempts with bad user identifier
         """
 
-        result = self.service.delete_student_attempt(  # lint-amnesty, pylint: disable=assignment-from-none
+        result = self.service.delete_student_attempt(  # pylint: disable=assignment-from-none
             self.student.username,
             str(self.course.id),
-            self.other_problem_urlname,
+            str(self.problem_2.location),
             requesting_user=self.student,
         )
         assert result is None
 
-    @mock.patch('completion.handlers.BlockCompletion.objects.submit_completion')
-    def test_complete_student_attempt_success(self, mock_submit):
+    @mock.patch('lms.djangoapps.instructor.tasks.update_exam_completion_task.apply_async', autospec=True)
+    def test_complete_student_attempt_success(self, mock_completion_task):
         """
-        Assert complete_student_attempt correctly publishes completion for all
-        completable children of the given content_id
+        Assert update_exam_completion task is triggered
         """
-        # Section, subsection, and unit are all aggregators and not completable so should
-        # not be submitted.
-        section = ItemFactory.create(parent=self.course, category='chapter')
-        subsection = ItemFactory.create(parent=section, category='sequential')
-        unit = ItemFactory.create(parent=subsection, category='vertical')
-
-        # should both be submitted
-        video = ItemFactory.create(parent=unit, category='video')
-        problem = ItemFactory.create(parent=unit, category='problem')
-
-        # Not a completable block
-        ItemFactory.create(parent=unit, category='discussion')
-
-        with override_waffle_switch(ENABLE_COMPLETION_TRACKING_SWITCH, True):
-            self.service.complete_student_attempt(self.student.username, str(subsection.location))
-
-        # Only Completable leaf blocks should have completion published
-        assert mock_submit.call_count == 2
-        mock_submit.assert_any_call(user=self.student, block_key=video.location, completion=1.0)
-        mock_submit.assert_any_call(user=self.student, block_key=problem.location, completion=1.0)
-
-    @mock.patch('completion.handlers.BlockCompletion.objects.submit_completion')
-    def test_complete_student_attempt_split_test(self, mock_submit):
-        """
-        Asserts complete_student_attempt correctly publishes completion when a split test is involved
-
-        This test case exists because we ran into a bug about the user_service not existing
-        when a split_test existed inside of a subsection. Associated with this change was adding
-        in the user state into the module before attempting completion and this ensures that is
-        working properly.
-        """
-        partition = UserPartition(
-            0,
-            'first_partition',
-            'First Partition',
-            [
-                Group(0, 'alpha'),
-                Group(1, 'beta')
-            ]
-        )
-        course = CourseFactory.create(user_partitions=[partition])
-        section = ItemFactory.create(parent=course, category='chapter')
-        subsection = ItemFactory.create(parent=section, category='sequential')
-
-        c0_url = course.id.make_usage_key('vertical', 'split_test_cond0')
-        c1_url = course.id.make_usage_key('vertical', 'split_test_cond1')
-        split_test = ItemFactory.create(
-            parent=subsection,
-            category='split_test',
-            user_partition_id=0,
-            group_id_to_child={'0': c0_url, '1': c1_url},
-        )
-
-        cond0vert = ItemFactory.create(parent=split_test, category='vertical', location=c0_url)
-        ItemFactory.create(parent=cond0vert, category='video')
-        ItemFactory.create(parent=cond0vert, category='problem')
-
-        cond1vert = ItemFactory.create(parent=split_test, category='vertical', location=c1_url)
-        ItemFactory.create(parent=cond1vert, category='video')
-        ItemFactory.create(parent=cond1vert, category='html')
-
-        with override_waffle_switch(ENABLE_COMPLETION_TRACKING_SWITCH, True):
-            self.service.complete_student_attempt(self.student.username, str(subsection.location))
-
-        # Only the group the user was assigned to should have completion published.
-        # Either cond0vert's children or cond1vert's children
-        assert mock_submit.call_count == 2
-
-    @mock.patch('lms.djangoapps.instructor.tasks.log.error')
-    def test_complete_student_attempt_bad_user(self, mock_logger):
-        """
-        Assert complete_student_attempt with a bad user raises error and returns None
-        """
-        username = 'bad_user'
-        self.service.complete_student_attempt(username, self.problem_urlname)
-        mock_logger.assert_called_once_with(
-            self.complete_error_prefix.format(user=username, content_id=self.problem_urlname) + 'User does not exist!'
-        )
-
-    @mock.patch('lms.djangoapps.instructor.tasks.log.error')
-    def test_complete_student_attempt_bad_content_id(self, mock_logger):
-        """
-        Assert complete_student_attempt with a bad content_id raises error and returns None
-        """
-        username = self.student.username
-        self.service.complete_student_attempt(username, 'foo/bar/baz')
-        mock_logger.assert_called_once_with(
-            self.complete_error_prefix.format(user=username, content_id='foo/bar/baz') + 'Invalid content_id!'
-        )
-
-    @mock.patch('lms.djangoapps.instructor.tasks.log.error')
-    def test_complete_student_attempt_nonexisting_item(self, mock_logger):
-        """
-        Assert complete_student_attempt with nonexisting item in the modulestore
-        raises error and returns None
-        """
-        username = self.student.username
-        block = self.problem_urlname
-        self.service.complete_student_attempt(username, block)
-        mock_logger.assert_called_once_with(
-            self.complete_error_prefix.format(user=username, content_id=block) + 'Block not found in the modulestore!'
-        )
-
-    @mock.patch('lms.djangoapps.instructor.tasks.log.error')
-    def test_complete_student_attempt_failed_module(self, mock_logger):
-        """
-        Assert complete_student_attempt with failed get_module raises error and returns None
-        """
-        username = self.student.username
-        with mock.patch('lms.djangoapps.instructor.tasks.get_module_for_descriptor', return_value=None):
-            self.service.complete_student_attempt(username, str(self.course.location))
-        mock_logger.assert_called_once_with(
-            self.complete_error_prefix.format(user=username, content_id=self.course.location) +
-            'Module unable to be created from descriptor!'
-        )
+        self.service.complete_student_attempt(self.student.username, str(self.subsection.location))
+        mock_completion_task.assert_called_once_with((self.student.username, str(self.subsection.location), 1.0))
 
     def test_is_user_staff(self):
         """

@@ -4,18 +4,20 @@ Test for LMS courseware app.
 
 
 from textwrap import dedent
-from unittest import TestCase
+from unittest import TestCase, mock
 
-from unittest import mock
 from django.urls import reverse
 from opaque_keys.edx.keys import CourseKey
 
 from lms.djangoapps.courseware.tests.helpers import LoginEnrollmentTestCase
 from lms.djangoapps.lms_xblock.field_data import LmsFieldData
-from xmodule.error_module import ErrorBlock
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import TEST_DATA_MIXED_MODULESTORE, ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import ToyCourseFactory
+from xmodule.error_block import ErrorBlock  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (  # pylint: disable=wrong-import-order
+    TEST_DATA_SPLIT_MODULESTORE,
+    ModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import ToyCourseFactory  # pylint: disable=wrong-import-order
 
 
 class ActivateLoginTest(LoginEnrollmentTestCase):
@@ -30,21 +32,13 @@ class ActivateLoginTest(LoginEnrollmentTestCase):
         """
         Test login -- the setup function does all the work.
         """
-        pass  # lint-amnesty, pylint: disable=unnecessary-pass
+        pass  # pylint: disable=unnecessary-pass
 
     def test_logout(self):
         """
         Test logout -- setup function does login.
         """
         self.logout()
-
-    def test_request_attr_on_logout(self):
-        """
-        Test request object after logging out to see whether it
-        has 'is_from_log_out' attribute set to true.
-        """
-        response = self.client.get(reverse('logout'))
-        assert getattr(response.wsgi_request, 'is_from_logout', False)
 
 
 class PageLoaderTestCase(LoginEnrollmentTestCase):
@@ -71,80 +65,80 @@ class PageLoaderTestCase(LoginEnrollmentTestCase):
             self.fail('Could not retrieve any items from course')
 
         # Try to load each item in the course
-        for descriptor in items:
+        for block in items:
 
-            if descriptor.location.category == 'about':
+            if block.location.category == 'about':
                 self._assert_loads('about_course',
                                    {'course_id': str(course_key)},
-                                   descriptor)
+                                   block)
 
-            elif descriptor.location.category == 'static_tab':
+            elif block.location.category == 'static_tab':
                 kwargs = {'course_id': str(course_key),
-                          'tab_slug': descriptor.location.name}
-                self._assert_loads('static_tab', kwargs, descriptor)
+                          'tab_slug': block.location.name}
+                self._assert_loads('static_tab', kwargs, block)
 
-            elif descriptor.location.category == 'course_info':
+            elif block.location.category == 'course_info':
                 self._assert_loads('info', {'course_id': str(course_key)},
-                                   descriptor)
+                                   block)
 
             else:
 
                 kwargs = {'course_id': str(course_key),
-                          'location': str(descriptor.location)}
+                          'location': str(block.location)}
 
-                self._assert_loads('jump_to', kwargs, descriptor,
+                self._assert_loads('jump_to', kwargs, block,
                                    expect_redirect=True,
                                    check_content=True)
 
-    def _assert_loads(self, django_url, kwargs, descriptor,
+    def _assert_loads(self, django_url, kwargs, block,
                       expect_redirect=False,
                       check_content=False):
         """
         Assert that the url loads correctly.
         If expect_redirect, then also check that we were redirected.
         If check_content, then check that we don't get
-        an error message about unavailable modules.
+        an error message about unavailable blocks.
         """
 
         url = reverse(django_url, kwargs=kwargs)
         response = self.client.get(url, follow=True)
 
         if response.status_code != 200:
-            self.fail('Status %d for page %s' %
-                      (response.status_code, descriptor.location))
+            self.fail('Status %d for page %s' %  # noqa: UP031
+                      (response.status_code, block.location))
 
         if expect_redirect:
             assert response.redirect_chain[0][1] == 302
 
         if check_content:
             self.assertNotContains(response, "this module is temporarily unavailable")
-            assert not isinstance(descriptor, ErrorBlock)
+            assert not isinstance(block, ErrorBlock)
 
 
 class TestMongoCoursesLoad(ModuleStoreTestCase, PageLoaderTestCase):
     """
     Check that all pages in test courses load properly from Mongo.
     """
-    MODULESTORE = TEST_DATA_MIXED_MODULESTORE
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     def setUp(self):
         super().setUp()
         self.setup_user()
         self.toy_course_key = ToyCourseFactory.create().id
 
-    @mock.patch('xmodule.course_module.requests.get')
+    @mock.patch('xmodule.course_block.requests.get')
     def test_toy_textbooks_loads(self, mock_get):
         mock_get.return_value.text = dedent("""
             <?xml version="1.0"?><table_of_contents>
             <entry page="5" page_label="ii" name="Table of Contents"/>
             </table_of_contents>
         """).strip()
-        location = self.toy_course_key.make_usage_key('course', '2012_Fall')
+        location = self.toy_course_key.make_usage_key('course', 'course')
         course = self.store.get_item(location)
         assert len(course.textbooks) > 0
 
 
-class TestDraftModuleStore(ModuleStoreTestCase):  # lint-amnesty, pylint: disable=missing-class-docstring
+class TestDraftModuleStore(ModuleStoreTestCase):  # pylint: disable=missing-class-docstring
     def test_get_items_with_course_items(self):
         store = modulestore()
 
@@ -164,7 +158,7 @@ class TestLmsFieldData(TestCase):
         # Verify that if an LmsFieldData is passed into LmsFieldData as the
         # authored_data, that it doesn't produced a nested field data.
         #
-        # This fixes a bug where re-use of the same descriptor for many modules
+        # This fixes a bug where re-use of the same block for many modules
         # would cause more and more nesting, until the recursion depth would be
         # reached on any attribute access
 

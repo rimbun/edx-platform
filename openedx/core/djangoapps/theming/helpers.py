@@ -8,19 +8,20 @@ you need models here, please import them inside the function which uses them.
 
 import os
 import re
+from functools import lru_cache
 from logging import getLogger
 
 import crum
 from django.conf import settings
-
 from edx_toggles.toggles import SettingToggle
+
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
 from openedx.core.djangoapps.theming.helpers_dirs import (
     Theme,
     get_project_root_name_from_settings,
     get_theme_base_dirs_from_settings,
     get_theme_dirs,
-    get_themes_unchecked
+    get_themes_unchecked,
 )
 from openedx.core.lib.cache_utils import request_cached
 
@@ -28,7 +29,7 @@ logger = getLogger(__name__)  # pylint: disable=invalid-name
 
 
 @request_cached()
-def get_template_path(relative_path, **kwargs):  # lint-amnesty, pylint: disable=unused-argument
+def get_template_path(relative_path, **kwargs):  # pylint: disable=unused-argument
     """
     The calculated value is cached for the lifetime of the current request.
     """
@@ -37,9 +38,8 @@ def get_template_path(relative_path, **kwargs):  # lint-amnesty, pylint: disable
 
 def is_request_in_themed_site():
     """
-    This is a proxy function to hide microsite_configuration behind comprehensive theming.
+    This is a proxy function to site_configuration.
     """
-    # We need to give priority to theming/site-configuration over microsites
     return configuration_helpers.is_site_configuration_enabled()
 
 
@@ -240,7 +240,7 @@ def get_theme_base_dir(theme_dir_name, suppress_error=False):
         return None
 
     raise ValueError(
-        "Theme '{theme}' not found in any of the following themes dirs, \nTheme dirs: \n{dir}".format(
+        "Theme '{theme}' not found in any of the following themes dirs, \nTheme dirs: \n{dir}".format(  # noqa: UP032
             theme=theme_dir_name,
             dir=get_theme_base_dirs(),
         ))
@@ -256,6 +256,7 @@ def theme_exists(theme_name, themes_dir=None):
     return False
 
 
+@lru_cache
 def get_themes(themes_dir=None):
     """
     get a list of all themes known to the system.
@@ -267,9 +268,11 @@ def get_themes(themes_dir=None):
     """
     if not is_comprehensive_theming_enabled():
         return []
-    if themes_dir is None:
-        themes_dir = get_theme_base_dirs_unchecked()
-    return get_themes_unchecked(themes_dir, settings.PROJECT_ROOT)
+    if themes_dir:
+        themes_dirs = [themes_dir]
+    else:
+        themes_dirs = get_theme_base_dirs_unchecked()
+    return get_themes_unchecked(themes_dirs, settings.PROJECT_ROOT)
 
 
 def get_theme_base_dirs_unchecked():

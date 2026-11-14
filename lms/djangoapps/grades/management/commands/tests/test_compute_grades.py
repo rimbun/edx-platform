@@ -9,12 +9,14 @@ import ddt
 import pytest
 from django.core.management import CommandError, call_command
 
-from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.grades.config.models import ComputeGradesSetting
 from lms.djangoapps.grades.management.commands import compute_grades
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt.ddt
@@ -76,13 +78,16 @@ class TestComputeGrades(SharedModuleStoreTestCase):
         if not estimate_first_attempted:
             command.append('--no_estimate_first_attempted')
         call_command(*(command + courses))
-        _kwargs = lambda course_key, offset: {
-            'course_key': course_key,
-            'batch_size': 2,
-            'offset': offset,
-            'estimate_first_attempted': estimate_first_attempted,
-            'seq_id': ANY,
-        }
+
+        def _kwargs(course_key, offset):
+            return {
+                'course_key': course_key,
+                'batch_size': 2,
+                'offset': offset,
+                'estimate_first_attempted': estimate_first_attempted,
+                'seq_id': ANY
+            }
+
         actual = mock_task.apply_async.call_args_list
         # Order doesn't matter, but can't use a set because dicts aren't hashable
         expected = [

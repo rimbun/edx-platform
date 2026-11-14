@@ -1,25 +1,33 @@
 """
 Helpers for student roles
 """
+from __future__ import annotations
 
+from django.contrib.auth import get_user_model
 
-from openedx.core.djangoapps.django_comment_common.models import (
-    FORUM_ROLE_ADMINISTRATOR,
-    FORUM_ROLE_COMMUNITY_TA,
-    FORUM_ROLE_GROUP_MODERATOR,
-    FORUM_ROLE_MODERATOR,
-    Role
-)
 from common.djangoapps.student.roles import (
+    AuthzCompatCourseAccessRole,
     CourseBetaTesterRole,
     CourseInstructorRole,
     CourseStaffRole,
     GlobalStaff,
     OrgInstructorRole,
-    OrgStaffRole
+    OrgStaffRole,
+    RoleCache,
 )
+from openedx.core.djangoapps.django_comment_common.models import (
+    FORUM_ROLE_ADMINISTRATOR,
+    FORUM_ROLE_COMMUNITY_TA,
+    FORUM_ROLE_GROUP_MODERATOR,
+    FORUM_ROLE_MODERATOR,
+    Role,
+)
+from openedx.core.lib.cache_utils import request_cached
+
+User = get_user_model()
 
 
+@request_cached()
 def has_staff_roles(user, course_key):
     """
     Return true if a user has any of the following roles
@@ -38,3 +46,32 @@ def has_staff_roles(user, course_key):
             is_org_instructor, is_global_staff, has_forum_role]):
         return True
     return False
+
+
+@request_cached()
+def get_role_cache(user: User) -> RoleCache:
+    """
+    Returns a populated RoleCache for the given user.
+
+    The returned RoleCache is also cached on the provided `user` to improve performance on future roles checks.
+
+    :param user: User
+    :return: All roles for all courses that this user has access to.
+    """
+    # pylint: disable=protected-access
+    if not hasattr(user, '_roles'):
+        user._roles = RoleCache(user)
+    return user._roles
+
+
+@request_cached()
+def get_course_roles(user: User) -> list[AuthzCompatCourseAccessRole]:
+    """
+    Returns a list of all course-level roles that this user has.
+
+    :param user: User
+    :return: All roles for all courses that this user has access to.
+    """
+    # pylint: disable=protected-access
+    role_cache = get_role_cache(user)
+    return list(role_cache.all_roles_set)

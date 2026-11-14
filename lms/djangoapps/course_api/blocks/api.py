@@ -7,6 +7,7 @@ import lms.djangoapps.course_blocks.api as course_blocks_api
 from lms.djangoapps.course_blocks.transformers.access_denied_filter import AccessDeniedMessageFilterTransformer
 from lms.djangoapps.course_blocks.transformers.hidden_content import HiddenContentTransformer
 from openedx.core.djangoapps.content.block_structure.transformers import BlockStructureTransformers
+from openedx.core.djangoapps.discussions.transformers import DiscussionsTopicLinkTransformer
 from openedx.features.effort_estimation.api import EffortEstimationTransformer
 
 from .serializers import BlockDictSerializer, BlockSerializer
@@ -75,6 +76,10 @@ def get_blocks(
     include_gated_sections = 'show_gated_sections' in requested_fields
     include_has_scheduled_content = 'has_scheduled_content' in requested_fields
     include_special_exams = 'special_exam_info' in requested_fields
+    include_discussions_context = (
+        DiscussionsTopicLinkTransformer.EMBED_URL in requested_fields or
+        DiscussionsTopicLinkTransformer.EXTERNAL_ID in requested_fields
+    )
 
     if user is not None:
         transformers += course_blocks_api.get_course_block_access_transformers(user)
@@ -85,8 +90,10 @@ def get_blocks(
             ),
             HiddenContentTransformer()
         ]
+    else:
+        transformers += [course_blocks_api.visibility.VisibilityTransformer()]
 
-    # Note: A change to the BlockCompletionTransformer (https://github.com/edx/edx-platform/pull/27622/)
+    # Note: A change to the BlockCompletionTransformer (https://github.com/openedx/edx-platform/pull/27622/)
     # will be introducing a bug if hide_access_denials is True.  I'm accepting this risk because in
     # the AccessDeniedMessageFilterTransformer, there is note about deleting it and I believe it is
     # technically deprecated functionality. The only use case where hide_access_denials is True
@@ -99,13 +106,16 @@ def get_blocks(
     if include_effort_estimation:
         transformers += [EffortEstimationTransformer()]
 
+    if include_discussions_context:
+        transformers += [DiscussionsTopicLinkTransformer()]
+
     transformers += [
         BlocksAPITransformer(
             block_counts,
             student_view_data,
             depth,
             nav_depth
-        )
+        ),
     ]
 
     # transform
@@ -142,3 +152,22 @@ def get_blocks(
 
     # return serialized data
     return serializer.data
+
+
+def get_block_metadata(block, includes=()):
+    """
+    Get metadata about the specified XBlock.
+
+    Args:
+        block (XBlock): block object
+        includes (list|set): list or set of metadata keys to include. Valid keys are:
+            index_dictionary: a dictionary of data used to add this XBlock's content
+                to a search index.
+    """
+    data = {
+        "id": str(block.scope_ids.usage_id),
+        "type": block.scope_ids.block_type,
+    }
+    if "index_dictionary" in includes:
+        data["index_dictionary"] = block.index_dictionary()
+    return data

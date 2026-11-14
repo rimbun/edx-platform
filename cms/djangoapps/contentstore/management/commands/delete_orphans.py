@@ -5,8 +5,8 @@ from django.core.management.base import BaseCommand, CommandError
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
 
-from cms.djangoapps.contentstore.views.item import _delete_orphans
-from xmodule.modulestore import ModuleStoreEnum
+from cms.djangoapps.contentstore.xblock_storage_handlers.view_handlers import delete_orphans
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
 
 
 class Command(BaseCommand):
@@ -25,18 +25,18 @@ class Command(BaseCommand):
         try:
             course_key = CourseKey.from_string(options['course_id'])
         except InvalidKeyError:
-            raise CommandError("Invalid course key.")  # lint-amnesty, pylint: disable=raise-missing-from
+            raise CommandError("Invalid course key.")  # pylint: disable=raise-missing-from  # noqa: B904
 
         if options['commit']:
             print('Deleting orphans from the course:')
-            deleted_items = _delete_orphans(
+            deleted_items = delete_orphans(
                 course_key, ModuleStoreEnum.UserID.mgmt_command, options['commit']
             )
             print("Success! Deleted the following orphans from the course:")
             print("\n".join(deleted_items))
         else:
             print('Dry run. The following orphans would have been deleted from the course:')
-            deleted_items = _delete_orphans(
+            deleted_items = delete_orphans(
                 course_key, ModuleStoreEnum.UserID.mgmt_command, options['commit']
             )
             print("\n".join(deleted_items))

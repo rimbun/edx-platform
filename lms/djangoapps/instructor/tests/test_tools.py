@@ -7,21 +7,26 @@ import datetime
 import json
 import unittest
 from unittest import mock
+from unittest.mock import MagicMock, patch
 
 import pytest
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.exceptions import MultipleObjectsReturned
 from django.test import TestCase
-from edx_when.api import set_dates_for_course
+from edx_when.api import get_dates_for_course, set_dates_for_course
 from edx_when.field_data import DateLookupFieldData
 from opaque_keys.edx.keys import CourseKey
 from pytz import UTC
+from xblock.fields import Date
 
 from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
 from openedx.core.djangoapps.course_date_signals import handlers
-from xmodule.fields import Date
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore.tests.django_utils import (
+    TEST_DATA_SPLIT_MODULESTORE,
+    ModuleStoreTestCase,
+    SharedModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 
 from ..views import tools
 
@@ -55,7 +60,7 @@ class TestHandleDashboardError(unittest.TestCase):
 
     def test_no_error(self):
         @tools.handle_dashboard_error
-        def view(request, course_id):  # lint-amnesty, pylint: disable=unused-argument
+        def view(request, course_id):  # pylint: disable=unused-argument
             """
             Returns "Oh yes!"
             """
@@ -99,13 +104,18 @@ class TestFindUnit(SharedModuleStoreTestCase):
     """
     Test the find_unit function.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.course = CourseFactory.create()
-        with cls.store.bulk_operations(cls.course.id, emit_signals=False):
-            week1 = ItemFactory.create(parent=cls.course)
-            cls.homework = ItemFactory.create(parent=week1)
+        course = CourseFactory.create()
+        with cls.store.bulk_operations(course.id, emit_signals=False):
+            cls.week1 = BlockFactory.create(parent=course)
+            cls.homework = BlockFactory.create(parent=cls.week1)
+
+        # get updated course
+        cls.course = cls.store.get_item(course.location)
 
     def test_find_unit_success(self):
         """
@@ -128,6 +138,8 @@ class TestGetUnitsWithDueDate(ModuleStoreTestCase):
     """
     Test the get_units_with_due_date function.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
+
     def setUp(self):
         """
         Fixtures.
@@ -135,9 +147,9 @@ class TestGetUnitsWithDueDate(ModuleStoreTestCase):
         super().setUp()
 
         course = CourseFactory.create()
-        week1 = ItemFactory.create(parent=course)
-        week2 = ItemFactory.create(parent=course)
-        child = ItemFactory.create(parent=week1)
+        week1 = BlockFactory.create(parent=course)
+        week2 = BlockFactory.create(parent=course)
+        child = BlockFactory.create(parent=week1)
 
         due = datetime.datetime(2010, 5, 12, 2, 42, tzinfo=UTC)
         set_dates_for_course(course.id, [
@@ -146,7 +158,8 @@ class TestGetUnitsWithDueDate(ModuleStoreTestCase):
             (child.location, {'due': due}),
         ])
 
-        self.course = course
+        # get updated course
+        self.course = self.store.get_item(course.location)
         self.week1 = week1
         self.week2 = week2
 
@@ -193,6 +206,8 @@ class TestSetDueDateExtension(ModuleStoreTestCase):
     """
     Test the set_due_date_extensions function.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
+
     def setUp(self):
         """
         Fixtures.
@@ -201,18 +216,19 @@ class TestSetDueDateExtension(ModuleStoreTestCase):
 
         self.due = due = datetime.datetime(2010, 5, 12, 2, 42, tzinfo=UTC)
         course = CourseFactory.create()
-        week1 = ItemFactory.create(due=due, parent=course)
-        week2 = ItemFactory.create(due=due, parent=course)
-        week3 = ItemFactory.create(parent=course)
-        homework = ItemFactory.create(parent=week1)
-        assignment = ItemFactory.create(parent=homework, due=due)
+        week1 = BlockFactory.create(due=due, parent=course)
+        week2 = BlockFactory.create(due=due, parent=course)
+        week3 = BlockFactory.create(parent=course)
+        homework = BlockFactory.create(parent=week1)
+        assignment = BlockFactory.create(parent=homework, due=due)
         handlers.extract_dates(None, course.id)
 
         user = UserFactory.create()
 
-        self.course = course
-        self.week1 = week1
-        self.homework = homework
+        # get updated course
+        self.course = self.store.get_item(course.location)
+        self.week1 = self.store.get_item(week1.location)
+        self.homework = self.store.get_item(homework.location)
         self.assignment = assignment
         self.week2 = week2
         self.week3 = week3
@@ -220,7 +236,7 @@ class TestSetDueDateExtension(ModuleStoreTestCase):
 
         CourseEnrollmentFactory.create(user=self.user, course_id=self.course.id)
 
-        inject_field_data((course, week1, week2, week3, homework, assignment), course, user)
+        inject_field_data((course, self.week1, self.week2, self.week3, self.homework, self.assignment), course, user)
 
     def _clear_field_data_cache(self):
         """
@@ -252,12 +268,12 @@ class TestSetDueDateExtension(ModuleStoreTestCase):
 
     def test_set_due_date_extension_invalid_date(self):
         extended = datetime.datetime(2009, 1, 1, 0, 0, tzinfo=UTC)
-        with pytest.raises(tools.DashboardError):
+        with pytest.raises(tools.DashboardError), self.allow_transaction_exception():
             tools.set_due_date_extension(self.course, self.week1, self.user, extended)
 
     def test_set_due_date_extension_no_date(self):
         extended = datetime.datetime(2013, 12, 25, 0, 0, tzinfo=UTC)
-        with pytest.raises(tools.DashboardError):
+        with pytest.raises(tools.DashboardError), self.allow_transaction_exception():
             tools.set_due_date_extension(self.course, self.week3, self.user, extended)
 
     def test_reset_due_date_extension(self):
@@ -276,11 +292,37 @@ class TestSetDueDateExtension(ModuleStoreTestCase):
         with pytest.raises(tools.DashboardError):
             tools.set_due_date_extension(self.course, self.week3, user, extended)
 
+    @patch('edx_when.api.get_dates_for_course', wraps=get_dates_for_course)
+    def test_set_due_date_extension_cache_invalidation(self, mock_method: MagicMock):
+        """
+        Tests that the course dates are reloaded once they are overridden.
+        """
+        extended_hw = datetime.datetime(2013, 10, 25, 0, 0, tzinfo=UTC)
+        tools.set_due_date_extension(self.course, self.assignment, self.user, extended_hw)
+
+        assert mock_method.call_count == 3
+        mock_method.assert_called_with(self.course.id, user=self.user, use_cached=False)
+
+    @patch('edx_when.api.get_dates_for_course', wraps=get_dates_for_course)
+    def test_set_due_date_extension_cache_invalidation_with_version(self, mock_method: MagicMock):
+        """
+        Tests that the course dates are reloaded for both versioned and non-versioned scenarios, to provide
+        a unified experience across the platform.
+        """
+        self.course.course_version = 'test_version'
+        extended_hw = datetime.datetime(2013, 10, 25, 0, 0, tzinfo=UTC)
+        tools.set_due_date_extension(self.course, self.assignment, self.user, extended_hw)
+
+        assert mock_method.call_count == 3
+        mock_method.assert_any_call(self.course.id, user=self.user, published_version='test_version', use_cached=False)
+        mock_method.assert_any_call(self.course.id, user=self.user, use_cached=False)
+
 
 class TestDataDumps(ModuleStoreTestCase):
     """
     Test data dumps for reporting.
     """
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
 
     def setUp(self):
         """
@@ -290,17 +332,18 @@ class TestDataDumps(ModuleStoreTestCase):
 
         due = datetime.datetime(2010, 5, 12, 2, 42, tzinfo=UTC)
         course = CourseFactory.create()
-        week1 = ItemFactory.create(due=due, parent=course)
-        week2 = ItemFactory.create(due=due, parent=course)
+        week1 = BlockFactory.create(due=due, parent=course)
+        week2 = BlockFactory.create(due=due, parent=course)
 
-        homework = ItemFactory.create(
+        homework = BlockFactory.create(
             parent=week1,
             due=due
         )
 
         user1 = UserFactory.create()
         user2 = UserFactory.create()
-        self.course = course
+        # get updated course
+        self.course = self.store.get_item(course.location)
         self.week1 = week1
         self.homework = homework
         self.week2 = week2
@@ -316,13 +359,13 @@ class TestDataDumps(ModuleStoreTestCase):
                                      extended)
         tools.set_due_date_extension(self.course, self.week1, self.user2,
                                      extended)
-        report = tools.dump_module_extensions(self.course, self.week1)
+        report = tools.dump_block_extensions(self.course, self.week1)
         assert (
             report['title'] == 'Users with due date extensions for ' +
             self.week1.display_name)
         assert (
             report['header'] == ["Username", "Full Name", "Extended Due Date"])
-        self.assertCountEqual(
+        self.assertCountEqual(  # noqa: PT009
             report['data'],
             [
                 {
@@ -345,7 +388,7 @@ class TestDataDumps(ModuleStoreTestCase):
                                      extended)
         report = tools.dump_student_extensions(self.course, self.user1)
         assert (
-            report['title'] == 'Due date extensions for %s (%s)' %
+            report['title'] == 'Due date extensions for %s (%s)' %  # noqa: UP031
             (self.user1.profile.name, self.user1.username))
         assert (
             report['header'] == ["Unit", "Extended Due Date"])
@@ -417,3 +460,39 @@ class TestStudentFromIdentifier(TestCase):
         """Test with invalid identifier"""
         with pytest.raises(User.DoesNotExist):
             assert tools.get_student_from_identifier("invalid")
+
+
+class TestProfilePrivacy(TestCase):
+    '''
+    Tests utility function for stripping a feature from the list of features to be reported on
+    '''
+    def test_no_feature_list_supplied(self):
+        '''
+        Missing first argument raises an exception
+        '''
+        with pytest.raises(tools.DashboardError):
+            assert tools.keep_field_private(None, "bogus_field_name")
+
+    def test_no_privacy_feature_supplied(self):
+        '''
+        Missing second argument raises an exception
+        '''
+        with pytest.raises(tools.DashboardError):
+            assert tools.keep_field_private(["bogus_field1", "bogus_field2"], None)
+
+    def test_feature_supplied_and_stripped(self):
+        '''
+        Request to strip a feature in feature list succeeds
+        '''
+        query_fields = ['Name', 'Address', 'Secret']
+        assert 'Secret' in query_fields
+        tools.keep_field_private(query_fields, 'Secret')
+        assert 'Secret' not in query_fields
+
+    def test_feature_absent_and_exception_consumed(self):
+        '''
+        Request to strip a feature not in feature list is a silent no-op
+        '''
+        query_fields = ['Name', 'Address']
+        tools.keep_field_private(query_fields, 'Secret')
+        assert len(query_fields) == 2

@@ -6,22 +6,32 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import ddt
-from django.conf import settings
 from django.test import TestCase
 from django.test.utils import override_settings
+from opaque_keys.edx.keys import CourseKey
 from opaque_keys.edx.locator import CourseLocator, LibraryLocator
+from openedx_events.testing import OpenEdxEventsTestMixin
 from path import Path as path
 from pytz import UTC
+from rest_framework import status
 from user_tasks.models import UserTaskArtifact, UserTaskStatus
 
 from cms.djangoapps.contentstore import utils
 from cms.djangoapps.contentstore.tasks import ALL_ALLOWED_XBLOCKS, validate_course_olx
 from cms.djangoapps.contentstore.tests.utils import TEST_DATA_DIR, CourseTestCase
+from cms.djangoapps.contentstore.utils import send_course_update_notification
+from common.djangoapps.student.models import CourseEnrollment
+from common.djangoapps.student.tests.factories import GlobalStaffFactory, InstructorFactory, UserFactory
+from openedx.core.djangoapps.notifications.models import Notification
 from openedx.core.djangoapps.site_configuration.tests.test_util import with_site_configuration_context
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.django import modulestore
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase, SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory, ItemFactory
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.django import modulestore  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (  # pylint: disable=wrong-import-order
+    TEST_DATA_SPLIT_MODULESTORE,
+    ModuleStoreTestCase,
+    SharedModuleStoreTestCase,
+)
+from xmodule.modulestore.tests.factories import BlockFactory, CourseFactory
 from xmodule.partitions.partitions import Group, UserPartition
 
 
@@ -33,12 +43,12 @@ class LMSLinksTestCase(TestCase):
         course_key = CourseLocator('mitX', '101', 'test')
         location = course_key.make_usage_key('vertical', 'contacting_us')
         link = utils.get_lms_link_for_item(location, False)
-        self.assertEqual(link, "//localhost:8000/courses/course-v1:mitX+101+test/jump_to/block-v1:mitX+101+test+type"
+        self.assertEqual(link, "//localhost:8000/courses/course-v1:mitX+101+test/jump_to/block-v1:mitX+101+test+type"  # noqa: PT009  # pylint: disable=line-too-long
                                "@vertical+block@contacting_us")
 
         # test preview
         link = utils.get_lms_link_for_item(location, True)
-        self.assertEqual(
+        self.assertEqual(  # noqa: PT009
             link,
             "//preview.localhost/courses/course-v1:mitX+101+test/jump_to/block-v1:mitX+101+test+type@vertical+block"
             "@contacting_us "
@@ -47,27 +57,27 @@ class LMSLinksTestCase(TestCase):
         # now test with the course' location
         location = course_key.make_usage_key('course', 'test')
         link = utils.get_lms_link_for_item(location)
-        self.assertEqual(link, "//localhost:8000/courses/course-v1:mitX+101+test/jump_to/block-v1:mitX+101+test+type"
+        self.assertEqual(link, "//localhost:8000/courses/course-v1:mitX+101+test/jump_to/block-v1:mitX+101+test+type"  # noqa: PT009  # pylint: disable=line-too-long
                                "@course+block@test")
 
     def lms_link_for_certificate_web_view_test(self):
         """ Tests get_lms_link_for_certificate_web_view. """
         course_key = CourseLocator('mitX', '101', 'test')
-        dummy_user = ModuleStoreEnum.UserID.test
+        dummy_user = ModuleStoreEnum.UserID.test  # noqa: F841
         mode = 'professional'
 
-        self.assertEqual(
+        self.assertEqual(  # noqa: PT009
             utils.get_lms_link_for_certificate_web_view(course_key, mode),
-            "//localhost:8000/certificates/course/{course_key}?preview={mode}".format(
+            "//localhost:8000/certificates/course/{course_key}?preview={mode}".format(  # noqa: UP032
                 course_key=course_key,
                 mode=mode
             )
         )
 
         with with_site_configuration_context(configuration={"course_org_filter": "mitX", "LMS_BASE": "dummyhost:8000"}):
-            self.assertEqual(
+            self.assertEqual(  # noqa: PT009
                 utils.get_lms_link_for_certificate_web_view(course_key, mode),
-                "//dummyhost:8000/certificates/course/{course_key}?preview={mode}".format(
+                "//dummyhost:8000/certificates/course/{course_key}?preview={mode}".format(  # noqa: UP032
                     course_key=course_key,
                     mode=mode
                 )
@@ -140,7 +150,7 @@ class XBlockVisibilityTestCase(SharedModuleStoreTestCase):
         vertical.start = self.future
         modulestore().update_item(vertical, self.dummy_user)
 
-        self.assertTrue(utils.is_currently_visible_to_students(vertical))
+        self.assertTrue(utils.is_currently_visible_to_students(vertical))  # noqa: PT009
 
     def _test_visible_to_students(self, expected_visible_without_lock, name, start_date, publish=False):
         """
@@ -148,13 +158,13 @@ class XBlockVisibilityTestCase(SharedModuleStoreTestCase):
         with and without visible_to_staff_only set.
         """
         no_staff_lock = self._create_xblock_with_start_date(name, start_date, publish, visible_to_staff_only=False)
-        self.assertEqual(expected_visible_without_lock, utils.is_currently_visible_to_students(no_staff_lock))
+        self.assertEqual(expected_visible_without_lock, utils.is_currently_visible_to_students(no_staff_lock))  # noqa: PT009  # pylint: disable=line-too-long
 
         # any xblock with visible_to_staff_only set to True should not be visible to students.
         staff_lock = self._create_xblock_with_start_date(
             name + "_locked", start_date, publish, visible_to_staff_only=True
         )
-        self.assertFalse(utils.is_currently_visible_to_students(staff_lock))
+        self.assertFalse(utils.is_currently_visible_to_students(staff_lock))  # noqa: PT009
 
     def _create_xblock_with_start_date(self, name, start_date, publish=False, visible_to_staff_only=False):
         """Helper to create an xblock with a start date, optionally publishing it"""
@@ -176,9 +186,9 @@ class ReleaseDateSourceTest(CourseTestCase):
     def setUp(self):
         super().setUp()
 
-        self.chapter = ItemFactory.create(category='chapter', parent_location=self.course.location)
-        self.sequential = ItemFactory.create(category='sequential', parent_location=self.chapter.location)
-        self.vertical = ItemFactory.create(category='vertical', parent_location=self.sequential.location)
+        self.chapter = BlockFactory.create(category='chapter', parent_location=self.course.location)
+        self.sequential = BlockFactory.create(category='sequential', parent_location=self.chapter.location)
+        self.vertical = BlockFactory.create(category='vertical', parent_location=self.sequential.location)
 
         # Read again so that children lists are accurate
         self.chapter = self.store.get_item(self.chapter.location)
@@ -200,8 +210,8 @@ class ReleaseDateSourceTest(CourseTestCase):
     def _verify_release_date_source(self, item, expected_source):
         """Helper to verify that the release date source of a given item matches the expected source"""
         source = utils.find_release_date_source(item)
-        self.assertEqual(source.location, expected_source.location)
-        self.assertEqual(source.start, expected_source.start)
+        self.assertEqual(source.location, expected_source.location)  # noqa: PT009
+        self.assertEqual(source.start, expected_source.start)  # noqa: PT009
 
     def test_chapter_source_for_vertical(self):
         """Tests a vertical's release date being set by its chapter"""
@@ -230,10 +240,10 @@ class StaffLockTest(CourseTestCase):
     def setUp(self):
         super().setUp()
 
-        self.chapter = ItemFactory.create(category='chapter', parent_location=self.course.location)
-        self.sequential = ItemFactory.create(category='sequential', parent_location=self.chapter.location)
-        self.vertical = ItemFactory.create(category='vertical', parent_location=self.sequential.location)
-        self.orphan = ItemFactory.create(category='vertical', parent_location=self.sequential.location)
+        self.chapter = BlockFactory.create(category='chapter', parent_location=self.course.location)
+        self.sequential = BlockFactory.create(category='sequential', parent_location=self.chapter.location)
+        self.vertical = BlockFactory.create(category='vertical', parent_location=self.sequential.location)
+        self.orphan = BlockFactory.create(category='vertical', parent_location=self.sequential.location)
 
         # Read again so that children lists are accurate
         self.chapter = self.store.get_item(self.chapter.location)
@@ -269,8 +279,8 @@ class StaffLockSourceTest(StaffLockTest):
     def _verify_staff_lock_source(self, item, expected_source):
         """Helper to verify that the staff lock source of a given item matches the expected source"""
         source = utils.find_staff_lock_source(item)
-        self.assertEqual(source.location, expected_source.location)
-        self.assertTrue(source.visible_to_staff_only)
+        self.assertEqual(source.location, expected_source.location)  # noqa: PT009
+        self.assertTrue(source.visible_to_staff_only)  # noqa: PT009
 
     def test_chapter_source_for_vertical(self):
         """Tests a vertical's staff lock being set by its chapter"""
@@ -295,12 +305,12 @@ class StaffLockSourceTest(StaffLockTest):
 
     def test_orphan_has_no_source(self):
         """Tests that a orphaned xblock has no staff lock source"""
-        self.assertIsNone(utils.find_staff_lock_source(self.orphan))
+        self.assertIsNone(utils.find_staff_lock_source(self.orphan))  # noqa: PT009
 
     def test_no_source_for_vertical(self):
         """Tests a vertical with no staff lock set anywhere"""
         self._update_staff_locks(False, False, False)
-        self.assertIsNone(utils.find_staff_lock_source(self.vertical))
+        self.assertIsNone(utils.find_staff_lock_source(self.vertical))  # noqa: PT009
 
 
 class InheritedStaffLockTest(StaffLockTest):
@@ -309,27 +319,27 @@ class InheritedStaffLockTest(StaffLockTest):
     def test_no_inheritance(self):
         """Tests that a locked or unlocked vertical with no locked ancestors does not have an inherited lock"""
         self._update_staff_locks(False, False, False)
-        self.assertFalse(utils.ancestor_has_staff_lock(self.vertical))
+        self.assertFalse(utils.ancestor_has_staff_lock(self.vertical))  # noqa: PT009
         self._update_staff_locks(False, False, True)
-        self.assertFalse(utils.ancestor_has_staff_lock(self.vertical))
+        self.assertFalse(utils.ancestor_has_staff_lock(self.vertical))  # noqa: PT009
 
     def test_inheritance_in_locked_section(self):
         """Tests that a locked or unlocked vertical in a locked section has an inherited lock"""
         self._update_staff_locks(True, False, False)
-        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))
+        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))  # noqa: PT009
         self._update_staff_locks(True, False, True)
-        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))
+        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))  # noqa: PT009
 
     def test_inheritance_in_locked_subsection(self):
         """Tests that a locked or unlocked vertical in a locked subsection has an inherited lock"""
         self._update_staff_locks(False, True, False)
-        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))
+        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))  # noqa: PT009
         self._update_staff_locks(False, True, True)
-        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))
+        self.assertTrue(utils.ancestor_has_staff_lock(self.vertical))  # noqa: PT009
 
     def test_no_inheritance_for_orphan(self):
         """Tests that an orphaned xblock does not inherit staff lock"""
-        self.assertFalse(utils.ancestor_has_staff_lock(self.orphan))
+        self.assertFalse(utils.ancestor_has_staff_lock(self.orphan))  # noqa: PT009
 
 
 class GroupVisibilityTest(CourseTestCase):
@@ -337,15 +347,16 @@ class GroupVisibilityTest(CourseTestCase):
     Test content group access rules.
     """
 
+    MODULESTORE = TEST_DATA_SPLIT_MODULESTORE
+
     def setUp(self):
         super().setUp()
-
-        chapter = ItemFactory.create(category='chapter', parent_location=self.course.location)
-        sequential = ItemFactory.create(category='sequential', parent_location=chapter.location)
-        vertical = ItemFactory.create(category='vertical', parent_location=sequential.location)
-        html = ItemFactory.create(category='html', parent_location=vertical.location)
-        problem = ItemFactory.create(
-            category='problem', parent_location=vertical.location, data="<problem></problem>"
+        chapter = BlockFactory.create(category='chapter', parent=self.course)
+        sequential = BlockFactory.create(category='sequential', parent=chapter)
+        vertical = BlockFactory.create(category='vertical', parent=sequential)
+        html = BlockFactory.create(category='html', parent=vertical)
+        problem = BlockFactory.create(
+            category='problem', parent=vertical, data="<problem></problem>"
         )
         self.sequential = self.store.get_item(sequential.location)
         self.vertical = self.store.get_item(vertical.location)
@@ -400,8 +411,8 @@ class GroupVisibilityTest(CourseTestCase):
         def verify_all_components_visible_to_all():
             """ Verifies when group_access has not been set on anything. """
             for item in (self.sequential, self.vertical, self.html, self.problem):
-                self.assertFalse(utils.has_children_visible_to_specific_partition_groups(item))
-                self.assertFalse(utils.is_visible_to_specific_partition_groups(item))
+                self.assertFalse(utils.has_children_visible_to_specific_partition_groups(item))  # noqa: PT009
+                self.assertFalse(utils.is_visible_to_specific_partition_groups(item))  # noqa: PT009
 
         verify_all_components_visible_to_all()
 
@@ -417,17 +428,21 @@ class GroupVisibilityTest(CourseTestCase):
         # This is a no-op.
         self.set_group_access(self.vertical, {1: []})
         self.set_group_access(self.problem, {2: [3, 4]})
+        # get updated sequential/vertical/problem
+        self.sequential = self.store.get_item(self.sequential.location)
+        self.vertical = self.store.get_item(self.vertical.location)
+        self.problem = self.store.get_item(self.problem.location)
 
         # Note that "has_children_visible_to_specific_partition_groups" only checks immediate children.
-        self.assertFalse(utils.has_children_visible_to_specific_partition_groups(self.sequential))
-        self.assertTrue(utils.has_children_visible_to_specific_partition_groups(self.vertical))
-        self.assertFalse(utils.has_children_visible_to_specific_partition_groups(self.html))
-        self.assertFalse(utils.has_children_visible_to_specific_partition_groups(self.problem))
+        self.assertFalse(utils.has_children_visible_to_specific_partition_groups(self.sequential))  # noqa: PT009
+        self.assertTrue(utils.has_children_visible_to_specific_partition_groups(self.vertical))  # noqa: PT009
+        self.assertFalse(utils.has_children_visible_to_specific_partition_groups(self.html))  # noqa: PT009
+        self.assertFalse(utils.has_children_visible_to_specific_partition_groups(self.problem))  # noqa: PT009
 
-        self.assertTrue(utils.is_visible_to_specific_partition_groups(self.sequential))
-        self.assertFalse(utils.is_visible_to_specific_partition_groups(self.vertical))
-        self.assertFalse(utils.is_visible_to_specific_partition_groups(self.html))
-        self.assertTrue(utils.is_visible_to_specific_partition_groups(self.problem))
+        self.assertTrue(utils.is_visible_to_specific_partition_groups(self.sequential))  # noqa: PT009
+        self.assertFalse(utils.is_visible_to_specific_partition_groups(self.vertical))  # noqa: PT009
+        self.assertFalse(utils.is_visible_to_specific_partition_groups(self.html))  # noqa: PT009
+        self.assertTrue(utils.is_visible_to_specific_partition_groups(self.problem))  # noqa: PT009
 
 
 class GetUserPartitionInfoTest(ModuleStoreTestCase):
@@ -440,7 +455,7 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
         """Create a dummy course. """
         super().setUp()
         self.course = CourseFactory()
-        self.block = ItemFactory.create(category="problem", parent_location=self.course.location)
+        self.block = BlockFactory.create(category="problem", parent_location=self.course.location)
 
         # Set up some default partitions
         self._set_partitions([
@@ -502,12 +517,12 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
                 ]
             }
         ]
-        self.assertEqual(self._get_partition_info(schemes=["cohort", "random"]), expected)
+        self.assertEqual(self._get_partition_info(schemes=["cohort", "random"]), expected)  # noqa: PT009
 
         # Update group access and expect that now one group is marked as selected.
         self._set_group_access({0: [1]})
         expected[0]["groups"][1]["selected"] = True
-        self.assertEqual(self._get_partition_info(schemes=["cohort", "random"]), expected)
+        self.assertEqual(self._get_partition_info(schemes=["cohort", "random"]), expected)  # noqa: PT009
 
     def test_deleted_groups(self):
         # Select a group that is not defined in the partition
@@ -516,8 +531,8 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
         # Expect that the group appears as selected but is marked as deleted
         partitions = self._get_partition_info()
         groups = partitions[0]["groups"]
-        self.assertEqual(len(groups), 3)
-        self.assertEqual(groups[2], {
+        self.assertEqual(len(groups), 3)  # noqa: PT009
+        self.assertEqual(groups[2], {  # noqa: PT009
             "id": 3,
             "name": "Deleted Group",
             "selected": True,
@@ -541,8 +556,8 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
         self._set_group_access({0: [1]})
         partitions = self._get_partition_info()
         groups = partitions[0]["groups"]
-        self.assertEqual(len(groups), 1)
-        self.assertEqual(groups[0], {
+        self.assertEqual(len(groups), 1)  # noqa: PT009
+        self.assertEqual(groups[0], {  # noqa: PT009
             "id": 1,
             "name": "Deleted Group",
             "selected": True,
@@ -551,8 +566,8 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
 
     def test_filter_by_partition_scheme(self):
         partitions = self._get_partition_info(schemes=["random"])
-        self.assertEqual(len(partitions), 1)
-        self.assertEqual(partitions[0]["scheme"], "random")
+        self.assertEqual(len(partitions), 1)  # noqa: PT009
+        self.assertEqual(partitions[0]["scheme"], "random")  # noqa: PT009
 
     def test_exclude_inactive_partitions(self):
         # Include an inactive verification scheme
@@ -581,8 +596,8 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
 
         # Expect that the inactive scheme is excluded from the results
         partitions = self._get_partition_info(schemes=["cohort", "verification"])
-        self.assertEqual(len(partitions), 1)
-        self.assertEqual(partitions[0]["scheme"], "cohort")
+        self.assertEqual(len(partitions), 1)  # noqa: PT009
+        self.assertEqual(partitions[0]["scheme"], "cohort")  # noqa: PT009
 
     def test_exclude_partitions_with_no_groups(self):
         # The cohort partition has no groups defined
@@ -607,11 +622,11 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
 
         # Expect that the partition with no groups is excluded from the results
         partitions = self._get_partition_info(schemes=["cohort", "random"])
-        self.assertEqual(len(partitions), 1)
-        self.assertEqual(partitions[0]["scheme"], "random")
+        self.assertEqual(len(partitions), 1)  # noqa: PT009
+        self.assertEqual(partitions[0]["scheme"], "random")  # noqa: PT009
 
     def _set_partitions(self, partitions):
-        """Set the user partitions of the course descriptor. """
+        """Set the user partitions of the course block. """
         self.course.user_partitions = partitions
         self.course = self.store.update_item(self.course, ModuleStoreEnum.UserID.test)
 
@@ -625,7 +640,7 @@ class GetUserPartitionInfoTest(ModuleStoreTestCase):
         return utils.get_user_partition_info(self.block, schemes=schemes)
 
 
-@patch.dict(settings.FEATURES, ENABLE_COURSE_OLX_VALIDATION=True)
+@override_settings(ENABLE_COURSE_OLX_VALIDATION=True)
 @mock.patch('olxcleaner.validate')
 @ddt.ddt
 class ValidateCourseOlxTests(CourseTestCase):
@@ -645,24 +660,24 @@ class ValidateCourseOlxTests(CourseTestCase):
         Tests that olx is validation is skipped with library locator.
         """
         library_key = LibraryLocator(org='TestOrg', library='TestProbs')
-        self.assertTrue(validate_course_olx(library_key, self.toy_course_path, self.status))
-        self.assertFalse(mock_olxcleaner_validate.called)
+        self.assertTrue(validate_course_olx(library_key, self.toy_course_path, self.status))  # noqa: PT009
+        self.assertFalse(mock_olxcleaner_validate.called)  # noqa: PT009
 
     def test_config_settings_enabled(self, mock_olxcleaner_validate):
         """
         Tests olx validation with config setting is disabled.
         """
-        with patch.dict(settings.FEATURES, ENABLE_COURSE_OLX_VALIDATION=False):
-            self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))
-            self.assertFalse(mock_olxcleaner_validate.called)
+        with override_settings(ENABLE_COURSE_OLX_VALIDATION=False):
+            self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))  # noqa: PT009
+            self.assertFalse(mock_olxcleaner_validate.called)  # noqa: PT009
 
     def test_config_settings_disabled(self, mock_olxcleaner_validate):
         """
         Tests olx validation with config setting is enabled.
         """
-        with patch.dict(settings.FEATURES, ENABLE_COURSE_OLX_VALIDATION=True):
-            self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))
-            self.assertTrue(mock_olxcleaner_validate.called)
+        with override_settings(ENABLE_COURSE_OLX_VALIDATION=True):
+            self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))  # noqa: PT009
+            self.assertTrue(mock_olxcleaner_validate.called)  # noqa: PT009
 
     def test_exception_during_validation(self, mock_olxcleaner_validate):
         """
@@ -673,8 +688,8 @@ class ValidateCourseOlxTests(CourseTestCase):
         """
         mock_olxcleaner_validate.side_effect = Exception
         with mock.patch(self.LOGGER) as patched_log:
-            self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))
-            self.assertTrue(mock_olxcleaner_validate.called)
+            self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))  # noqa: PT009
+            self.assertTrue(mock_olxcleaner_validate.called)  # noqa: PT009
             patched_log.exception.assert_called_once_with(
                 f'Course import {self.course.id}: CourseOlx could not be validated')
 
@@ -688,10 +703,10 @@ class ValidateCourseOlxTests(CourseTestCase):
             Mock(errors=[], return_error=Mock(return_value=False)),
             Mock()
         ]
-        self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))
+        self.assertTrue(validate_course_olx(self.course.id, self.toy_course_path, self.status))  # noqa: PT009
         task_artifact = UserTaskArtifact.objects.filter(status=self.status, name='OLX_VALIDATION_ERROR').first()
-        self.assertIsNone(task_artifact)
-        self.assertTrue(mock_olxcleaner_validate.called)
+        self.assertIsNone(task_artifact)  # noqa: PT009
+        self.assertTrue(mock_olxcleaner_validate.called)  # noqa: PT009
 
     @mock.patch('cms.djangoapps.contentstore.tasks.report_error_summary')
     @mock.patch('cms.djangoapps.contentstore.tasks.report_errors')
@@ -712,12 +727,12 @@ class ValidateCourseOlxTests(CourseTestCase):
         mock_report_error_summary.return_value = [f'Errors: {len(errors)}']
 
         with patch(self.LOGGER) as patched_log:
-            self.assertFalse(validate_course_olx(self.course.id, self.toy_course_path, self.status))
+            self.assertFalse(validate_course_olx(self.course.id, self.toy_course_path, self.status))  # noqa: PT009
             patched_log.error.assert_called_once_with(
                 f'Course import {self.course.id}: CourseOlx validation failed.')
 
         task_artifact = UserTaskArtifact.objects.filter(status=self.status, name='OLX_VALIDATION_ERROR').first()
-        self.assertIsNotNone(task_artifact)
+        self.assertIsNotNone(task_artifact)  # noqa: PT009
 
     def test_validate_calls_with(self, mock_olxcleaner_validate):
         """
@@ -736,3 +751,234 @@ class ValidateCourseOlxTests(CourseTestCase):
                 ignore=ignore,
                 allowed_xblocks=allowed_xblocks
             )
+
+
+class DetermineLabelTests(TestCase):
+    """Tests for xblock Title"""
+
+    def test_html_replaced_with_text_for_none(self):
+        """
+        Tests that display names for "html" xblocks are replaced with "Text" when the display name is otherwise unset.
+        """
+        display_name = None
+        block_type = "html"
+        result = utils.determine_label(display_name, block_type)
+        self.assertEqual(result, "Text")  # noqa: PT009
+
+    def test_html_replaced_with_text_for_empty(self):
+        """
+        Tests that display names for "html" xblocks are replaced with "Text" when the display name is empty.
+        """
+        display_name = ""
+        block_type = "html"
+        result = utils.determine_label(display_name, block_type)
+        self.assertEqual(result, "Text")  # noqa: PT009
+
+    def test_set_titles_not_replaced(self):
+        """
+        Tests that display names for "html" xblocks are not replaced with "Text" when the display name is set.
+        """
+        display_name = "Something"
+        block_type = "html"
+        result = utils.determine_label(display_name, block_type)
+        self.assertEqual(result, "Something")  # noqa: PT009
+
+    def test_non_html_blocks_titles_not_replaced(self):
+        """
+        Tests that display names for non-"html" xblocks are not replaced with "Text" when the display name is set.
+        """
+        display_name = None
+        block_type = "something else"
+        result = utils.determine_label(display_name, block_type)
+        self.assertEqual(result, "something else")  # noqa: PT009
+
+
+class AuthorizeStaffTestCase():  # noqa: UP039
+    """
+    Test that only staff roles can access an API endpoint.
+    """
+    @classmethod
+    def get_course_key_string(cls):
+        return 'course-v1:edX+ToyX+Toy_Course'
+
+    @classmethod
+    def get_other_course_key_string(cls):
+        return 'course-v1:edX+ToyX_Other_Course+Toy_Course'
+
+    def setUp(self):
+        super().setUp()
+        self.course_key = self.get_course_key_string()
+        self.other_course_key = self.get_other_course_key_string()
+        self.course = self.create_course_from_course_key(CourseKey.from_string(self.course_key))
+        self.other_course = self.create_course_from_course_key(CourseKey.from_string(self.other_course_key))
+        self.password = 'password'
+        self.student = UserFactory.create(username='student', password=self.password)
+        self.global_staff = GlobalStaffFactory(
+            username='global-staff', password=self.password
+        )
+        self.course_instructor = InstructorFactory(
+            username='instructor',
+            password=self.password,
+            course_key=self.course.id,
+        )
+        self.other_course_instructor = InstructorFactory(
+            username='other-course-instructor',
+            password=self.password,
+            course_key=self.other_course.id,
+        )
+
+    @classmethod
+    def create_course_from_course_key(cls, course_key):
+        return CourseFactory.create(
+            org=course_key.org,
+            course=course_key.course,
+            run=course_key.run
+        )
+
+    def make_request(self, course_id=None, data=None):
+        raise NotImplementedError
+
+    def get_url(self, course_key):
+        raise NotImplementedError
+
+    def test_student(self, expect_status=status.HTTP_403_FORBIDDEN):
+        self.client.login(username=self.student.username, password=self.password)
+        response = self.make_request()
+        assert response.status_code == expect_status
+
+    def test_instructor_in_another_course(self, expect_status=status.HTTP_403_FORBIDDEN):
+        self.client.login(
+            username=self.other_course_instructor.username,
+            password=self.password
+        )
+        response = self.make_request()
+        assert response.status_code == expect_status
+
+    def test_global_staff(self, expect_status=status.HTTP_200_OK):
+        self.client.login(username=self.global_staff.username, password=self.password)
+        response = self.make_request()
+        assert response.status_code == expect_status
+        return response
+
+    def test_course_instructor(self, expect_status=status.HTTP_200_OK):
+        self.client.login(username=self.course_instructor.username, password=self.password)
+        response = self.make_request()
+        assert response.status_code == expect_status
+        return response
+
+
+class UpdateCourseDetailsTests(ModuleStoreTestCase):
+    """
+    Unit tests for the `update_course_details` utility function.
+    """
+
+    class Request:
+        """
+        Basic Python class that mocks the required structural components of a WSGIRequest object instance, used in the
+        functions under test.
+        """
+        def __init__(self):
+            self.user = UserFactory.create(username="course_staff", password="password")
+
+    def setUp(self):
+        super().setUp()
+        self.course = CourseFactory.create()
+
+    @override_settings(ENABLE_PREREQUISITE_COURSES=False, ENTRANCE_EXAMS=False)
+    @patch("cms.djangoapps.contentstore.utils.CourseDetails.update_from_json")
+    def test_update_course_details_self_paced(self, mock_update):
+        """
+        This test ensures that expected updates and validation occur on a course update before the settings payload
+        is commit to Mongo. This tests checks that we're removing bad certificates display behavior and availability
+        settings before we process the settings updates.
+        """
+        mock_request = self.Request()
+        payload = {
+            "certificate_available_date": "2024-08-01T00:00:00Z",
+            "certificates_display_behavior": "end_with_date",
+            "self_paced": True,
+        }
+        expected_payload = {
+            "certificate_available_date": None,
+            "certificates_display_behavior": "early_no_info",
+            "self_paced": True,
+        }
+
+        utils.update_course_details(mock_request, self.course.id, payload, None)
+        mock_update.assert_called_once_with(self.course.id, expected_payload, mock_request.user)
+
+    @override_settings(ENABLE_PREREQUISITE_COURSES=False, ENTRANCE_EXAMS=False)
+    @patch("cms.djangoapps.contentstore.utils.CourseDetails.update_from_json")
+    def test_update_course_details_instructor_paced(self, mock_update):
+        """
+        This test ensures that expected updates and validation occur on a course update before the settings payload
+        is commit to Mongo. This test checks that we don't modify any of the incoming settings when a course is
+        instructor-paced.
+        """
+        mock_request = self.Request()
+        payload = {
+            "certificate_available_date": "2024-08-01T00:00:00Z",
+            "certificates_display_behavior": "end_with_date",
+            "self_paced": False,
+        }
+
+        utils.update_course_details(mock_request, self.course.id, payload, None)
+        mock_update.assert_called_once_with(self.course.id, payload, mock_request.user)
+
+
+class CourseUpdateNotificationTests(OpenEdxEventsTestMixin, ModuleStoreTestCase):
+    """
+    Unit tests for the course_update notification.
+    """
+    ENABLED_OPENEDX_EVENTS = [
+        "org.openedx.learning.course.notification.requested.v1",
+    ]
+
+    def setUp(self):
+        """
+        Setup the test environment.
+        """
+        super().setUp()
+        self.user = UserFactory()
+        self.course = CourseFactory.create(org='testorg', number='testcourse', run='testrun')
+
+    def test_course_update_notification_sent(self):
+        """
+        Test that the course_update notification is sent.
+        """
+        user = UserFactory()
+        CourseEnrollment.enroll(user=user, course_key=self.course.id)
+        assert Notification.objects.all().count() == 0
+        content = "<p>content</p><img src='' />"
+        send_course_update_notification(self.course.id, content, self.user)
+        assert Notification.objects.all().count() == 1
+        notification = Notification.objects.first()
+        assert notification.content == "<p><strong>content</strong></p>"
+
+    def test_if_content_is_plain_text(self):
+        """
+        Test that the course_update notification is sent.
+        """
+        user = UserFactory()
+        CourseEnrollment.enroll(user=user, course_key=self.course.id)
+        assert Notification.objects.all().count() == 0
+        content = "<p>content<p>Sub content</p><h1>heading</h1></p><img src='' />"
+        send_course_update_notification(self.course.id, content, self.user)
+        assert Notification.objects.all().count() == 1
+        notification = Notification.objects.first()
+        assert notification.content == "<p><strong>content Sub content heading</strong></p>"
+
+    def test_if_html_unescapes(self):
+        """
+        Tests if html unescapes when creating content of course update notification
+        """
+        user = UserFactory()
+        CourseEnrollment.enroll(user=user, course_key=self.course.id)
+        assert Notification.objects.all().count() == 0
+        content = "<p>&lt;p&gt; &amp;nbsp;&lt;/p&gt;<br />"\
+                  "&lt;p&gt;abcd&lt;/p&gt;<br />"\
+                  "&lt;p&gt;&amp;nbsp;&lt;/p&gt;<br /></p>"
+        send_course_update_notification(self.course.id, content, self.user)
+        assert Notification.objects.all().count() == 1
+        notification = Notification.objects.first()
+        assert notification.content == "<p><strong>abcd</strong></p>"

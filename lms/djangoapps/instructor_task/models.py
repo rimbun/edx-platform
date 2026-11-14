@@ -19,14 +19,16 @@ import logging
 import os.path
 from uuid import uuid4
 
-from boto.exception import BotoServerError
+from botocore.exceptions import ClientError
+from django.apps import apps
 from django.conf import settings
-from django.contrib.auth.models import User  # lint-amnesty, pylint: disable=imported-auth-user
+from django.contrib.auth.models import User  # pylint: disable=imported-auth-user
 from django.core.files.base import ContentFile
 from django.db import models, transaction
-
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
+from model_utils.models import TimeStampedModel
 from opaque_keys.edx.django.models import CourseKeyField
+from simple_history.models import HistoricalRecords
 
 from openedx.core.storage import get_storage
 
@@ -35,7 +37,9 @@ logger = logging.getLogger(__name__)
 # define custom states used by InstructorTask
 QUEUING = 'QUEUING'
 PROGRESS = 'PROGRESS'
+SCHEDULED = 'SCHEDULED'
 TASK_INPUT_LENGTH = 10000
+DJANGO_STORE_STORAGE_CLASS = 'storages.backends.s3boto3.S3Boto3Storage'
 
 
 class InstructorTask(models.Model):
@@ -65,13 +69,13 @@ class InstructorTask(models.Model):
     class Meta:
         app_label = "instructor_task"
 
-    task_type = models.CharField(max_length=50, db_index=True)
+    task_type = models.CharField(max_length=50, db_index=True)  # noqa: DJ012
     course_id = CourseKeyField(max_length=255, db_index=True)
     task_key = models.CharField(max_length=255, db_index=True)
     task_input = models.TextField()
     task_id = models.CharField(max_length=255, db_index=True)  # max_length from celery_taskmeta
-    task_state = models.CharField(max_length=50, null=True, db_index=True)  # max_length from celery_taskmeta
-    task_output = models.CharField(max_length=1024, null=True)
+    task_state = models.CharField(max_length=50, null=True, db_index=True)  # max_length from celery_taskmeta  # noqa: DJ001  # pylint: disable=line-too-long
+    task_output = models.CharField(max_length=1024, null=True)  # noqa: DJ001
     requester = models.ForeignKey(User, db_index=True, on_delete=models.CASCADE)
     created = models.DateTimeField(auto_now_add=True, null=True)
     updated = models.DateTimeField(auto_now=True)
@@ -173,11 +177,11 @@ class InstructorTask(models.Model):
                     too_long -= (len(traceback_string) + len('traceback'))
                 else:
                     # truncate the traceback:
-                    task_progress['traceback'] = traceback_string[:-(too_long + len(tag))] + tag
+                    task_progress['traceback'] = traceback_string[(too_long + len(tag)):] + tag
                     too_long = 0
             if too_long > 0:
                 # we need to shorten the message:
-                task_progress['message'] = task_progress['message'][:-(too_long + len(tag))] + tag
+                task_progress['message'] = task_progress['message'][(too_long + len(tag)):] + tag
             json_output = json.dumps(task_progress)
         return json_output
 
@@ -185,6 +189,26 @@ class InstructorTask(models.Model):
     def create_output_for_revoked():
         """Creates standard message to store in output format for revoked tasks."""
         return json.dumps({'message': 'Task revoked before running'})
+
+
+class InstructorTaskSchedule(TimeStampedModel):
+    """
+    A database model to store information about _when_ to execute a scheduled background task.
+
+    The primary use case is to allow instructors to schedule their email messages (authored with the bulk course email
+    tool) to be sent at a later date and time.
+
+    .. no_pii:
+    """
+    class Meta:
+        app_label = "instructor_task"
+
+    task = models.OneToOneField(InstructorTask, on_delete=models.DO_NOTHING)
+    task_args = models.TextField(null=False, blank=False)
+    task_due = models.DateTimeField(null=False)
+
+    if 'instructor_task' in apps.app_configs:
+        history = HistoricalRecords()
 
 
 class ReportStore:
@@ -206,9 +230,9 @@ class ReportStore:
         storage_type = config.get('STORAGE_TYPE', '').lower()
         if storage_type == 's3':
             return DjangoStorageReportStore(
-                storage_class='storages.backends.s3boto.S3BotoStorage',
+                storage_class=DJANGO_STORE_STORAGE_CLASS,
                 storage_kwargs={
-                    'bucket': config['BUCKET'],
+                    'bucket_name': config['BUCKET'],
                     'location': config['ROOT_PATH'],
                     'custom_domain': config.get("CUSTOM_DOMAIN", None),
                     'querystring_expire': 300,
@@ -241,17 +265,18 @@ class DjangoStorageReportStore(ReportStore):
     def __init__(self, storage_class=None, storage_kwargs=None):
         if storage_kwargs is None:
             storage_kwargs = {}
+
         self.storage = get_storage(storage_class, **storage_kwargs)
 
     @classmethod
     def from_config(cls, config_name):
         """
-        By default, the default file storage specified by the `DEFAULT_FILE_STORAGE`
+        By default, the default file storage specified by the `STORAGES['default']`
         setting will be used. To configure the storage used, add a dict in
         settings with the following fields::
 
             STORAGE_CLASS : The import path of the storage class to use. If
-                            not set, the DEFAULT_FILE_STORAGE setting will be used.
+                            not set, the STORAGES['default']['BACKEND'] setting will be used.
             STORAGE_KWARGS : An optional dict of kwargs to pass to the storage
                              constructor. This can be used to specify a
                              different S3 bucket or root path, for example.
@@ -305,14 +330,14 @@ class DjangoStorageReportStore(ReportStore):
             # Django's FileSystemStorage fails with an OSError if the course
             # dir does not exist; other storage types return an empty list.
             return []
-        except BotoServerError as ex:
+        except ClientError as ex:
             logger.error(
                 'Fetching files failed for course: %s, status: %s, reason: %s',
                 course_id,
-                ex.status,
-                ex.reason
+                ex.response.get('Error'), ex.response.get('Error', {}).get('Message')
             )
             return []
+
         files = [(filename, os.path.join(course_dir, filename)) for filename in filenames]
         files.sort(key=lambda f: self.storage.get_modified_time(f[1]), reverse=True)
         return [

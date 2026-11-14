@@ -3,22 +3,27 @@ Tests for Blocks api.py
 """
 
 
-from itertools import product
 from unittest.mock import patch
 
 import ddt
 from django.test.client import RequestFactory
-from edx_toggles.toggles.testutils import override_waffle_switch
 
 from common.djangoapps.student.tests.factories import UserFactory
 from openedx.core.djangoapps.content.block_structure.api import clear_course_from_cache
-from openedx.core.djangoapps.content.block_structure.config import STORAGE_BACKING_FOR_CACHE
-from xmodule.modulestore import ModuleStoreEnum
-from xmodule.modulestore.tests.django_utils import SharedModuleStoreTestCase
-from xmodule.modulestore.tests.factories import SampleCourseFactory, check_mongo_calls
-from xmodule.modulestore.tests.sample_courses import BlockInfo
+from openedx.core.djangolib.testing.utils import AUTHZ_TABLES
+from xmodule.modulestore import ModuleStoreEnum  # pylint: disable=wrong-import-order
+from xmodule.modulestore.tests.django_utils import (
+    SharedModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import (  # pylint: disable=wrong-import-order
+    SampleCourseFactory,
+    check_mongo_calls,
+)
+from xmodule.modulestore.tests.sample_courses import BlockInfo  # pylint: disable=wrong-import-order
 
 from ..api import get_blocks
+
+QUERY_COUNT_TABLE_IGNORELIST = AUTHZ_TABLES
 
 
 class TestGetBlocks(SharedModuleStoreTestCase):
@@ -53,7 +58,9 @@ class TestGetBlocks(SharedModuleStoreTestCase):
 
     def test_no_user(self):
         blocks = get_blocks(self.request, self.course.location)
-        assert str(self.html_block.location) in blocks['blocks']
+        assert str(self.html_block.location) not in blocks['blocks']
+        vertical_block = self.store.get_item(self.course.id.make_usage_key('vertical', 'vertical_x1a'))
+        assert str(vertical_block.location) in blocks['blocks']
 
     def test_access_before_api_transformer_order(self):
         """
@@ -142,7 +149,7 @@ class TestGetBlocksVideoUrls(SharedModuleStoreTestCase):
         self.request = RequestFactory().get("/dummy")
         self.request.user = self.user
 
-    @patch('xmodule.video_module.VideoBlock.student_view_data')
+    @patch('xmodule.video_block.VideoBlock.student_view_data')
     def test_video_urls_rewrite(self, video_data_patch):
         """
         Verify the video blocks returned have their URL re-written for
@@ -197,7 +204,7 @@ class TestGetBlocksQueryCountsBase(SharedModuleStoreTestCase):
         get_blocks on the given course.
         """
         with check_mongo_calls(expected_mongo_queries):
-            with self.assertNumQueries(expected_sql_queries):
+            with self.assertNumQueries(expected_sql_queries, table_ignorelist=QUERY_COUNT_TABLE_IGNORELIST):
                 get_blocks(self.request, course.location, self.user)
 
 
@@ -207,42 +214,25 @@ class TestGetBlocksQueryCounts(TestGetBlocksQueryCountsBase):
     Tests query counts for the get_blocks function.
     """
 
-    @ddt.data(
-        *product(
-            (ModuleStoreEnum.Type.mongo, ModuleStoreEnum.Type.split),
-            (True, False),
+    @ddt.data(ModuleStoreEnum.Type.split)
+    def test_query_counts_cached(self, store_type):
+        course = self._create_course(store_type)
+        self._get_blocks(
+            course,
+            expected_mongo_queries=0,
+            expected_sql_queries=16,
         )
-    )
-    @ddt.unpack
-    def test_query_counts_cached(self, store_type, with_storage_backing):
-        with override_waffle_switch(STORAGE_BACKING_FOR_CACHE, active=with_storage_backing):
-            course = self._create_course(store_type)
-            self._get_blocks(
-                course,
-                expected_mongo_queries=0,
-                expected_sql_queries=13 if with_storage_backing else 12,
-            )
 
     @ddt.data(
-        *product(
-            ((ModuleStoreEnum.Type.mongo, 5), (ModuleStoreEnum.Type.split, 3)),
-            (True, False),
-        )
+        (ModuleStoreEnum.Type.split, 2, 26),
     )
     @ddt.unpack
-    def test_query_counts_uncached(self, store_type_tuple, with_storage_backing):
-        store_type, expected_mongo_queries = store_type_tuple
-        with override_waffle_switch(STORAGE_BACKING_FOR_CACHE, active=with_storage_backing):
-            course = self._create_course(store_type)
-            clear_course_from_cache(course.id)
+    def test_query_counts_uncached(self, store_type, expected_mongo_queries, num_sql_queries):
+        course = self._create_course(store_type)
+        clear_course_from_cache(course.id)
 
-            if with_storage_backing:
-                num_sql_queries = 23
-            else:
-                num_sql_queries = 13
-
-            self._get_blocks(
-                course,
-                expected_mongo_queries,
-                expected_sql_queries=num_sql_queries,
-            )
+        self._get_blocks(
+            course,
+            expected_mongo_queries,
+            expected_sql_queries=num_sql_queries,
+        )

@@ -1,7 +1,7 @@
 Status
 ======
 
-Accepted
+Provisional
 
 
 Context
@@ -47,7 +47,7 @@ more explicit, we don't want to take on that work now as it may increase
 complexity.
 
 
-.. _OEP-45: https://github.com/edx/open-edx-proposals/pull/143/files
+.. _OEP-45: https://github.com/openedx/open-edx-proposals/pull/143/files
 
 Consequences
 ============
@@ -59,7 +59,6 @@ and for all environments to use __init__.py to load their settings.
 The following files should be obviated by this change:
 
 * bok_choy_docker.py
-* bok_choy.py
 * devstack_docker.py
 * devstack_optimized.py
 * devstack.py
@@ -94,4 +93,4 @@ Cons:
   the public repository.
 * This wouldn't solve the problem where we would still try to "inherit" from other settings files and make it harder to read the current value of any given setting.
 
-This alternative gives us a lot more power but it's power that we don't actually need.  Building limitiations into what settings can be helps us keep them simple and understandable.
+This alternative gives us a lot more power but it's power that we don't actually need. Building limitations into what settings can be helps us keep them simple and understandable.

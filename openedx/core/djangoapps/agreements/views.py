@@ -2,22 +2,40 @@
 Views served by the Agreements app
 """
 
-from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
-from rest_framework import status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.authentication import SessionAuthentication
-from rest_framework.permissions import IsAuthenticated
+from django.conf import settings
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from opaque_keys.edx.keys import CourseKey
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from common.djangoapps.student import auth
 from common.djangoapps.student.roles import CourseStaffRole
 from openedx.core.djangoapps.agreements.api import (
     create_integrity_signature,
+    create_lti_pii_signature,
+    create_user_agreement_record,
     get_integrity_signature,
+    get_latest_user_agreement_record,
 )
-from openedx.core.djangoapps.agreements.serializers import IntegritySignatureSerializer
-from openedx.core.djangoapps.agreements.toggles import is_integrity_signature_enabled
+from openedx.core.djangoapps.agreements.models import UserAgreement
+from openedx.core.djangoapps.agreements.serializers import (
+    IntegritySignatureSerializer,
+    LTIPIISignatureSerializer,
+    UserAgreementRecordSerializer,
+    UserAgreementSerializer,
+)
+from openedx.core.lib.api.view_utils import view_auth_classes
+
+AGREEMENT_TYPE_PATH_PARAMETER = OpenApiParameter(
+    "agreement_type",
+    OpenApiTypes.STR,
+    OpenApiParameter.PATH,
+    description="Agreement ID/Type",
+)
 
 
 def is_user_course_or_global_staff(user, course_id):
@@ -33,7 +51,6 @@ class AuthenticatedAPIView(APIView):
     """
     Authenticated API View.
     """
-    authentication_classes = (SessionAuthentication, JwtAuthentication)
     permission_classes = (IsAuthenticated,)
 
 
@@ -67,8 +84,7 @@ class IntegritySignatureView(AuthenticatedAPIView):
         If a username is not given, it should default to the requesting user (or masqueraded user).
         Only staff should be able to access this endpoint for other users.
         """
-        # check that waffle flag is enabled
-        if not is_integrity_signature_enabled(CourseKey.from_string(course_id)):
+        if not settings.ENABLE_INTEGRITY_SIGNATURE:
             return Response(
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -111,8 +127,7 @@ class IntegritySignatureView(AuthenticatedAPIView):
                 created_at: "2021-04-23T18:25:43.511Z"
             }
         """
-        # check that waffle flag is enabled
-        if not is_integrity_signature_enabled(CourseKey.from_string(course_id)):
+        if not settings.ENABLE_INTEGRITY_SIGNATURE:
             return Response(
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -121,3 +136,159 @@ class IntegritySignatureView(AuthenticatedAPIView):
         signature = create_integrity_signature(username, course_id)
         serializer = IntegritySignatureSerializer(signature)
         return Response(serializer.data)
+
+
+class LTIPIISignatureView(AuthenticatedAPIView):
+    """
+    Endpoint for a LTI PII Signature
+    /lti_pii_signature/{course_id}
+
+    HTTP POST
+        * If an LTI PII signature does not exist for the user + course, creates one and
+          returns it. If one does exist, returns the existing signature.
+    """
+
+    def post(self, request, course_id):
+        """
+        Create an LTI PII signature for the requesting user and course. If a signature
+        already exists, returns the existing signature instead of creating a new one.
+
+        /api/agreements/v1/lti_pii_signature/{course_id}
+
+        Example response:
+            {
+                username: "janedoe",
+                course_id: "org.2/course_2/Run_2",
+                created_at: "2021-04-23T18:25:43.511Z"
+            }
+        """
+        if not settings.ENABLE_LTI_PII_ACKNOWLEDGEMENT:
+            return Response(
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = LTIPIISignatureSerializer(data=request.data)
+        statusStr = ""
+        if serializer.is_valid():
+            username = request.user.username
+            lti_tools = request.data.get("lti_tools")
+            signature = create_lti_pii_signature(username, course_id, lti_tools)
+            serializer = LTIPIISignatureSerializer(signature)
+            statusStr = status.HTTP_200_OK
+        else:
+            statusStr = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return Response(data=serializer.data, status=statusStr)
+
+
+@view_auth_classes(is_authenticated=True)
+class UserAgreementRecordsView(APIView):
+    """
+    Endpoint for the user agreement records API.
+    """
+
+    @extend_schema(
+        parameters=[AGREEMENT_TYPE_PATH_PARAMETER],
+        responses={
+            200: UserAgreementRecordSerializer,
+            400: OpenApiResponse(description="Bad Request"),
+            404: OpenApiResponse(description="Not Found"),
+        },
+    )
+    def get(self, request, agreement_type):
+        """
+        Get a user's acknowledgement record for this agreement type.
+        """
+        record = get_latest_user_agreement_record(request.user, agreement_type)
+        serializer = UserAgreementRecordSerializer(record)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        parameters=[AGREEMENT_TYPE_PATH_PARAMETER],
+        responses={
+            200: UserAgreementRecordSerializer,
+            400: OpenApiResponse(description="Bad Request"),
+        },
+    )
+    def post(self, request, agreement_type):
+        """
+        Marks a user's acknowledgement of this agreement type.
+        """
+        record = create_user_agreement_record(request.user, agreement_type)
+        serializer = UserAgreementRecordSerializer(record)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@view_auth_classes(is_authenticated=True)
+class UserAgreementsViewSet(viewsets.GenericViewSet):
+    """
+    Endpoint for the user agreements API.
+    """
+
+    queryset = UserAgreement.objects.all()
+    lookup_field = "type"
+    lookup_url_kwarg = "agreement_type"
+
+    @extend_schema(
+        parameters=[AGREEMENT_TYPE_PATH_PARAMETER],
+        responses={
+            200: UserAgreementSerializer,
+            400: OpenApiResponse(description="Bad Request"),
+            404: OpenApiResponse(description="Not Found"),
+        },
+    )
+    def retrieve(self, request, agreement_type=None, **kwargs):
+        """
+        Get the user agreement for this agreement type.
+        """
+        try:
+            agreement = UserAgreement.objects.get(type=agreement_type)
+        except UserAgreement.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        serializer = UserAgreementSerializer(agreement)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        parameters=[AGREEMENT_TYPE_PATH_PARAMETER],
+        responses={
+            200: UserAgreementSerializer,
+            400: OpenApiResponse(description="Bad Request"),
+            404: OpenApiResponse(description="Not Found"),
+        },
+    )
+    @action(methods=["get"], detail=True)
+    def text(self, request, agreement_type=None):
+        """
+        Get the text of a user agreement by its type.
+        """
+        try:
+            agreement = UserAgreement.objects.get(type=agreement_type)
+        except UserAgreement.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        return Response(agreement.text, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                "agreement_type",
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
+                required=False,
+                many=True,
+                description="Agreement ID/Type",
+            ),
+        ],
+        responses={
+            200: UserAgreementSerializer,
+            400: OpenApiResponse(description="Bad Request"),
+        },
+    )
+    def list(self, request):
+        """
+        Get all user agreements for this agreement type.
+        """
+        types = request.query_params.getlist("agreement_type", None)
+        agreements = UserAgreement.objects.all()
+        if types:
+            agreements = agreements.filter(type__in=types)
+        serializer = UserAgreementSerializer(agreements, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)

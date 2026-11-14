@@ -2,14 +2,16 @@
 Tests for manager.py
 """
 
-import pytest
+from unittest.mock import MagicMock
+
 import ddt
+import pytest
 from django.test import TestCase
-from edx_toggles.toggles.testutils import override_waffle_switch
+
+from xmodule.modulestore import ModuleStoreEnum
 
 from ..block_structure import BlockStructureBlockData
-from ..config import RAISE_ERROR_WHEN_NOT_FOUND, STORAGE_BACKING_FOR_CACHE
-from ..exceptions import BlockStructureNotFound, UsageKeyNotInBlockStructure
+from ..exceptions import UsageKeyNotInBlockStructure
 from ..manager import BlockStructureManager
 from ..transformers import BlockStructureTransformers
 from .helpers import (
@@ -18,7 +20,7 @@ from .helpers import (
     MockModulestoreFactory,
     MockTransformer,
     UsageKeyFactoryMixin,
-    mock_registered_transformers
+    mock_registered_transformers,
 )
 
 
@@ -177,26 +179,18 @@ class TestBlockStructureManager(UsageKeyFactoryMixin, ChildrenMapTestMixin, Test
         self.collect_and_verify(expect_modulestore_called=False, expect_cache_updated=False)
         assert TestTransformer1.collect_call_count == 1
 
-    def test_get_collected_error_raised(self):
-        with override_waffle_switch(RAISE_ERROR_WHEN_NOT_FOUND, active=True):
-            with mock_registered_transformers(self.registered_transformers):
-                with pytest.raises(BlockStructureNotFound):
-                    self.bs_manager.get_collected()
+    def test_update_collected_if_needed(self):
+        with mock_registered_transformers(self.registered_transformers):
+            assert TestTransformer1.collect_call_count == 0
 
-    @ddt.data(True, False)
-    def test_update_collected_if_needed(self, with_storage_backing):
-        with override_waffle_switch(STORAGE_BACKING_FOR_CACHE, active=with_storage_backing):
-            with mock_registered_transformers(self.registered_transformers):
-                assert TestTransformer1.collect_call_count == 0
+            self.bs_manager.update_collected_if_needed()
+            assert TestTransformer1.collect_call_count == 1
 
-                self.bs_manager.update_collected_if_needed()
-                assert TestTransformer1.collect_call_count == 1
+            self.bs_manager.update_collected_if_needed()
+            expected_count = 1
+            assert TestTransformer1.collect_call_count == expected_count
 
-                self.bs_manager.update_collected_if_needed()
-                expected_count = 1 if with_storage_backing else 2
-                assert TestTransformer1.collect_call_count == expected_count
-
-                self.collect_and_verify(expect_modulestore_called=False, expect_cache_updated=False)
+            self.collect_and_verify(expect_modulestore_called=False, expect_cache_updated=False)
 
     def test_get_collected_transformer_version(self):
         self.collect_and_verify(expect_modulestore_called=True, expect_cache_updated=True)
@@ -218,11 +212,45 @@ class TestBlockStructureManager(UsageKeyFactoryMixin, ChildrenMapTestMixin, Test
     def test_get_collected_structure_version(self):
         self.collect_and_verify(expect_modulestore_called=True, expect_cache_updated=True)
         BlockStructureBlockData.VERSION += 1
-        self.collect_and_verify(expect_modulestore_called=True, expect_cache_updated=True)
-        assert TestTransformer1.collect_call_count == 2
+        self.collect_and_verify(expect_modulestore_called=False, expect_cache_updated=False)
+        assert TestTransformer1.collect_call_count == 1
 
     def test_clear(self):
         self.collect_and_verify(expect_modulestore_called=True, expect_cache_updated=True)
         self.bs_manager.clear()
         self.collect_and_verify(expect_modulestore_called=True, expect_cache_updated=True)
         assert TestTransformer1.collect_call_count == 2
+
+    def test_update_collected_branch_context_integration(self):
+        """
+        Integration test to verify the published-only branch context works end-to-end.
+        """
+        # Track branch setting calls on our mock modulestore
+        attr_name = 'branch_setting'
+        original_branch_setting = getattr(self.modulestore, attr_name, None)
+        branch_setting_calls = []
+
+        def mock_branch_setting(branch, course_key):
+            branch_setting_calls.append((branch, course_key))
+            # Return a proper context manager that does nothing
+            return MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
+
+        # Add the branch_setting method to our mock modulestore
+        setattr(self.modulestore, attr_name, mock_branch_setting)
+
+        try:
+            with mock_registered_transformers(self.registered_transformers):
+                self.bs_manager.get_collected()
+
+            # Verify branch_setting was called with the correct parameters
+            self.assertEqual(len(branch_setting_calls), 1)  # noqa: PT009
+            branch, course_key = branch_setting_calls[0]
+            self.assertEqual(branch, ModuleStoreEnum.Branch.published_only)  # noqa: PT009
+            self.assertEqual(course_key, self.block_key_factory(0).course_key)  # noqa: PT009
+
+        finally:
+            # Restore original method if it existed
+            if original_branch_setting is not None:
+                setattr(self.modulestore, attr_name, original_branch_setting)
+            elif hasattr(self.modulestore, attr_name):
+                delattr(self.modulestore, attr_name)

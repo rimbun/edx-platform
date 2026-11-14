@@ -4,25 +4,22 @@ Tests for the certificates models.
 
 
 from datetime import datetime, timedelta
-from unittest.mock import patch
 
 from ddt import data, ddt, unpack
-from django.conf import settings
+from django.test.utils import override_settings
 from milestones.tests.utils import MilestonesTestCaseMixin
 from pytz import UTC
 
 from common.djangoapps.student.models import CourseEnrollment
-from common.djangoapps.student.tests.factories import CourseEnrollmentFactory, UserFactory
+from common.djangoapps.student.tests.factories import UserFactory
 from common.djangoapps.util.milestones_helpers import milestones_achieved_by_user, set_prerequisite_courses
-from lms.djangoapps.badges.tests.factories import CourseCompleteImageConfigurationFactory
 from lms.djangoapps.certificates.api import certificate_info_for_user, certificate_status_for_student
-from lms.djangoapps.certificates.models import (
-    CertificateStatuses,
-    GeneratedCertificate,
-)
+from lms.djangoapps.certificates.models import CertificateStatuses, GeneratedCertificate
 from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFactory
-from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
-from xmodule.modulestore.tests.factories import CourseFactory
+from xmodule.modulestore.tests.django_utils import (
+    ModuleStoreTestCase,  # pylint: disable=wrong-import-order
+)
+from xmodule.modulestore.tests.factories import CourseFactory  # pylint: disable=wrong-import-order
 
 
 @ddt
@@ -173,17 +170,17 @@ class CertificatesModelTest(ModuleStoreTestCase, MilestonesTestCaseMixin):
         )
 
         # User with no certs should return an empty set.
-        self.assertSetEqual(
+        self.assertSetEqual(  # noqa: PT009
             GeneratedCertificate.course_ids_with_certs_for_user(student_no_certs),
             set()
         )
         # User with certs should return a set with the two course_ids
-        self.assertSetEqual(
+        self.assertSetEqual(  # noqa: PT009
             GeneratedCertificate.course_ids_with_certs_for_user(student_with_certs),
             {course_1.id, course_2.id}
         )
 
-    @patch.dict(settings.FEATURES, {'ENABLE_PREREQUISITE_COURSES': True})
+    @override_settings(ENABLE_PREREQUISITE_COURSES=True)
     def test_course_milestone_collected(self):
         student = UserFactory()
         course = CourseFactory.create(org='edx', number='998', display_name='Test Course')
@@ -204,20 +201,3 @@ class CertificatesModelTest(ModuleStoreTestCase, MilestonesTestCaseMixin):
         completed_milestones = milestones_achieved_by_user(student, str(pre_requisite_course.id))
         assert len(completed_milestones) == 1
         assert completed_milestones[0]['namespace'] == str(pre_requisite_course.id)
-
-    @patch.dict(settings.FEATURES, {'ENABLE_OPENBADGES': True})
-    @patch('lms.djangoapps.badges.backends.badgr.BadgrBackend', spec=True)
-    def test_badge_callback(self, handler):
-        student = UserFactory()
-        course = CourseFactory.create(org='edx', number='998', display_name='Test Course', issue_badges=True)
-        CourseCompleteImageConfigurationFactory()
-        CourseEnrollmentFactory(user=student, course_id=course.location.course_key, mode='honor')
-        cert = GeneratedCertificateFactory.create(
-            user=student,
-            course_id=course.id,
-            status=CertificateStatuses.generating,
-            mode='verified'
-        )
-        cert.status = CertificateStatuses.downloadable
-        cert.save()
-        assert handler.return_value.award.called

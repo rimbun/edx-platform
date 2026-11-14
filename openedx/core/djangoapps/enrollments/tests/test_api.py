@@ -2,27 +2,26 @@
 Tests for student enrollment.
 """
 
-
-import unittest
 from unittest.mock import Mock, patch
 
 import ddt
 import pytest
-from django.conf import settings
 from django.test.utils import override_settings
 
 from common.djangoapps.course_modes.models import CourseMode
 from openedx.core.djangoapps.enrollments import api
 from openedx.core.djangoapps.enrollments.errors import (
-    CourseModeNotFoundError, EnrollmentApiLoadError, EnrollmentNotFoundError,
+    CourseModeNotFoundError,
+    EnrollmentApiLoadError,
+    EnrollmentNotFoundError,
 )
 from openedx.core.djangoapps.enrollments.tests import fake_data_api
-from openedx.core.djangolib.testing.utils import CacheIsolationTestCase
+from openedx.core.djangolib.testing.utils import CacheIsolationTestCase, skip_unless_lms
 
 
 @ddt.ddt
 @override_settings(ENROLLMENT_DATA_API="openedx.core.djangoapps.enrollments.tests.fake_data_api")
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 class EnrollmentTest(CacheIsolationTestCase):
     """
     Test student enrollment, especially with different course modes.
@@ -162,6 +161,31 @@ class EnrollmentTest(CacheIsolationTestCase):
             api.add_enrollment(self.USERNAME, enrollment['course_id'], enrollment['mode'])
         result = api.get_enrollments(self.USERNAME)
         assert len(enrollments) == len(result)
+        for result_enrollment in result:
+            assert result_enrollment['course']['course_id'] in [enrollment['course_id'] for enrollment in enrollments]
+
+    @ddt.data(
+        # Simple test of honor and verified.
+        ([
+            {'course_id': 'the/first/course', 'course_modes': [], 'mode': 'honor'},
+            {'course_id': 'the/second/course', 'course_modes': ['honor', 'verified'], 'mode': 'verified'}
+        ], 1),
+
+        # No enrollments
+        ([], 0),
+
+        # One Enrollment
+        ([
+            {'course_id': 'the/third/course', 'course_modes': ['honor', 'verified', 'audit'], 'mode': 'audit'}
+        ], 0),
+    )
+    @ddt.unpack
+    def test_get_verified_enrollments(self, enrollments, num_verified_enrollments):
+        for enrollment in enrollments:
+            fake_data_api.add_course(enrollment['course_id'], course_modes=enrollment['course_modes'])
+            api.add_enrollment(self.USERNAME, enrollment['course_id'], enrollment['mode'])
+        result = api.get_verified_enrollments(self.USERNAME)
+        assert num_verified_enrollments == len(result)
         for result_enrollment in result:
             assert result_enrollment['course']['course_id'] in [enrollment['course_id'] for enrollment in enrollments]
 

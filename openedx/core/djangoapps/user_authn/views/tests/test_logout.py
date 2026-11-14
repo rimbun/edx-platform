@@ -2,21 +2,23 @@
 Tests for logout
 """
 
-
-import unittest
 import urllib
 from unittest import mock
+
 import ddt
+import nh3
 from django.conf import settings
 from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 
-from openedx.core.djangoapps.oauth_dispatch.tests.factories import ApplicationFactory
 from common.djangoapps.student.tests.factories import UserFactory
+from common.test.utils import assert_dict_contains_subset
+from openedx.core.djangoapps.oauth_dispatch.tests.factories import ApplicationFactory
+from openedx.core.djangolib.testing.utils import skip_unless_lms
 
 
-@unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', 'Test only valid in lms')
+@skip_unless_lms
 @ddt.ddt
 class LogoutTests(TestCase):
     """ Tests for the logout functionality. """
@@ -76,17 +78,19 @@ class LogoutTests(TestCase):
         expected = {
             'target': urllib.parse.unquote(redirect_url),
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     def test_no_redirect_supplied(self):
         response = self.client.get(reverse('logout'), HTTP_HOST='testserver')
         expected = {
             'target': '/',
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     @ddt.data(
         ('https://www.amazon.org', 'edx.org'),
+        ('/%09/google.com/', 'edx.org'),
+        ('java%0D%0Ascript%0D%0A%3aalert(document.domain)', 'edx.org'),
     )
     @ddt.unpack
     def test_logout_redirect_failure(self, redirect_url, host):
@@ -98,7 +102,7 @@ class LogoutTests(TestCase):
         expected = {
             'target': '/',
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     def test_client_logout(self):
         """ Verify the context includes a list of the logout URIs of the authenticated OpenID Connect clients.
@@ -111,7 +115,7 @@ class LogoutTests(TestCase):
             'logout_uris': [],
             'target': '/',
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     @mock.patch(
         'django.conf.settings.IDA_LOGOUT_URI_LIST',
@@ -136,7 +140,7 @@ class LogoutTests(TestCase):
             'logout_uris': expected_logout_uris,
             'target': '/',
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     @mock.patch(
         'django.conf.settings.IDA_LOGOUT_URI_LIST',
@@ -159,7 +163,7 @@ class LogoutTests(TestCase):
             'logout_uris': expected_logout_uris,
             'target': '/',
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     def test_filter_referring_service(self):
         """ Verify that, if the user is directed to the logout page from a service, that service's logout URL
@@ -172,7 +176,7 @@ class LogoutTests(TestCase):
             'target': '/',
             'show_tpa_logout_link': False,
         }
-        self.assertDictContainsSubset(expected, response.context_data)
+        assert_dict_contains_subset(self, expected, response.context_data)
 
     def test_learner_portal_logout_having_idp_logout_url(self):
         """
@@ -192,4 +196,95 @@ class LogoutTests(TestCase):
                 'tpa_logout_url': idp_logout_url,
                 'show_tpa_logout_link': True,
             }
-            self.assertDictContainsSubset(expected, response.context_data)
+            assert_dict_contains_subset(self, expected, response.context_data)
+
+    @mock.patch('django.conf.settings.TPA_AUTOMATIC_LOGOUT_ENABLED', True)
+    def test_automatic_tpa_logout_url_redirect(self):
+        """
+        Test user automatically redirected to tpa logout_url
+        when TPA_AUTOMATIC_LOGOUT is set to True.
+        """
+        idp_logout_url = 'http://mock-idp.com/logout'
+        client = self._create_oauth_client()
+
+        with mock.patch(
+            'openedx.core.djangoapps.user_authn.views.logout.tpa_pipeline.get_idp_logout_url_from_running_pipeline'
+        ) as mock_idp_logout_url:
+            mock_idp_logout_url.return_value = idp_logout_url
+            self._authenticate_with_oauth(client)
+            response = self.client.get(reverse('logout'))
+            expected = {
+                'target': idp_logout_url,
+            }
+            assert_dict_contains_subset(self, expected, response.context_data)
+
+    @mock.patch('django.conf.settings.TPA_AUTOMATIC_LOGOUT_ENABLED', True)
+    def test_no_automatic_tpa_logout_without_logout_url(self):
+        """
+        Test user is NOT automatically redirected when tpa logout_url is not set
+        even if TPA_AUTOMATIC_LOGOUT is set to True.
+        """
+        client = self._create_oauth_client()
+        self._assert_session_logged_out(client)
+
+    @ddt.data(
+        ('%22%3E%3Cscript%3Ealert(%27xss%27)%3C/script%3E', 'edx.org'),
+    )
+    @ddt.unpack
+    def test_logout_redirect_failure_with_xss_vulnerability(self, redirect_url, host):
+        """
+        Verify that it will block the XSS attack on edX’s LMS logout page
+        """
+        url = '{logout_path}?redirect_url={redirect_url}'.format(
+            logout_path=reverse('logout'),
+            redirect_url=redirect_url
+        )
+        response = self.client.get(url, HTTP_HOST=host)
+        expected = {
+            'target': nh3.clean(urllib.parse.unquote(redirect_url)),
+        }
+        assert_dict_contains_subset(self, expected, response.context_data)
+
+
+@skip_unless_lms
+@ddt.ddt
+class EnterpriseLogoutTests(TestCase):
+    """
+    Tests for LogoutView._is_enterprise_target.
+
+    Relocated here from ``openedx/features/enterprise_support/tests/`` when that package
+    moved to edx-enterprise (ENT-11576). The behaviour is the LMS's own: the target is
+    matched by a regex over the redirect path, and ``logout.html`` branches on the
+    result. Nothing in this path consults the enterprise app, so the original's enterprise
+    API mocks, customer fixtures and learner factory are not reproduced.
+    """
+
+    def setUp(self):
+        """ Create a user, then log in. """
+        super().setUp()
+        self.user = UserFactory()
+        self.client.login(username=self.user.username, password='test')
+
+    @ddt.data(
+        ('https%3A%2F%2Ftest.edx.org%2Fcourses', False),
+        ('/courses/course-v1:ARTS+D1+2018_T/course/', False),
+        ('invalid-url', False),
+        ('/enterprise/c5dad9a7-741c-4841-868f-850aca3ff848/course/Microsoft+DAT206x/enroll/', True),
+        ('%2Fenterprise%2Fc5dad9a7-741c-4841-868f-850aca3ff848%2Fcourse%2FMicrosoft%2BDAT206x%2Fenroll%2F', True),
+        ('/enterprise/handle_consent_enrollment/efd91463-dc40-4882-aeb9-38202131e7b2/course', True),
+        ('%2Fenterprise%2Fhandle_consent_enrollment%2Fefd91463-dc40-4882-aeb9-38202131e7b2%2Fcourse', True),
+    )
+    @ddt.unpack
+    def test_logout_enterprise_target(self, redirect_url, enterprise_target):
+        url = '{logout_path}?redirect_url={redirect_url}'.format(
+            logout_path=reverse('logout'),
+            redirect_url=redirect_url
+        )
+        response = self.client.get(url, HTTP_HOST='testserver')
+        expected = {
+            'enterprise_target': enterprise_target,
+        }
+        assert_dict_contains_subset(self, expected, response.context_data)
+
+        if enterprise_target:
+            self.assertContains(response, 'We are signing you in.')
